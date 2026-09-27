@@ -13,8 +13,7 @@ import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { Platform } from 'react-native';
 import { useEffect } from 'react';
 import * as DevClient from 'expo-dev-client';
-import { HeroUINativeProvider } from 'heroui-native';
-import { Uniwind } from 'uniwind';
+import { HeroUINativeProvider, useThemeColor } from 'heroui-native';
 import {
   ErrorBoundary as ExpoErrorBoundary,
   type ErrorBoundaryProps,
@@ -26,6 +25,7 @@ import { initPostHog } from '@/lib/posthog';
 import { registerServiceWorker } from '@/lib/registerServiceWorker';
 import { reportErrorToParent } from '@/lib/reportPreviewError';
 import { InstallPrompt } from '@/components/InstallPrompt';
+import { AppProvider } from '@/lib/app-context';
 
 /**
  * Custom ErrorBoundary that reports React render errors to the parent window (Bilt preview iframe)
@@ -43,8 +43,28 @@ function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
 
 export { ErrorBoundary };
 
-// Starter is light-only by default. Remove this when implementing requested dark mode.
-Uniwind.setTheme('light');
+function AppStack() {
+  const [background, foreground] = useThemeColor(['background', 'foreground']);
+  return (
+    <Stack
+      screenOptions={{
+        headerShown: false,
+        contentStyle: { backgroundColor: background },
+        headerStyle: { backgroundColor: background },
+        headerTintColor: foreground,
+        headerShadowVisible: false,
+      }}
+    >
+      <Stack.Screen name="login" />
+      <Stack.Screen name="(tabs)" />
+      <Stack.Screen name="products" options={{ headerShown: true, title: 'Productos' }} />
+      <Stack.Screen name="movements" options={{ headerShown: true, title: 'Movimientos' }} />
+      <Stack.Screen name="users" options={{ headerShown: true, title: 'Usuarios' }} />
+      <Stack.Screen name="exports" options={{ headerShown: true, title: 'Exportaciones' }} />
+      <Stack.Screen name="settings" options={{ headerShown: true, title: 'Configuración' }} />
+    </Stack>
+  );
+}
 
 void SplashScreen.preventAutoHideAsync();
 
@@ -141,10 +161,10 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <HeroUINativeProvider>
-        <Stack>
-          <Stack.Screen name="(tabs)" options={{ title: 'Habits', headerShown: false }} />
-        </Stack>
-        <InstallPrompt />
+        <AppProvider>
+          <AppStack />
+          <InstallPrompt />
+        </AppProvider>
       </HeroUINativeProvider>
     </GestureHandlerRootView>
   );
