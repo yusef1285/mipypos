@@ -51,7 +51,7 @@ function isIosSafari(): boolean {
   return isIos && /Safari/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua);
 }
 
-const TAB_BAR_HEIGHT = 49;
+const TAB_BAR_HEIGHT = 64;
 
 export function InstallPrompt() {
   const [installEvent, setInstallEvent] = useState<BeforeInstallPromptEvent | null>(null);

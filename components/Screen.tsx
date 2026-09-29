@@ -10,14 +10,22 @@ interface ScreenProps extends PropsWithChildren {
   action?: ReactNode;
   onRefresh?: () => Promise<void>;
   keyboard?: boolean;
+  safeTop?: boolean;
 }
 
-export function Screen({ title, action, children, onRefresh, keyboard = false }: ScreenProps) {
+export function Screen({
+  title,
+  action,
+  children,
+  onRefresh,
+  keyboard = false,
+  safeTop = false,
+}: ScreenProps) {
   const { licenseMode, user } = useApp();
   const content = (
     <ScrollView
       className="flex-1"
-      contentContainerClassName="gap-5 px-4 pb-28 pt-4 web:mx-auto web:w-full web:max-w-5xl"
+      contentContainerClassName="gap-5 px-4 pb-8 pt-4 web:mx-auto web:w-full web:max-w-5xl"
       keyboardShouldPersistTaps="handled"
       refreshControl={
         onRefresh ? (
@@ -37,7 +45,7 @@ export function Screen({ title, action, children, onRefresh, keyboard = false }:
     </ScrollView>
   );
   return (
-    <SafeAreaView edges={['bottom']} className="bg-background flex-1">
+    <SafeAreaView edges={safeTop ? ['top', 'bottom'] : ['bottom']} className="bg-background flex-1">
       {keyboard ? (
         <KeyboardAvoidingView
           className="flex-1"

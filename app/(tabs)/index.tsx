@@ -36,7 +36,7 @@ export default function Home() {
   }, [load]);
   if (!user) return null;
   return (
-    <Screen onRefresh={load}>
+    <Screen onRefresh={load} safeTop>
       <View className="bg-accent overflow-hidden rounded-3xl p-5">
         <View className="mb-5 flex-row items-start justify-between">
           <View className="flex-1">

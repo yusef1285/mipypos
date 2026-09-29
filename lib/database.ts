@@ -2,9 +2,14 @@ import * as Crypto from 'expo-crypto';
 import * as SQLite from 'expo-sqlite';
 
 import { dayRange } from '@/lib/format';
+import { CASH_DENOMINATIONS } from '@/lib/models';
 import type {
   Area,
   CartItem,
+  CashClosureInput,
+  CashClosurePreview,
+  CashClosureProductCount,
+  CashClosureReconciliation,
   CashSummary,
   DailyReport,
   LineaVenta,
@@ -158,6 +163,23 @@ export async function initializeDatabase() {
       'admin',
     );
   }
+  const administratorCount = await db.getFirstAsync<{ count: number }>(
+    "SELECT COUNT(*) AS count FROM users WHERE role='admin'",
+  );
+  if (!administratorCount?.count) {
+    const existingDefaultAdmin = await db.getFirstAsync<{ id: number }>(
+      "SELECT id FROM users WHERE username='admin' COLLATE NOCASE",
+    );
+    if (existingDefaultAdmin)
+      await db.runAsync("UPDATE users SET role='admin' WHERE id=?", existingDefaultAdmin.id);
+    else
+      await db.runAsync(
+        'INSERT INTO users(username,password_hash,role) VALUES(?,?,?)',
+        'admin',
+        await hashPassword('admin123'),
+        'admin',
+      );
+  }
   await db.runAsync("INSERT OR IGNORE INTO areas(name) VALUES('Almacén principal')");
   await db.execAsync(`
     INSERT OR IGNORE INTO area_stock(area_id,product_id,quantity)
@@ -213,6 +235,20 @@ export async function saveUser(input: {
   const name = input.username.trim();
   if (!name) throw new Error('El usuario es obligatorio.');
   if (input.id) {
+    const existingUser = await db.getFirstAsync<Usuario>(
+      'SELECT * FROM users WHERE id=?',
+      input.id,
+    );
+    if (!existingUser) throw new Error('Usuario no encontrado.');
+    if (existingUser.role === 'admin' && input.role !== 'admin') {
+      const administrators = await db.getFirstAsync<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM users WHERE role='admin'",
+      );
+      if ((administrators?.count ?? 0) <= 1)
+        throw new Error('Debe existir al menos un administrador.');
+    }
+    if (input.password && input.password.length < 6)
+      throw new Error('La contraseña debe tener al menos 6 caracteres.');
     if (input.password)
       await db.runAsync(
         'UPDATE users SET username=?, password_hash=?, role=? WHERE id=?',
@@ -264,7 +300,10 @@ export async function listProducts(search = '') {
 export async function getProduct(id: number) {
   return (await getDatabase()).getFirstAsync<Producto>('SELECT * FROM products WHERE id=?', id);
 }
-export async function saveProduct(product: Omit<Producto, 'id'> & { id?: number }) {
+export async function saveProduct(
+  product: Omit<Producto, 'id'> & { id?: number },
+  username: string,
+) {
   const db = await getDatabase();
   if (!product.name.trim()) throw new Error('El nombre es obligatorio.');
   if (product.stock < 0 || product.price_cash < 0 || product.price_transfer < 0)
@@ -303,16 +342,27 @@ export async function saveProduct(product: Omit<Producto, 'id'> & { id?: number 
         product.image_path,
       );
       productId = result.lastInsertRowId;
-      const mainArea = await db.getFirstAsync<{ id: number }>(
-        "SELECT id FROM areas WHERE name='Almacén principal' COLLATE NOCASE",
+      const mainArea = await db.getFirstAsync<{ id: number; name: string }>(
+        "SELECT id,name FROM areas WHERE name='Almacén principal' COLLATE NOCASE",
       );
-      if (mainArea && product.stock > 0)
+      if (mainArea && product.stock > 0) {
         await db.runAsync(
           'INSERT INTO area_stock(area_id,product_id,quantity) VALUES(?,?,?)',
           mainArea.id,
           productId,
           product.stock,
         );
+        await db.runAsync(
+          `INSERT INTO movements(type,product_id,product_name,from_area,to_area,quantity,user,date)
+           VALUES('entrada',?,?,NULL,?,?,?,?)`,
+          productId,
+          product.name.trim(),
+          mainArea.name,
+          product.stock,
+          username,
+          now(),
+        );
+      }
     });
     return productId;
   } catch (error) {
@@ -399,48 +449,180 @@ export async function getCashSummary(sessionId: number): Promise<CashSummary> {
     expectedCash: (session?.fund ?? 0) + cashSales,
   };
 }
-export async function closeCashSession(
-  sessionId: number,
-  cashCount: number,
-  transferCount: number,
-  admin: Usuario,
-) {
-  if (admin.role !== 'admin')
-    throw new Error('El cierre requiere confirmación de un administrador.');
+export async function getCashClosurePreview(sessionId: number): Promise<CashClosurePreview> {
   const db = await getDatabase();
-  const summary = await getCashSummary(sessionId);
-  const products = await db.getAllAsync<{ id: number; stock: number }>(
-    'SELECT id,stock FROM products',
+  const session = await db.getFirstAsync<{
+    id: number;
+    fund: number;
+    open_date: string;
+    products_start: string;
+  }>(
+    'SELECT id,fund,open_date,products_start FROM cash_sessions WHERE id=? AND close_date IS NULL',
+    sessionId,
   );
-  await db.withTransactionAsync(async () => {
-    const current = await db.getFirstAsync<{ id: number }>(
-      'SELECT id FROM cash_sessions WHERE id=? AND close_date IS NULL',
+  if (!session) throw new Error('La sesión de caja ya está cerrada.');
+
+  const [summary, products, movements, sold] = await Promise.all([
+    getCashSummary(sessionId),
+    db.getAllAsync<{ id: number; name: string }>('SELECT id,name FROM products ORDER BY name'),
+    db.getAllAsync<{ product_id: number; entries: number; exits: number }>(
+      `SELECT product_id,
+        SUM(CASE WHEN type='entrada' THEN quantity ELSE 0 END) AS entries,
+        SUM(CASE WHEN type='salida' THEN quantity ELSE 0 END) AS exits
+       FROM movements WHERE date>=? GROUP BY product_id`,
+      session.open_date,
+    ),
+    db.getAllAsync<{ product_id: number; quantity: number }>(
+      `SELECT sl.product_id,SUM(sl.quantity) AS quantity
+       FROM sale_lines sl JOIN sales s ON s.id=sl.sale_id
+       WHERE s.session_id=? GROUP BY sl.product_id`,
       sessionId,
+    ),
+  ]);
+  const opening = parseProductSnapshot(session.products_start);
+  const movementByProduct = new Map(movements.map((item) => [item.product_id, item]));
+  const soldByProduct = new Map(sold.map((item) => [item.product_id, item.quantity]));
+
+  return {
+    sessionId,
+    fund: session.fund,
+    cashSales: summary.cashSales,
+    transferSales: summary.transferSales,
+    cardSales: summary.cardSales,
+    salesTotal: summary.salesTotal,
+    products: products.map((product) => {
+      const movement = movementByProduct.get(product.id);
+      const openingStock = opening[String(product.id)] ?? 0;
+      const entries = movement?.entries ?? 0;
+      const exits = movement?.exits ?? 0;
+      const soldQuantity = soldByProduct.get(product.id) ?? 0;
+      return {
+        productId: product.id,
+        productName: product.name,
+        openingStock,
+        entries,
+        exits,
+        sold: soldQuantity,
+        expectedStock: openingStock + entries - exits - soldQuantity,
+      };
+    }),
+  };
+}
+
+function reconcileCashClosure(
+  preview: CashClosurePreview,
+  input: CashClosureInput,
+): CashClosureReconciliation {
+  const allowedDenominations = new Set<number>(CASH_DENOMINATIONS);
+  const suppliedDenominations = new Set<number>();
+  let cashCount = 0;
+  for (const item of input.denominations) {
+    if (
+      !allowedDenominations.has(item.denomination) ||
+      suppliedDenominations.has(item.denomination) ||
+      !Number.isInteger(item.quantity) ||
+      item.quantity < 0
+    )
+      throw new Error('El conteo de billetes contiene valores no válidos.');
+    suppliedDenominations.add(item.denomination);
+    cashCount += item.denomination * item.quantity;
+  }
+  if (!Number.isFinite(input.transferCount) || input.transferCount < 0)
+    throw new Error('El conteo de transferencias no es válido.');
+
+  const physicalByProduct = new Map<number, number>();
+  for (const item of input.products) {
+    if (
+      physicalByProduct.has(item.productId) ||
+      !Number.isFinite(item.physicalStock) ||
+      item.physicalStock < 0
+    )
+      throw new Error('El conteo físico contiene valores no válidos.');
+    physicalByProduct.set(item.productId, item.physicalStock);
+  }
+  const reconciledProducts: CashClosureProductCount[] = preview.products.map((product) => {
+    const physicalStock = physicalByProduct.get(product.productId);
+    if (physicalStock === undefined)
+      throw new Error(`Falta contar el producto ${product.productName}.`);
+    return {
+      ...product,
+      physicalStock,
+      difference: physicalStock - product.expectedStock,
+    };
+  });
+  if (physicalByProduct.size !== preview.products.length)
+    throw new Error('El conteo físico contiene productos que no pertenecen al cierre.');
+
+  const expectedCash = preview.fund + preview.cashSales;
+  return {
+    cashCount,
+    expectedCash,
+    cashDifference: cashCount - expectedCash,
+    transferDifference: input.transferCount - preview.transferSales,
+    totalDifference:
+      cashCount - preview.fund + input.transferCount + preview.cardSales - preview.salesTotal,
+    products: reconciledProducts,
+  };
+}
+
+export async function closeCashSession(sessionId: number, input: CashClosureInput) {
+  const administrator = await authenticate(input.adminUsername, input.adminPassword);
+  if (!administrator || administrator.role !== 'admin')
+    throw new Error('Las credenciales del administrador no son válidas.');
+
+  const db = await getDatabase();
+  let result: CashClosureReconciliation | null = null;
+  await db.withTransactionAsync(async () => {
+    const preview = await getCashClosurePreview(sessionId);
+    const reconciliation = reconcileCashClosure(preview, input);
+    if (
+      Math.abs(reconciliation.cashDifference) > 0.005 ||
+      Math.abs(reconciliation.transferDifference) > 0.005 ||
+      Math.abs(reconciliation.totalDifference) > 0.005
+    )
+      throw new Error('El efectivo y las transferencias deben coincidir antes de cerrar.');
+    const productDifference = reconciliation.products.find(
+      (product) => Math.abs(product.difference) > 0.0001,
     );
-    if (!current) throw new Error('La sesión de caja ya está cerrada.');
+    if (productDifference)
+      throw new Error(
+        `El conteo de ${productDifference.productName} no coincide con el inventario esperado.`,
+      );
+
+    const closeDate = now();
     await db.runAsync(
-      'UPDATE cash_sessions SET close_date=?,final_cash=?,expected_cash=?,transfer_total=?,products_end=?,cash_count=?,transfer_count=? WHERE id=?',
-      now(),
-      cashCount,
-      summary.expectedCash,
-      summary.transferSales,
-      json(Object.fromEntries(products.map((p) => [p.id, p.stock]))),
-      cashCount,
-      transferCount,
+      'UPDATE cash_sessions SET close_date=?,final_cash=?,expected_cash=?,transfer_total=?,products_end=?,cash_count=?,transfer_count=? WHERE id=? AND close_date IS NULL',
+      closeDate,
+      reconciliation.cashCount,
+      reconciliation.expectedCash,
+      preview.transferSales,
+      json(
+        Object.fromEntries(
+          reconciliation.products.map((product) => [product.productId, product.physicalStock]),
+        ),
+      ),
+      reconciliation.cashCount,
+      input.transferCount,
       sessionId,
     );
     await db.runAsync(
       'INSERT INTO audit_log(action,username,entity_id,date,detail) VALUES(?,?,?,?,?)',
       'cash_close',
-      admin.username,
+      administrator.username,
       sessionId,
-      now(),
+      closeDate,
       json({
-        cashDifference: cashCount - summary.expectedCash,
-        transferDifference: transferCount - summary.transferSales,
+        denominations: input.denominations,
+        cashDifference: reconciliation.cashDifference,
+        transferDifference: reconciliation.transferDifference,
+        totalDifference: reconciliation.totalDifference,
+        inventory: reconciliation.products,
       }),
     );
+    result = reconciliation;
   });
+  if (!result) throw new Error('No se pudo completar el cierre de caja.');
+  return result;
 }
 
 function validatePayments(total: number, method: SaleMethod, payments: Payment[]) {
@@ -756,7 +938,7 @@ export async function getExportRows(
   );
 }
 
-export async function importProducts(rows: Array<Record<string, unknown>>) {
+export async function importProducts(rows: Array<Record<string, unknown>>, username: string) {
   const db = await getDatabase();
   let imported = 0;
   await db.withTransactionAsync(async () => {
@@ -783,16 +965,27 @@ export async function importProducts(rows: Array<Record<string, unknown>>) {
         transfer,
       );
       if (stock > 0) {
-        const mainArea = await db.getFirstAsync<{ id: number }>(
-          "SELECT id FROM areas WHERE name='Almacén principal' COLLATE NOCASE",
+        const mainArea = await db.getFirstAsync<{ id: number; name: string }>(
+          "SELECT id,name FROM areas WHERE name='Almacén principal' COLLATE NOCASE",
         );
-        if (mainArea)
+        if (mainArea) {
           await db.runAsync(
             'INSERT INTO area_stock(area_id,product_id,quantity) VALUES(?,?,?)',
             mainArea.id,
             result.lastInsertRowId,
             stock,
           );
+          await db.runAsync(
+            `INSERT INTO movements(type,product_id,product_name,from_area,to_area,quantity,user,date)
+             VALUES('entrada',?,?,NULL,?,?,?,?)`,
+            result.lastInsertRowId,
+            name,
+            mainArea.name,
+            stock,
+            username,
+            now(),
+          );
+        }
       }
       imported++;
     }

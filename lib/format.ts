@@ -2,7 +2,12 @@ import { format, parseISO } from 'date-fns';
 import { es } from 'date-fns/locale';
 
 export const money = (value: number) =>
-  new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'USD' }).format(value);
+  new Intl.NumberFormat('es-CU', {
+    style: 'currency',
+    currency: 'CUP',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
 
 export const shortDate = (value: string) =>
   format(parseISO(value), 'dd/MM/yyyy HH:mm', { locale: es });

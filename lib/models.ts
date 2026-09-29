@@ -84,6 +84,54 @@ export interface CartItem {
   price: number;
 }
 
+export const CASH_DENOMINATIONS = [
+  5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000,
+] as const;
+
+export interface DenominationCount {
+  denomination: number;
+  quantity: number;
+}
+
+export interface CashClosureProductCount {
+  productId: number;
+  productName: string;
+  openingStock: number;
+  entries: number;
+  exits: number;
+  sold: number;
+  expectedStock: number;
+  physicalStock: number;
+  difference: number;
+}
+
+export interface CashClosurePreview {
+  sessionId: number;
+  fund: number;
+  cashSales: number;
+  transferSales: number;
+  cardSales: number;
+  salesTotal: number;
+  products: Omit<CashClosureProductCount, 'physicalStock' | 'difference'>[];
+}
+
+export interface CashClosureInput {
+  denominations: DenominationCount[];
+  transferCount: number;
+  products: Array<{ productId: number; physicalStock: number }>;
+  adminUsername: string;
+  adminPassword: string;
+}
+
+export interface CashClosureReconciliation {
+  cashCount: number;
+  expectedCash: number;
+  cashDifference: number;
+  transferDifference: number;
+  totalDifference: number;
+  products: CashClosureProductCount[];
+}
+
 export interface DailyReport {
   totalSales: number;
   cash: number;

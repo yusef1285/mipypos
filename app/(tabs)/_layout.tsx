@@ -9,6 +9,7 @@ import {
 } from 'lucide-react-native';
 import { StatusBar } from 'expo-status-bar';
 import { useThemeColor } from 'heroui-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useUniwind } from 'uniwind';
 
 import { useApp } from '@/lib/app-context';
@@ -16,6 +17,7 @@ import { canAccess } from '@/lib/permissions';
 
 export default function TabLayout() {
   const { user } = useApp();
+  const insets = useSafeAreaInsets();
   const { theme } = useUniwind();
   const [background, foreground, border, accent, muted] = useThemeColor([
     'background',
@@ -37,8 +39,8 @@ export default function TabLayout() {
       shadowOpacity: theme === 'dark' ? 0.35 : 0.12,
       shadowRadius: 8,
       elevation: 8,
-      height: 64,
-      paddingBottom: 8,
+      height: 56 + insets.bottom,
+      paddingBottom: Math.max(insets.bottom, 8),
       paddingTop: 7,
     },
     tabBarActiveTintColor: accent,

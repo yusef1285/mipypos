@@ -87,16 +87,19 @@ export default function Products() {
   const save = async () => {
     try {
       setSaving(true);
-      await saveProduct({
-        id: editing,
-        name: form.name,
-        category: form.category,
-        subcategory: form.subcategory,
-        stock: Number(form.stock.replace(',', '.')),
-        price_cash: Number(form.price_cash.replace(',', '.')),
-        price_transfer: Number(form.price_transfer.replace(',', '.')),
-        image_path: form.image_path,
-      });
+      await saveProduct(
+        {
+          id: editing,
+          name: form.name,
+          category: form.category,
+          subcategory: form.subcategory,
+          stock: Number(form.stock.replace(',', '.')),
+          price_cash: Number(form.price_cash.replace(',', '.')),
+          price_transfer: Number(form.price_transfer.replace(',', '.')),
+          image_path: form.image_path,
+        },
+        user.username,
+      );
       setForm(empty);
       setEditing(undefined);
       setShowForm(false);
@@ -119,7 +122,7 @@ export default function Products() {
       });
       if (result.canceled) return;
       const text = await new File(result.assets[0].uri).text();
-      const count = await importProducts(parseCsv(text));
+      const count = await importProducts(parseCsv(text), user.username);
       await load();
       Alert.alert(
         'Importación completada',

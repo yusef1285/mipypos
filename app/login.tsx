@@ -30,7 +30,7 @@ export default function LoginScreen() {
     }
   };
   return (
-    <Screen keyboard>
+    <Screen keyboard safeTop>
       <View className="web:mx-auto web:w-full web:max-w-md min-h-[80vh] justify-center">
         <View className="mb-8 items-center gap-3">
           <View className="bg-accent rounded-3xl p-4">
