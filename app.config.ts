@@ -29,13 +29,18 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     android: {
       package: process.env.BILT_ANDROID_PACKAGE ?? 'me.bilt.mipypos',
+      icon: './assets/images/mipypos-app-icon.png',
+      adaptiveIcon: {
+        foregroundImage: './assets/images/mipypos-app-icon.png',
+        backgroundColor: '#071A2A',
+      },
     },
     web: {
       bundler: 'metro',
       // 'single' = SPA export: one index.html + client routing, so edge serving
       // needs only a single 404→index.html fallback rule.
       output: 'single',
-      favicon: './public/icons/icon-192.png',
+      favicon: './assets/images/mipypos-app-icon.png',
     },
     extra: {
       appStoreAppId: process.env.BILT_APP_STORE_APP_ID,

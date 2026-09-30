@@ -8,14 +8,23 @@ import { EmptyState, MetricCard, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
 import { getDailyReport } from '@/lib/database';
+import { getHostReport } from '@/lib/network/client';
 import { money } from '@/lib/format';
 import type { DailyReport } from '@/lib/models';
 import { canAccess } from '@/lib/permissions';
 
 export default function Reports() {
-  const { user } = useApp();
+  const { user, networkConfig } = useApp();
   const [report, setReport] = useState<DailyReport | null>(null);
-  const load = useCallback(async () => setReport(await getDailyReport()), []);
+  const load = useCallback(
+    async () =>
+      setReport(
+        networkConfig.mode === 'client' && networkConfig.hostUrl
+          ? await getHostReport(networkConfig.hostUrl)
+          : await getDailyReport(),
+      ),
+    [networkConfig.hostUrl, networkConfig.mode],
+  );
   useEffect(() => {
     const timer = setTimeout(() => void load(), 0);
     return () => clearTimeout(timer);

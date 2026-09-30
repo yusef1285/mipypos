@@ -1,8 +1,9 @@
 import { Button, Card, Checkbox, Input, Label, TextField, Typography } from 'heroui-native';
-import { LockKeyhole, Store } from 'lucide-react-native';
+import { LockKeyhole } from 'lucide-react-native';
 import { useEffect, useState } from 'react';
 import { Alert, View } from 'react-native';
 
+import { BrandMark } from '@/components/BrandMark';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
 
@@ -33,11 +34,9 @@ export default function LoginScreen() {
     <Screen keyboard safeTop>
       <View className="web:mx-auto web:w-full web:max-w-md min-h-[80vh] justify-center">
         <View className="mb-8 items-center gap-3">
-          <View className="bg-accent rounded-3xl p-4">
-            <Store color="white" size={34} />
-          </View>
+          <BrandMark size={66} />
           <Typography.Heading type="h1">MipyPOS</Typography.Heading>
-          <Typography.Paragraph color="muted">Punto de venta offline</Typography.Paragraph>
+          <Typography.Paragraph color="muted">Punto de venta en red local</Typography.Paragraph>
         </View>
         <Card className="gap-5 p-5">
           <TextField>

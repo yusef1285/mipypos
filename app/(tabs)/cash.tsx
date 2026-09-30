@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, View } from 'react-native';
 
 import { AccessDenied } from '@/components/AccessDenied';
+import { BanknoteThumbnail } from '@/components/BanknoteThumbnail';
 import { MetricCard } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
@@ -237,7 +238,8 @@ export default function Cash() {
           </View>
           <View className="flex-row flex-wrap gap-3">
             {CASH_DENOMINATIONS.map((denomination) => (
-              <View key={denomination} className="w-[47%] min-w-36 flex-grow">
+              <View key={denomination} className="w-[47%] min-w-36 flex-grow gap-2">
+                <BanknoteThumbnail denomination={denomination} />
                 <TextField>
                   <Label>{money(denomination)}</Label>
                   <Input

@@ -1,22 +1,25 @@
 import { router } from 'expo-router';
-import { Card, ListGroup, Typography, useThemeColor } from 'heroui-native';
-import { ChevronRight, FileDown, Package, Repeat2, Settings, Users } from 'lucide-react-native';
+import { Card, ListGroup, LinkButton, Typography, useThemeColor } from 'heroui-native';
+import { ChevronRight } from 'lucide-react-native';
+import { Linking } from 'react-native';
 
+import { appIcons } from '@/components/app-icons';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
+import { BRAND_LINE, CREATOR_WHATSAPP, CREATOR_WHATSAPP_URL } from '@/lib/branding';
 import { canAccess, type ModuleKey } from '@/lib/permissions';
 
 const items: Array<{
   module: ModuleKey;
   label: string;
   href: '/products' | '/movements' | '/users' | '/exports' | '/settings';
-  icon: typeof Package;
+  icon: (typeof appIcons)[keyof typeof appIcons];
 }> = [
-  { module: 'products', label: 'Productos', href: '/products', icon: Package },
-  { module: 'movements', label: 'Movimientos', href: '/movements', icon: Repeat2 },
-  { module: 'users', label: 'Usuarios', href: '/users', icon: Users },
-  { module: 'exports', label: 'Exportaciones', href: '/exports', icon: FileDown },
-  { module: 'settings', label: 'Configuración', href: '/settings', icon: Settings },
+  { module: 'products', label: 'Productos', href: '/products', icon: appIcons.products },
+  { module: 'movements', label: 'Movimientos', href: '/movements', icon: appIcons.movements },
+  { module: 'users', label: 'Usuarios', href: '/users', icon: appIcons.users },
+  { module: 'exports', label: 'Exportaciones', href: '/exports', icon: appIcons.exports },
+  { module: 'settings', label: 'Configuración', href: '/settings', icon: appIcons.settings },
 ];
 export default function More() {
   const { user } = useApp();
@@ -42,9 +45,14 @@ export default function More() {
             })}
         </ListGroup>
       </Card>
-      <Typography.Paragraph type="body-sm" color="muted" align="center">
-        MipyPOS funciona sin conexión. Tus datos permanecen en este dispositivo.
-      </Typography.Paragraph>
+      <Card className="items-center gap-1 p-4">
+        <Typography.Paragraph type="body-sm" color="muted">
+          {BRAND_LINE}
+        </Typography.Paragraph>
+        <LinkButton onPress={() => void Linking.openURL(CREATOR_WHATSAPP_URL)}>
+          <LinkButton.Label>WhatsApp {CREATOR_WHATSAPP}</LinkButton.Label>
+        </LinkButton>
+      </Card>
     </Screen>
   );
 }

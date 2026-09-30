@@ -142,6 +142,19 @@ export async function initializeDatabase() {
       PRIMARY KEY(area_id, product_id)
     );
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS network_commands (
+      command_id TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      response TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS network_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL,
+      entity_id INTEGER,
+      created_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS audit_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       action TEXT NOT NULL,
@@ -643,6 +656,7 @@ export async function registerSale(
   method: SaleMethod,
   payments: Payment[],
   username: string,
+  networkCommand?: { commandId: string; clientId: string },
 ) {
   if (!items.length) throw new Error('El carrito está vacío.');
   const db = await getDatabase();
@@ -650,6 +664,30 @@ export async function registerSale(
   const validPayments = validatePayments(total, method, payments);
   let saleId = 0;
   await db.withTransactionAsync(async () => {
+    if (networkCommand) {
+      const reservation = await db.runAsync(
+        `INSERT OR IGNORE INTO network_commands(command_id,client_id,action,response,created_at)
+         VALUES(?,?,?,?,?)`,
+        networkCommand.commandId,
+        networkCommand.clientId,
+        'register_sale',
+        null,
+        now(),
+      );
+      if (!reservation.changes) {
+        const previous = await db.getFirstAsync<{ response: string | null }>(
+          'SELECT response FROM network_commands WHERE command_id=? AND client_id=?',
+          networkCommand.commandId,
+          networkCommand.clientId,
+        );
+        const parsed = parseJson(previous?.response ?? null);
+        if (isRecord(parsed) && typeof parsed.saleId === 'number') {
+          saleId = parsed.saleId;
+          return;
+        }
+        throw new Error('La venta ya se está procesando.');
+      }
+    }
     const session = await db.getFirstAsync<{ id: number }>(
       'SELECT id FROM cash_sessions WHERE close_date IS NULL LIMIT 1',
     );
@@ -711,6 +749,20 @@ export async function registerSale(
       }
       if (remaining > 0.0001)
         throw new Error(`La distribución de stock de ${item.product.name} es inconsistente.`);
+    }
+    await db.runAsync(
+      'INSERT INTO network_events(type,entity_id,created_at) VALUES(?,?,?)',
+      'sale.created',
+      saleId,
+      now(),
+    );
+    if (networkCommand) {
+      await db.runAsync(
+        'UPDATE network_commands SET response=? WHERE command_id=? AND client_id=?',
+        json({ saleId }),
+        networkCommand.commandId,
+        networkCommand.clientId,
+      );
     }
   });
   return saleId;

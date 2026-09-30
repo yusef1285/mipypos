@@ -16,10 +16,10 @@ import { AccessDenied } from '@/components/AccessDenied';
 import { EmptyState, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
-import { getSale, listProducts, registerSale } from '@/lib/database';
 import { money } from '@/lib/format';
 import type { CartItem, PaymentType, Producto, SaleMethod } from '@/lib/models';
 import { canAccess } from '@/lib/permissions';
+import { getPosSale, listPosProducts, registerPosSale } from '@/lib/pos-repository';
 import { createThermalTicket } from '@/lib/ticket';
 
 const methods: Array<{ key: PaymentType; label: string; icon: typeof Banknote }> = [
@@ -29,7 +29,7 @@ const methods: Array<{ key: PaymentType; label: string; icon: typeof Banknote }>
 ];
 
 export default function Sales() {
-  const { user, session, licenseMode, refresh } = useApp();
+  const { user, session, licenseMode, refresh, networkConfig } = useApp();
   const [products, setProducts] = useState<Producto[]>([]);
   const [search, setSearch] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -41,7 +41,10 @@ export default function Sales() {
   });
   const [saving, setSaving] = useState(false);
   const [accent, danger] = useThemeColor(['accent', 'danger']);
-  const load = useCallback(async () => setProducts(await listProducts(search)), [search]);
+  const load = useCallback(
+    async () => setProducts(await listPosProducts(networkConfig, search)),
+    [networkConfig, search],
+  );
   useEffect(() => {
     const timer = setTimeout(() => void load(), 0);
     return () => clearTimeout(timer);
@@ -104,7 +107,7 @@ export default function Sales() {
     if (!user) return;
     try {
       setSaving(true);
-      const id = await registerSale(cart, method, payments, user.username);
+      const id = await registerPosSale(networkConfig, cart, method, payments, user.username);
       setCart([]);
       setAmounts({ cash: '', transfer: '', card: '' });
       await refresh();
@@ -112,14 +115,14 @@ export default function Sales() {
       Alert.alert(
         'Venta registrada',
         `Venta #${id} guardada correctamente.`,
-        licenseMode === 'pro'
+        licenseMode === 'pro' && networkConfig.mode !== 'client'
           ? [
               { text: 'Cerrar' },
               {
                 text: 'Generar ticket',
                 onPress: () =>
                   void (async () => {
-                    const data = await getSale(id);
+                    const data = await getPosSale(networkConfig, id);
                     if (data) await createThermalTicket(data.sale, data.lines, licenseMode);
                   })(),
               },

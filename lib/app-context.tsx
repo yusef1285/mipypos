@@ -18,19 +18,28 @@ import {
   initializeDatabase,
   setSetting,
 } from '@/lib/database';
+import { getHostSnapshot, loginToHost, logoutFromHost } from '@/lib/network/client';
+import { loadNetworkConfig, saveNetworkConfig } from '@/lib/network/config';
+import { startLanHost, stopLanHost } from '@/lib/network/host';
+import type { NetworkConfig } from '@/lib/network/types';
 import { validateLicenseKey } from '@/lib/license';
 import type { LicenseMode, SesionCaja, Usuario } from '@/lib/models';
 
+type AuthenticatedUser = Omit<Usuario, 'password_hash'>;
+
 interface AppContextValue {
   ready: boolean;
-  user: Usuario | null;
+  user: AuthenticatedUser | null;
   rememberedUsername: string;
   session: SesionCaja | null;
   licenseMode: LicenseMode;
   revision: number;
+  networkConfig: NetworkConfig;
+  hostAddress: string;
   login: (username: string, password: string, remember: boolean) => Promise<void>;
   logout: () => void;
   refresh: () => Promise<void>;
+  configureNetwork: (config: NetworkConfig) => Promise<void>;
   setLicense: (mode: LicenseMode, key?: string) => Promise<void>;
 }
 
@@ -38,24 +47,45 @@ const AppContext = createContext<AppContextValue | null>(null);
 
 export function AppProvider({ children }: PropsWithChildren) {
   const [ready, setReady] = useState(false);
-  const [user, setUser] = useState<Usuario | null>(null);
+  const [user, setUser] = useState<AuthenticatedUser | null>(null);
   const [rememberedUsername, setRememberedUsername] = useState('');
   const [session, setSession] = useState<SesionCaja | null>(null);
   const [licenseMode, setLicenseMode] = useState<LicenseMode>('demo');
   const [revision, setRevision] = useState(0);
+  const [networkConfig, setNetworkConfig] = useState<NetworkConfig>({
+    mode: 'standalone',
+    hostUrl: '',
+    clientId: '',
+  });
+  const [hostAddress, setHostAddress] = useState('');
   const segments = useSegments();
 
   const refresh = useCallback(async () => {
+    if (networkConfig.mode === 'client' && networkConfig.hostUrl) {
+      const snapshot = await getHostSnapshot(networkConfig.hostUrl);
+      setSession(snapshot.session);
+      setRevision(snapshot.revision);
+      return;
+    }
     setSession(await getOpenSession());
     setLicenseMode(await getLicenseMode());
     setRevision((value) => value + 1);
-  }, []);
+  }, [networkConfig]);
 
   useEffect(() => {
     void (async () => {
       await initializeDatabase();
+      const storedNetwork = await loadNetworkConfig();
+      setNetworkConfig(storedNetwork);
+      if (storedNetwork.mode === 'host') {
+        try {
+          setHostAddress(await startLanHost());
+        } catch {
+          setHostAddress('Host no disponible en esta compilación');
+        }
+      }
       setRememberedUsername((await AsyncStorage.getItem('mipypos.rememberedUsername')) ?? '');
-      setSession(await getOpenSession());
+      setSession(storedNetwork.mode === 'client' ? null : await getOpenSession());
       const storedMode = await getLicenseMode();
       const storedKey = await getSetting('license_key');
       const validPro =
@@ -73,15 +103,46 @@ export function AppProvider({ children }: PropsWithChildren) {
     else if (user && onLogin) router.replace('/(tabs)');
   }, [ready, user, segments]);
 
-  const login = useCallback(async (username: string, password: string, remember: boolean) => {
-    const authenticated = await authenticate(username, password);
-    if (!authenticated) throw new Error('Usuario o contraseña incorrectos.');
-    if (remember) await AsyncStorage.setItem('mipypos.rememberedUsername', authenticated.username);
-    else await AsyncStorage.removeItem('mipypos.rememberedUsername');
-    setRememberedUsername(remember ? authenticated.username : '');
-    setUser(authenticated);
+  useEffect(() => {
+    if (!ready || networkConfig.mode !== 'client' || !networkConfig.hostUrl || !user)
+      return () => undefined;
+    const poll = setInterval(() => void refresh().catch(() => undefined), 1500);
+    return () => clearInterval(poll);
+  }, [networkConfig, ready, refresh, user]);
+
+  const login = useCallback(
+    async (username: string, password: string, remember: boolean) => {
+      const authenticated =
+        networkConfig.mode === 'client' && networkConfig.hostUrl
+          ? await loginToHost(networkConfig.hostUrl, username, password)
+          : await authenticate(username, password);
+      if (!authenticated) throw new Error('Usuario o contraseña incorrectos.');
+      if (remember)
+        await AsyncStorage.setItem('mipypos.rememberedUsername', authenticated.username);
+      else await AsyncStorage.removeItem('mipypos.rememberedUsername');
+      setRememberedUsername(remember ? authenticated.username : '');
+      setUser(authenticated);
+      if (networkConfig.mode === 'client') await refresh();
+    },
+    [networkConfig, refresh],
+  );
+  const logout = useCallback(() => {
+    setUser(null);
+    if (networkConfig.mode === 'client') void logoutFromHost();
+  }, [networkConfig.mode]);
+  const configureNetwork = useCallback(async (next: NetworkConfig) => {
+    stopLanHost();
+    await logoutFromHost();
+    await saveNetworkConfig(next);
+    setNetworkConfig(next);
+    setUser(null);
+    setSession(null);
+    setHostAddress('');
+    if (next.mode === 'host') {
+      setHostAddress(await startLanHost());
+      setSession(await getOpenSession());
+    }
   }, []);
-  const logout = useCallback(() => setUser(null), []);
   const setLicense = useCallback(async (mode: LicenseMode, key?: string) => {
     if (mode === 'pro') {
       if (!key || !(await validateLicenseKey(key))) throw new Error('La licencia no es válida.');
@@ -99,10 +160,13 @@ export function AppProvider({ children }: PropsWithChildren) {
       session,
       licenseMode,
       revision,
+      networkConfig,
+      hostAddress,
       login,
       logout,
       refresh,
       setLicense,
+      configureNetwork,
     }),
     [
       ready,
@@ -111,10 +175,13 @@ export function AppProvider({ children }: PropsWithChildren) {
       session,
       licenseMode,
       revision,
+      networkConfig,
+      hostAddress,
       login,
       logout,
       refresh,
       setLicense,
+      configureNetwork,
     ],
   );
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
