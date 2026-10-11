@@ -1,6 +1,13 @@
 import { Typography } from 'heroui-native';
 import type { PropsWithChildren, ReactNode } from 'react';
-import { KeyboardAvoidingView, Platform, RefreshControl, ScrollView, View } from 'react-native';
+import {
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  RefreshControl,
+  ScrollView,
+  View,
+} from 'react-native';
 
 import { useApp } from '@/lib/app-context';
 import { SafeAreaView } from '@/components/ui/primitives/SafeAreaView';
@@ -11,6 +18,7 @@ interface ScreenProps extends PropsWithChildren {
   onRefresh?: () => Promise<void>;
   keyboard?: boolean;
   safeTop?: boolean;
+  scroll?: boolean;
 }
 
 export function Screen({
@@ -20,16 +28,27 @@ export function Screen({
   onRefresh,
   keyboard = false,
   safeTop = false,
+  scroll = true,
 }: ScreenProps) {
   const { licenseMode, user } = useApp();
-  const content = (
+  const content = scroll ? (
     <ScrollView
       className="flex-1"
       contentContainerClassName="gap-5 px-4 pb-8 pt-4 web:mx-auto web:w-full web:max-w-5xl"
       keyboardShouldPersistTaps="handled"
       refreshControl={
         onRefresh ? (
-          <RefreshControl refreshing={false} onRefresh={() => void onRefresh()} />
+          <RefreshControl
+            refreshing={false}
+            onRefresh={() =>
+              void onRefresh().catch((failure: unknown) =>
+                Alert.alert(
+                  'No se pudo actualizar',
+                  failure instanceof Error ? failure.message : 'Vuelve a intentarlo.',
+                ),
+              )
+            }
+          />
         ) : undefined
       }
     >
@@ -43,6 +62,8 @@ export function Screen({
       ) : null}
       {children}
     </ScrollView>
+  ) : (
+    children
   );
   return (
     <SafeAreaView edges={safeTop ? ['top', 'bottom'] : ['bottom']} className="bg-background flex-1">

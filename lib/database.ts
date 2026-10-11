@@ -2,9 +2,11 @@ import * as Crypto from 'expo-crypto';
 import * as SQLite from 'expo-sqlite';
 
 import { dayRange } from '@/lib/format';
+import { fractionalUnit, validateQuantity, roundMoney, roundQuantity } from '@/lib/units';
 import { CASH_DENOMINATIONS } from '@/lib/models';
 import type {
   Area,
+  AreaStock,
   CartItem,
   CashClosureInput,
   CashClosurePreview,
@@ -26,6 +28,18 @@ import type {
 } from '@/lib/models';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
+let mutationQueue: Promise<void> = Promise.resolve();
+async function transaction<T>(db: SQLite.SQLiteDatabase, action: () => Promise<T>): Promise<T> {
+  let result: T;
+  const pending = mutationQueue.then(() =>
+    db.withTransactionAsync(async () => {
+      result = await action();
+    }),
+  );
+  mutationQueue = pending.catch(() => undefined);
+  await pending;
+  return result!;
+}
 const now = () => new Date().toISOString();
 const json = (value: unknown) => JSON.stringify(value);
 const parseJson = (value: string | null): unknown => {
@@ -167,6 +181,30 @@ export async function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS movements_date_idx ON movements(date);
     CREATE INDEX IF NOT EXISTS movement_filters_idx ON movements(product_id, user, from_area, to_area);
   `);
+  // Keep upgrades atomic and never downgrade a newer installation.
+  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((version?.user_version ?? 0) > 3)
+    throw new Error('Esta base de datos necesita una versión más reciente de MipyPOS.');
+  await transaction(db, async () => {
+    const columns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(products)');
+    if (!columns.some((column) => column.name === 'unit'))
+      await db.execAsync("ALTER TABLE products ADD COLUMN unit TEXT NOT NULL DEFAULT 'u'");
+    if (!columns.some((column) => column.name === 'quantity_decimals'))
+      await db.execAsync(
+        'ALTER TABLE products ADD COLUMN quantity_decimals INTEGER NOT NULL DEFAULT 0',
+      );
+    const lineColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(sale_lines)');
+    if (!lineColumns.some((column) => column.name === 'area_id'))
+      await db.execAsync('ALTER TABLE sale_lines ADD COLUMN area_id INTEGER REFERENCES areas(id)');
+    if (!lineColumns.some((column) => column.name === 'unit'))
+      await db.execAsync("ALTER TABLE sale_lines ADD COLUMN unit TEXT NOT NULL DEFAULT 'u'");
+    const sessionColumns = await db.getAllAsync<{ name: string }>(
+      'PRAGMA table_info(cash_sessions)',
+    );
+    if (!sessionColumns.some((column) => column.name === 'movement_start_id'))
+      await db.execAsync('ALTER TABLE cash_sessions ADD COLUMN movement_start_id INTEGER');
+    await db.execAsync('PRAGMA user_version = 3');
+  });
   const count = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM users');
   if (!count?.count) {
     await db.runAsync(
@@ -215,11 +253,13 @@ export async function getSetting(key: string) {
 }
 export async function setSetting(key: string, value: string) {
   const db = await getDatabase();
-  await db.runAsync(
-    'INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-    key,
-    value,
-  );
+  return transaction(db, async () => {
+    await db.runAsync(
+      'INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+      key,
+      value,
+    );
+  });
 }
 export async function getLicenseMode(): Promise<LicenseMode> {
   return (await getSetting('license_mode')) === 'pro' ? 'pro' : 'demo';
@@ -236,7 +276,9 @@ export async function authenticate(username: string, password: string) {
 }
 
 export async function listUsers() {
-  return (await getDatabase()).getAllAsync<Usuario>('SELECT * FROM users ORDER BY username');
+  return (await getDatabase()).getAllAsync<Usuario>(
+    "SELECT id,username,role,'' AS password_hash FROM users ORDER BY username",
+  );
 }
 export async function saveUser(input: {
   id?: number;
@@ -245,61 +287,65 @@ export async function saveUser(input: {
   role: UserRole;
 }) {
   const db = await getDatabase();
-  const name = input.username.trim();
-  if (!name) throw new Error('El usuario es obligatorio.');
-  if (input.id) {
-    const existingUser = await db.getFirstAsync<Usuario>(
-      'SELECT * FROM users WHERE id=?',
-      input.id,
-    );
-    if (!existingUser) throw new Error('Usuario no encontrado.');
-    if (existingUser.role === 'admin' && input.role !== 'admin') {
-      const administrators = await db.getFirstAsync<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM users WHERE role='admin'",
+  return transaction(db, async () => {
+    const name = input.username.trim();
+    if (!name) throw new Error('El usuario es obligatorio.');
+    if (input.id) {
+      const existingUser = await db.getFirstAsync<Usuario>(
+        'SELECT * FROM users WHERE id=?',
+        input.id,
       );
-      if ((administrators?.count ?? 0) <= 1)
-        throw new Error('Debe existir al menos un administrador.');
+      if (!existingUser) throw new Error('Usuario no encontrado.');
+      if (existingUser.role === 'admin' && input.role !== 'admin') {
+        const administrators = await db.getFirstAsync<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM users WHERE role='admin'",
+        );
+        if ((administrators?.count ?? 0) <= 1)
+          throw new Error('Debe existir al menos un administrador.');
+      }
+      if (input.password && input.password.length < 6)
+        throw new Error('La contraseña debe tener al menos 6 caracteres.');
+      if (input.password)
+        await db.runAsync(
+          'UPDATE users SET username=?, password_hash=?, role=? WHERE id=?',
+          name,
+          await hashPassword(input.password),
+          input.role,
+          input.id,
+        );
+      else
+        await db.runAsync(
+          'UPDATE users SET username=?, role=? WHERE id=?',
+          name,
+          input.role,
+          input.id,
+        );
+      return input.id;
     }
-    if (input.password && input.password.length < 6)
+    if (!input.password || input.password.length < 6)
       throw new Error('La contraseña debe tener al menos 6 caracteres.');
-    if (input.password)
-      await db.runAsync(
-        'UPDATE users SET username=?, password_hash=?, role=? WHERE id=?',
-        name,
-        await hashPassword(input.password),
-        input.role,
-        input.id,
-      );
-    else
-      await db.runAsync(
-        'UPDATE users SET username=?, role=? WHERE id=?',
-        name,
-        input.role,
-        input.id,
-      );
-    return input.id;
-  }
-  if (!input.password || input.password.length < 6)
-    throw new Error('La contraseña debe tener al menos 6 caracteres.');
-  const result = await db.runAsync(
-    'INSERT INTO users(username,password_hash,role) VALUES(?,?,?)',
-    name,
-    await hashPassword(input.password),
-    input.role,
-  );
-  return result.lastInsertRowId;
+    const result = await db.runAsync(
+      'INSERT INTO users(username,password_hash,role) VALUES(?,?,?)',
+      name,
+      await hashPassword(input.password),
+      input.role,
+    );
+    return result.lastInsertRowId;
+  });
 }
 export async function deleteUser(id: number, currentId: number) {
   if (id === currentId) throw new Error('No puedes eliminar tu propio usuario.');
   const db = await getDatabase();
-  const user = await db.getFirstAsync<Usuario>('SELECT * FROM users WHERE id=?', id);
-  if (user?.role === 'admin') {
-    const admins = await db.getFirstAsync<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM users WHERE role='admin'",
-    );
-    if ((admins?.count ?? 0) <= 1) throw new Error('Debe existir al menos un administrador.');
-  }
-  await db.runAsync('DELETE FROM users WHERE id=?', id);
+  return transaction(db, async () => {
+    const user = await db.getFirstAsync<Usuario>('SELECT * FROM users WHERE id=?', id);
+    if (user?.role === 'admin') {
+      const admins = await db.getFirstAsync<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM users WHERE role='admin'",
+      );
+      if ((admins?.count ?? 0) <= 1) throw new Error('Debe existir al menos un administrador.');
+    }
+    await db.runAsync('DELETE FROM users WHERE id=?', id);
+  });
 }
 
 export async function listProducts(search = '') {
@@ -319,11 +365,19 @@ export async function saveProduct(
 ) {
   const db = await getDatabase();
   if (!product.name.trim()) throw new Error('El nombre es obligatorio.');
-  if (product.stock < 0 || product.price_cash < 0 || product.price_transfer < 0)
-    throw new Error('Stock y precios no pueden ser negativos.');
+  if (
+    ![product.stock, product.price_cash, product.price_transfer].every(Number.isFinite) ||
+    product.stock < 0 ||
+    product.price_cash < 0 ||
+    product.price_transfer < 0
+  )
+    throw new Error('Stock y precios deben ser números válidos no negativos.');
+  if (!product.unit.trim() || ![0, 3].includes(product.quantity_decimals))
+    throw new Error('Selecciona una unidad de medida válida.');
+  validateQuantity(product.stock, product.quantity_decimals, true);
   try {
     let productId = product.id ?? 0;
-    await db.withTransactionAsync(async () => {
+    await transaction(db, async () => {
       if (product.id) {
         const current = await db.getFirstAsync<Producto>(
           'SELECT * FROM products WHERE id=?',
@@ -331,12 +385,31 @@ export async function saveProduct(
         );
         if (!current) throw new Error('Producto no encontrado.');
         if (Math.abs(current.stock - product.stock) > 0.0001)
-          throw new Error('Ajusta el stock desde el módulo Inventario.');
+          throw new Error(
+            'El stock cambió. Actualiza los datos; los ajustes se realizan en Inventario.',
+          );
+        const balances = await db.getAllAsync<{ quantity: number }>(
+          'SELECT quantity FROM area_stock WHERE product_id=?',
+          current.id,
+        );
+        balances.forEach((balance) =>
+          validateQuantity(balance.quantity, product.quantity_decimals, true),
+        );
+        if (current.unit !== product.unit.trim().toLowerCase()) {
+          const soldInOpenSession = await db.getFirstAsync<{ count: number }>(
+            'SELECT COUNT(*) AS count FROM sale_lines l JOIN sales s ON s.id=l.sale_id JOIN cash_sessions c ON c.id=s.session_id WHERE c.close_date IS NULL AND l.product_id=?',
+            current.id,
+          );
+          if (soldInOpenSession?.count)
+            throw new Error('Cierra la caja antes de cambiar la unidad de un producto vendido.');
+        }
         await db.runAsync(
-          'UPDATE products SET name=?,category=?,subcategory=?,price_cash=?,price_transfer=?,image_path=? WHERE id=?',
+          'UPDATE products SET name=?,category=?,subcategory=?,unit=?,quantity_decimals=?,price_cash=?,price_transfer=?,image_path=? WHERE id=?',
           product.name.trim(),
           product.category.trim(),
           product.subcategory.trim(),
+          product.unit.trim().toLowerCase(),
+          product.quantity_decimals,
           product.price_cash,
           product.price_transfer,
           product.image_path,
@@ -345,10 +418,12 @@ export async function saveProduct(
         return;
       }
       const result = await db.runAsync(
-        'INSERT INTO products(name,category,subcategory,stock,price_cash,price_transfer,image_path) VALUES(?,?,?,?,?,?,?)',
+        'INSERT INTO products(name,category,subcategory,unit,quantity_decimals,stock,price_cash,price_transfer,image_path) VALUES(?,?,?,?,?,?,?,?,?)',
         product.name.trim(),
         product.category.trim(),
         product.subcategory.trim(),
+        product.unit.trim().toLowerCase(),
+        product.quantity_decimals,
         product.stock,
         product.price_cash,
         product.price_transfer,
@@ -386,12 +461,20 @@ export async function saveProduct(
 }
 export async function deleteProduct(id: number) {
   const db = await getDatabase();
-  const used = await db.getFirstAsync<{ count: number }>(
-    'SELECT COUNT(*) AS count FROM sale_lines WHERE product_id=?',
-    id,
-  );
-  if (used?.count) throw new Error('No se puede eliminar un producto con ventas registradas.');
-  await db.runAsync('DELETE FROM products WHERE id=?', id);
+  return transaction(db, async () => {
+    const used = await db.getFirstAsync<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM sale_lines WHERE product_id=?',
+      id,
+    );
+    if (used?.count) throw new Error('No se puede eliminar un producto con ventas registradas.');
+    const moved = await db.getFirstAsync<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM movements WHERE product_id=?',
+      id,
+    );
+    if (moved?.count)
+      throw new Error('No se puede eliminar un producto con movimientos registrados.');
+    await db.runAsync('DELETE FROM products WHERE id=?', id);
+  });
 }
 
 const mapSession = (
@@ -416,26 +499,33 @@ export async function getOpenSession() {
   return row ? mapSession(row) : null;
 }
 export async function openCashSession(fund: number, username: string) {
-  if (fund < 0) throw new Error('El fondo inicial no puede ser negativo.');
+  if (!Number.isFinite(fund) || fund < 0)
+    throw new Error('El fondo inicial debe ser un número válido no negativo.');
   const db = await getDatabase();
-  const stock = await db.getAllAsync<{ id: number; stock: number }>(
-    'SELECT id,stock FROM products',
-  );
   try {
-    const result = await db.runAsync(
-      'INSERT INTO cash_sessions(open_date,fund,products_start) VALUES(?,?,?)',
-      now(),
-      fund,
-      json(Object.fromEntries(stock.map((p) => [p.id, p.stock]))),
-    );
-    await db.runAsync(
-      'INSERT INTO audit_log(action,username,entity_id,date) VALUES(?,?,?,?)',
-      'cash_open',
-      username,
-      result.lastInsertRowId,
-      now(),
-    );
-    return result.lastInsertRowId;
+    return await transaction(db, async () => {
+      const stock = await db.getAllAsync<{ id: number; stock: number }>(
+        'SELECT id,stock FROM products',
+      );
+      const cursor = await db.getFirstAsync<{ id: number }>(
+        'SELECT COALESCE(MAX(id),0) AS id FROM movements',
+      );
+      const result = await db.runAsync(
+        'INSERT INTO cash_sessions(open_date,fund,products_start,movement_start_id) VALUES(?,?,?,?)',
+        now(),
+        roundMoney(fund),
+        json(Object.fromEntries(stock.map((p) => [p.id, p.stock]))),
+        cursor?.id ?? 0,
+      );
+      await db.runAsync(
+        'INSERT INTO audit_log(action,username,entity_id,date) VALUES(?,?,?,?)',
+        'cash_open',
+        username,
+        result.lastInsertRowId,
+        now(),
+      );
+      return result.lastInsertRowId;
+    });
   } catch (error) {
     if (String(error).includes('UNIQUE'))
       throw new Error('Ya existe una caja abierta.', { cause: error });
@@ -469,21 +559,24 @@ export async function getCashClosurePreview(sessionId: number): Promise<CashClos
     fund: number;
     open_date: string;
     products_start: string;
+    movement_start_id: number | null;
   }>(
-    'SELECT id,fund,open_date,products_start FROM cash_sessions WHERE id=? AND close_date IS NULL',
+    'SELECT id,fund,open_date,products_start,movement_start_id FROM cash_sessions WHERE id=? AND close_date IS NULL',
     sessionId,
   );
   if (!session) throw new Error('La sesión de caja ya está cerrada.');
 
   const [summary, products, movements, sold] = await Promise.all([
     getCashSummary(sessionId),
-    db.getAllAsync<{ id: number; name: string }>('SELECT id,name FROM products ORDER BY name'),
+    db.getAllAsync<{ id: number; name: string; unit: string }>(
+      'SELECT id,name,unit FROM products ORDER BY name',
+    ),
     db.getAllAsync<{ product_id: number; entries: number; exits: number }>(
       `SELECT product_id,
         SUM(CASE WHEN type='entrada' THEN quantity ELSE 0 END) AS entries,
         SUM(CASE WHEN type='salida' THEN quantity ELSE 0 END) AS exits
-       FROM movements WHERE date>=? GROUP BY product_id`,
-      session.open_date,
+       FROM movements WHERE ${session.movement_start_id === null ? 'date>?' : 'id>?'} GROUP BY product_id`,
+      session.movement_start_id ?? session.open_date,
     ),
     db.getAllAsync<{ product_id: number; quantity: number }>(
       `SELECT sl.product_id,SUM(sl.quantity) AS quantity
@@ -503,22 +596,25 @@ export async function getCashClosurePreview(sessionId: number): Promise<CashClos
     transferSales: summary.transferSales,
     cardSales: summary.cardSales,
     salesTotal: summary.salesTotal,
-    products: products.map((product) => {
-      const movement = movementByProduct.get(product.id);
-      const openingStock = opening[String(product.id)] ?? 0;
-      const entries = movement?.entries ?? 0;
-      const exits = movement?.exits ?? 0;
-      const soldQuantity = soldByProduct.get(product.id) ?? 0;
-      return {
-        productId: product.id,
-        productName: product.name,
-        openingStock,
-        entries,
-        exits,
-        sold: soldQuantity,
-        expectedStock: openingStock + entries - exits - soldQuantity,
-      };
-    }),
+    products: products
+      .filter((product) => (soldByProduct.get(product.id) ?? 0) > 0)
+      .map((product) => {
+        const movement = movementByProduct.get(product.id);
+        const openingStock = opening[String(product.id)] ?? 0;
+        const entries = movement?.entries ?? 0;
+        const exits = movement?.exits ?? 0;
+        const soldQuantity = soldByProduct.get(product.id) ?? 0;
+        return {
+          productId: product.id,
+          productName: product.name,
+          unit: product.unit,
+          openingStock,
+          entries,
+          exits,
+          sold: soldQuantity,
+          expectedStock: roundQuantity(openingStock + entries - exits - soldQuantity),
+        };
+      }),
   };
 }
 
@@ -528,7 +624,13 @@ function reconcileCashClosure(
 ): CashClosureReconciliation {
   const allowedDenominations = new Set<number>(CASH_DENOMINATIONS);
   const suppliedDenominations = new Set<number>();
-  let cashCount = 0;
+  let cashCount = input.coinsCount ?? 0;
+  if (
+    !Number.isFinite(cashCount) ||
+    cashCount < 0 ||
+    Math.abs(cashCount * 100 - Math.round(cashCount * 100)) > 0.000001
+  )
+    throw new Error('El conteo de monedas no es válido.');
   for (const item of input.denominations) {
     if (
       !allowedDenominations.has(item.denomination) ||
@@ -579,13 +681,12 @@ function reconcileCashClosure(
 }
 
 export async function closeCashSession(sessionId: number, input: CashClosureInput) {
-  const administrator = await authenticate(input.adminUsername, input.adminPassword);
-  if (!administrator || administrator.role !== 'admin')
-    throw new Error('Las credenciales del administrador no son válidas.');
-
   const db = await getDatabase();
   let result: CashClosureReconciliation | null = null;
-  await db.withTransactionAsync(async () => {
+  await transaction(db, async () => {
+    const administrator = await authenticate(input.adminUsername, input.adminPassword);
+    if (!administrator || administrator.role !== 'admin')
+      throw new Error('Las credenciales del administrador no son válidas.');
     const preview = await getCashClosurePreview(sessionId);
     const reconciliation = reconcileCashClosure(preview, input);
     if (
@@ -625,6 +726,7 @@ export async function closeCashSession(sessionId: number, input: CashClosureInpu
       sessionId,
       closeDate,
       json({
+        coinsCount: input.coinsCount ?? 0,
         denominations: input.denominations,
         cashDifference: reconciliation.cashDifference,
         transferDifference: reconciliation.transferDifference,
@@ -639,6 +741,12 @@ export async function closeCashSession(sessionId: number, input: CashClosureInpu
 }
 
 function validatePayments(total: number, method: SaleMethod, payments: Payment[]) {
+  if (
+    !['cash', 'transfer', 'card', 'mixed'].includes(method) ||
+    payments.some((p) => !['cash', 'transfer', 'card'].includes(p.type)) ||
+    new Set(payments.map((p) => p.type)).size !== payments.length
+  )
+    throw new Error('Los métodos de pago no son válidos.');
   const positive = payments.filter((p) => p.amount > 0);
   if (!positive.length || payments.some((p) => !Number.isFinite(p.amount) || p.amount < 0))
     throw new Error('Los pagos no son válidos.');
@@ -651,19 +759,42 @@ function validatePayments(total: number, method: SaleMethod, payments: Payment[]
     throw new Error('El método no coincide con el pago registrado.');
   return positive;
 }
+export async function findNetworkSale(
+  commandId: string,
+  clientId: string,
+  username: string,
+): Promise<number | null> {
+  const previous = await (
+    await getDatabase()
+  ).getFirstAsync<{ response: string | null }>(
+    'SELECT response FROM network_commands WHERE command_id=? AND client_id=?',
+    commandId,
+    clientId,
+  );
+  const parsed = parseJson(previous?.response ?? null);
+  if (!isRecord(parsed) || typeof parsed.saleId !== 'number') return null;
+  const sale = await (
+    await getDatabase()
+  ).getFirstAsync<{ user: string }>('SELECT user FROM sales WHERE id=?', parsed.saleId);
+  if (sale?.user !== username) throw new Error('La venta pendiente pertenece a otro usuario.');
+  return parsed.saleId;
+}
 export async function registerSale(
   items: CartItem[],
   method: SaleMethod,
   payments: Payment[],
   username: string,
   networkCommand?: { commandId: string; clientId: string },
+  expectedSessionId?: number,
 ) {
   if (!items.length) throw new Error('El carrito está vacío.');
   const db = await getDatabase();
-  const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const total = roundMoney(
+    items.reduce((sum, item) => sum + roundMoney(item.price * item.quantity), 0),
+  );
   const validPayments = validatePayments(total, method, payments);
   let saleId = 0;
-  await db.withTransactionAsync(async () => {
+  await transaction(db, async () => {
     if (networkCommand) {
       const reservation = await db.runAsync(
         `INSERT OR IGNORE INTO network_commands(command_id,client_id,action,response,created_at)
@@ -682,6 +813,12 @@ export async function registerSale(
         );
         const parsed = parseJson(previous?.response ?? null);
         if (isRecord(parsed) && typeof parsed.saleId === 'number') {
+          const sale = await db.getFirstAsync<{ user: string }>(
+            'SELECT user FROM sales WHERE id=?',
+            parsed.saleId,
+          );
+          if (sale?.user !== username)
+            throw new Error('La venta pendiente pertenece a otro usuario.');
           saleId = parsed.saleId;
           return;
         }
@@ -692,6 +829,8 @@ export async function registerSale(
       'SELECT id FROM cash_sessions WHERE close_date IS NULL LIMIT 1',
     );
     if (!session) throw new Error('Debes abrir una sesión de caja antes de vender.');
+    if (expectedSessionId !== undefined && session.id !== expectedSessionId)
+      throw new Error('La caja cambió. Actualiza el carrito antes de vender.');
     for (const item of items) {
       if (!Number.isFinite(item.quantity) || item.quantity <= 0)
         throw new Error(`Cantidad inválida para ${item.product.name}.`);
@@ -699,8 +838,20 @@ export async function registerSale(
         'SELECT * FROM products WHERE id=?',
         item.product.id,
       );
-      if (!current || current.stock < item.quantity)
+      if (current) validateQuantity(item.quantity, current.quantity_decimals);
+      if (!current || current.stock + 0.000001 < item.quantity)
         throw new Error(`Stock insuficiente para ${item.product.name}.`);
+      const price = method === 'transfer' ? current.price_transfer : current.price_cash;
+      if (!Number.isFinite(item.price) || Math.abs(item.price - price) > 0.000001)
+        throw new Error(`El precio de ${current.name} cambió. Actualiza el carrito.`);
+      if (!Number.isInteger(item.areaId)) throw new Error('Selecciona el área de venta.');
+      const available = await db.getFirstAsync<{ quantity: number }>(
+        'SELECT quantity FROM area_stock WHERE area_id=? AND product_id=?',
+        item.areaId,
+        current.id,
+      );
+      if (!available || available.quantity + 0.000001 < item.quantity)
+        throw new Error(`Stock insuficiente de ${current.name} en el área seleccionada.`);
     }
     const sale = await db.runAsync(
       'INSERT INTO sales(session_id,user,date,total,method,payments) VALUES(?,?,?,?,?,?)',
@@ -713,42 +864,34 @@ export async function registerSale(
     );
     saleId = sale.lastInsertRowId;
     for (const item of items) {
-      const subtotal = item.price * item.quantity;
+      const subtotal = roundMoney(item.price * item.quantity);
       await db.runAsync(
-        'INSERT INTO sale_lines(sale_id,product_id,name,quantity,price,subtotal) VALUES(?,?,?,?,?,?)',
+        'INSERT INTO sale_lines(sale_id,product_id,name,quantity,price,subtotal,area_id,unit) VALUES(?,?,?,?,?,?,?,?)',
         saleId,
         item.product.id,
         item.product.name,
         item.quantity,
         item.price,
         subtotal,
+        item.areaId,
+        item.product.unit,
       );
       const update = await db.runAsync(
-        'UPDATE products SET stock=stock-? WHERE id=? AND stock>=?',
+        'UPDATE products SET stock=ROUND(stock-?,3) WHERE id=? AND stock+0.000001>=?',
         item.quantity,
         item.product.id,
         item.quantity,
       );
       if (!update.changes) throw new Error(`Stock insuficiente para ${item.product.name}.`);
-      let remaining = item.quantity;
-      const areaRows = await db.getAllAsync<{ area_id: number; quantity: number }>(
-        `SELECT area_id,quantity FROM area_stock WHERE product_id=? AND quantity>0
-         ORDER BY CASE WHEN area_id=(SELECT id FROM areas WHERE name='Almacén principal' COLLATE NOCASE) THEN 0 ELSE 1 END, area_id`,
+      const areaUpdate = await db.runAsync(
+        'UPDATE area_stock SET quantity=ROUND(quantity-?,3) WHERE area_id=? AND product_id=? AND quantity+0.000001>=?',
+        item.quantity,
+        item.areaId,
         item.product.id,
+        item.quantity,
       );
-      for (const areaRow of areaRows) {
-        if (remaining <= 0) break;
-        const deducted = Math.min(remaining, areaRow.quantity);
-        await db.runAsync(
-          'UPDATE area_stock SET quantity=quantity-? WHERE area_id=? AND product_id=?',
-          deducted,
-          areaRow.area_id,
-          item.product.id,
-        );
-        remaining -= deducted;
-      }
-      if (remaining > 0.0001)
-        throw new Error(`La distribución de stock de ${item.product.name} es inconsistente.`);
+      if (!areaUpdate.changes)
+        throw new Error(`Stock insuficiente de ${item.product.name} en el área seleccionada.`);
     }
     await db.runAsync(
       'INSERT INTO network_events(type,entity_id,created_at) VALUES(?,?,?)',
@@ -781,12 +924,21 @@ export async function getSale(id: number) {
   return { sale: { ...row, payments: parsePayments(row.payments) }, lines };
 }
 
+export async function listAreaStock() {
+  return (await getDatabase()).getAllAsync<AreaStock>(
+    'SELECT area_id,product_id,quantity FROM area_stock ORDER BY area_id,product_id',
+  );
+}
+
 export async function listAreas() {
   return (await getDatabase()).getAllAsync<Area>('SELECT * FROM areas ORDER BY name');
 }
 export async function addArea(name: string) {
   if (!name.trim()) throw new Error('El nombre del área es obligatorio.');
-  await (await getDatabase()).runAsync('INSERT INTO areas(name) VALUES(?)', name.trim());
+  const db = await getDatabase();
+  await transaction(db, async () => {
+    await db.runAsync('INSERT INTO areas(name) VALUES(?)', name.trim());
+  });
 }
 export async function registerMovement(input: {
   type: MovementType;
@@ -796,15 +948,18 @@ export async function registerMovement(input: {
   toArea?: string;
   username: string;
 }) {
+  if (!['entrada', 'salida', 'traslado'].includes(input.type))
+    throw new Error('El tipo de movimiento no es válido.');
   if (!Number.isFinite(input.quantity) || input.quantity <= 0)
     throw new Error('La cantidad debe ser mayor que cero.');
   const db = await getDatabase();
-  await db.withTransactionAsync(async () => {
+  await transaction(db, async () => {
     const product = await db.getFirstAsync<Producto>(
       'SELECT * FROM products WHERE id=?',
       input.productId,
     );
     if (!product) throw new Error('Producto no encontrado.');
+    validateQuantity(input.quantity, product.quantity_decimals);
     const areaId = async (name: string) => {
       const area = await db.getFirstAsync<{ id: number }>(
         'SELECT id FROM areas WHERE name=? COLLATE NOCASE',
@@ -829,10 +984,14 @@ export async function registerMovement(input: {
     if (input.type === 'entrada') {
       if (!input.toArea) throw new Error('Selecciona un área de destino.');
       const target = await areaId(input.toArea);
-      await db.runAsync('UPDATE products SET stock=stock+? WHERE id=?', input.quantity, product.id);
+      await db.runAsync(
+        'UPDATE products SET stock=ROUND(stock+?,3) WHERE id=?',
+        input.quantity,
+        product.id,
+      );
       await db.runAsync(
         `INSERT INTO area_stock(area_id,product_id,quantity) VALUES(?,?,?)
-         ON CONFLICT(area_id,product_id) DO UPDATE SET quantity=quantity+excluded.quantity`,
+         ON CONFLICT(area_id,product_id) DO UPDATE SET quantity=ROUND(quantity+excluded.quantity,3)`,
         target,
         product.id,
         input.quantity,
@@ -841,7 +1000,7 @@ export async function registerMovement(input: {
       if (!input.fromArea) throw new Error('Selecciona un área de origen.');
       const source = await areaId(input.fromArea);
       const areaChanged = await db.runAsync(
-        'UPDATE area_stock SET quantity=quantity-? WHERE area_id=? AND product_id=? AND quantity>=?',
+        'UPDATE area_stock SET quantity=ROUND(quantity-?,3) WHERE area_id=? AND product_id=? AND quantity+0.000001>=?',
         input.quantity,
         source,
         product.id,
@@ -849,7 +1008,7 @@ export async function registerMovement(input: {
       );
       if (!areaChanged.changes) throw new Error('Stock insuficiente en el área de origen.');
       const changed = await db.runAsync(
-        'UPDATE products SET stock=stock-? WHERE id=? AND stock>=?',
+        'UPDATE products SET stock=ROUND(stock-?,3) WHERE id=? AND stock+0.000001>=?',
         input.quantity,
         product.id,
         input.quantity,
@@ -860,8 +1019,9 @@ export async function registerMovement(input: {
         throw new Error('El traslado requiere áreas de origen y destino diferentes.');
       const source = await areaId(input.fromArea);
       const target = await areaId(input.toArea);
+      if (source === target) throw new Error('El origen y el destino deben ser diferentes.');
       const changed = await db.runAsync(
-        'UPDATE area_stock SET quantity=quantity-? WHERE area_id=? AND product_id=? AND quantity>=?',
+        'UPDATE area_stock SET quantity=ROUND(quantity-?,3) WHERE area_id=? AND product_id=? AND quantity+0.000001>=?',
         input.quantity,
         source,
         product.id,
@@ -870,7 +1030,7 @@ export async function registerMovement(input: {
       if (!changed.changes) throw new Error('Stock insuficiente en el área de origen.');
       await db.runAsync(
         `INSERT INTO area_stock(area_id,product_id,quantity) VALUES(?,?,?)
-         ON CONFLICT(area_id,product_id) DO UPDATE SET quantity=quantity+excluded.quantity`,
+         ON CONFLICT(area_id,product_id) DO UPDATE SET quantity=ROUND(quantity+excluded.quantity,3)`,
         target,
         product.id,
         input.quantity,
@@ -921,6 +1081,18 @@ export async function listMovements(
   );
 }
 
+export async function getHomeSummary() {
+  const { start, end } = dayRange();
+  const totals = await (
+    await getDatabase()
+  ).getFirstAsync<{ totalSales: number; salesCount: number }>(
+    'SELECT COALESCE(SUM(total),0) AS totalSales,COUNT(*) AS salesCount FROM sales WHERE date BETWEEN ? AND ?',
+    start,
+    end,
+  );
+  return totals ?? { totalSales: 0, salesCount: 0 };
+}
+
 export async function getDailyReport(date = new Date()): Promise<DailyReport> {
   const db = await getDatabase();
   const { start, end } = dayRange(date);
@@ -939,8 +1111,13 @@ export async function getDailyReport(date = new Date()): Promise<DailyReport> {
     start,
     end,
   );
-  const byProduct = await db.getAllAsync<{ product: string; quantity: number; total: number }>(
-    'SELECT l.name AS product,SUM(l.quantity) AS quantity,SUM(l.subtotal) AS total FROM sale_lines l JOIN sales s ON s.id=l.sale_id WHERE s.date BETWEEN ? AND ? GROUP BY l.product_id,l.name ORDER BY quantity DESC',
+  const byProduct = await db.getAllAsync<{
+    product: string;
+    unit: string;
+    quantity: number;
+    total: number;
+  }>(
+    'SELECT l.name AS product,l.unit,ROUND(SUM(l.quantity),3) AS quantity,SUM(l.subtotal) AS total FROM sale_lines l JOIN sales s ON s.id=l.sale_id WHERE s.date BETWEEN ? AND ? GROUP BY l.product_id,l.name,l.unit ORDER BY quantity DESC',
     start,
     end,
   );
@@ -977,11 +1154,11 @@ export async function getExportRows(
     );
   if (type === 'inventory')
     return db.getAllAsync<Record<string, SQLite.SQLiteBindValue>>(
-      'SELECT id,name,category,subcategory,stock,price_cash,price_transfer FROM products ORDER BY name',
+      'SELECT id,name,category,subcategory,unit,quantity_decimals,stock,price_cash,price_transfer FROM products ORDER BY name',
     );
   if (type === 'sold')
     return db.getAllAsync<Record<string, SQLite.SQLiteBindValue>>(
-      'SELECT l.product_id,l.name,SUM(l.quantity) AS quantity,SUM(l.subtotal) AS total FROM sale_lines l JOIN sales s ON s.id=l.sale_id WHERE s.date BETWEEN ? AND ? GROUP BY l.product_id,l.name',
+      'SELECT l.product_id,l.name,l.unit,ROUND(SUM(l.quantity),3) AS quantity,SUM(l.subtotal) AS total FROM sale_lines l JOIN sales s ON s.id=l.sale_id WHERE s.date BETWEEN ? AND ? GROUP BY l.product_id,l.name,l.unit',
       start,
       end,
     );
@@ -990,10 +1167,13 @@ export async function getExportRows(
   );
 }
 
-export async function importProducts(rows: Array<Record<string, unknown>>, username: string) {
+export async function importProducts(
+  rows: Array<Record<string, string | number | boolean | null | undefined>>,
+  username: string,
+) {
   const db = await getDatabase();
   let imported = 0;
-  await db.withTransactionAsync(async () => {
+  await transaction(db, async () => {
     for (const row of rows) {
       const name = typeof row.name === 'string' ? row.name.trim() : '';
       if (!name) continue;
@@ -1007,11 +1187,24 @@ export async function importProducts(rows: Array<Record<string, unknown>>, usern
         transfer = Number(row.price_transfer ?? cash);
       if (![stock, cash, transfer].every(Number.isFinite) || stock < 0 || cash < 0 || transfer < 0)
         throw new Error(`Valores inválidos para ${name}.`);
+      const unit = String(row.unit ?? 'u')
+        .trim()
+        .toLowerCase();
+      const decimals =
+        row.quantity_decimals === undefined
+          ? fractionalUnit(unit)
+            ? 3
+            : 0
+          : Number(row.quantity_decimals);
+      if (!unit || ![0, 3].includes(decimals)) throw new Error(`Unidad inválida para ${name}.`);
+      validateQuantity(stock, decimals, true);
       const result = await db.runAsync(
-        'INSERT INTO products(name,category,subcategory,stock,price_cash,price_transfer,image_path) VALUES(?,?,?,?,?,?,NULL)',
+        'INSERT INTO products(name,category,subcategory,unit,quantity_decimals,stock,price_cash,price_transfer,image_path) VALUES(?,?,?,?,?,?,?,?,NULL)',
         name,
         typeof row.category === 'string' ? row.category : '',
         typeof row.subcategory === 'string' ? row.subcategory : '',
+        unit,
+        decimals,
         stock,
         cash,
         transfer,

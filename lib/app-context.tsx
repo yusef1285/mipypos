@@ -18,7 +18,8 @@ import {
   initializeDatabase,
   setSetting,
 } from '@/lib/database';
-import { getHostSnapshot, loginToHost, logoutFromHost } from '@/lib/network/client';
+import { getPendingSale } from '@/lib/network/pending-sale';
+import { HostRejection, getHostSnapshot, loginToHost, logoutFromHost } from '@/lib/network/client';
 import { loadNetworkConfig, saveNetworkConfig } from '@/lib/network/config';
 import { startLanHost, stopLanHost } from '@/lib/network/host';
 import type { NetworkConfig } from '@/lib/network/types';
@@ -106,8 +107,23 @@ export function AppProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     if (!ready || networkConfig.mode !== 'client' || !networkConfig.hostUrl || !user)
       return () => undefined;
-    const poll = setInterval(() => void refresh().catch(() => undefined), 1500);
-    return () => clearInterval(poll);
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        await refresh();
+      } catch (failure) {
+        if (active && failure instanceof HostRejection && failure.code === 'AUTH_EXPIRED')
+          setUser(null);
+      } finally {
+        if (active) timer = setTimeout(() => void poll(), 1500);
+      }
+    };
+    timer = setTimeout(() => void poll(), 1500);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
   }, [networkConfig, ready, refresh, user]);
 
   const login = useCallback(
@@ -121,8 +137,8 @@ export function AppProvider({ children }: PropsWithChildren) {
         await AsyncStorage.setItem('mipypos.rememberedUsername', authenticated.username);
       else await AsyncStorage.removeItem('mipypos.rememberedUsername');
       setRememberedUsername(remember ? authenticated.username : '');
-      setUser(authenticated);
       if (networkConfig.mode === 'client') await refresh();
+      setUser(authenticated);
     },
     [networkConfig, refresh],
   );
@@ -130,19 +146,27 @@ export function AppProvider({ children }: PropsWithChildren) {
     setUser(null);
     if (networkConfig.mode === 'client') void logoutFromHost();
   }, [networkConfig.mode]);
-  const configureNetwork = useCallback(async (next: NetworkConfig) => {
-    stopLanHost();
-    await logoutFromHost();
-    await saveNetworkConfig(next);
-    setNetworkConfig(next);
-    setUser(null);
-    setSession(null);
-    setHostAddress('');
-    if (next.mode === 'host') {
-      setHostAddress(await startLanHost());
-      setSession(await getOpenSession());
-    }
-  }, []);
+  const configureNetwork = useCallback(
+    async (next: NetworkConfig) => {
+      const pending = await getPendingSale();
+      if (pending && (next.mode !== 'client' || next.hostUrl !== pending.hostUrl))
+        throw new Error(
+          'Confirma la venta pendiente antes de cambiar de administrador o trabajar solo.',
+        );
+      if (next.mode === 'host' && user?.role !== 'admin')
+        throw new Error('Solo un administrador puede iniciar el host.');
+      const address = next.mode === 'host' ? await startLanHost() : '';
+      await saveNetworkConfig(next);
+      if (next.mode !== 'host') stopLanHost();
+      await logoutFromHost();
+      const changedAuthority = networkConfig.mode === 'client' || next.mode === 'client';
+      setNetworkConfig(next);
+      if (changedAuthority) setUser(null);
+      setSession(next.mode === 'client' ? null : await getOpenSession());
+      setHostAddress(address);
+    },
+    [user, networkConfig.mode],
+  );
   const setLicense = useCallback(async (mode: LicenseMode, key?: string) => {
     if (mode === 'pro') {
       if (!key || !(await validateLicenseKey(key))) throw new Error('La licencia no es válida.');

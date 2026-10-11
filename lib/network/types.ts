@@ -1,4 +1,12 @@
-import type { Payment, Producto, SaleMethod, SesionCaja, Usuario } from '@/lib/models';
+import type {
+  Area,
+  AreaStock,
+  Payment,
+  Producto,
+  SaleMethod,
+  SesionCaja,
+  Usuario,
+} from '@/lib/models';
 
 export const LAN_PORT = 8787;
 
@@ -18,6 +26,8 @@ export interface NetworkSession {
 export interface NetworkSnapshot {
   revision: number;
   products: Producto[];
+  areas: Area[];
+  areaStock: AreaStock[];
   session: SesionCaja | null;
 }
 
@@ -26,8 +36,9 @@ export interface NetworkSaleCommand {
   clientId: string;
   token: string;
   method: SaleMethod;
+  sessionId: number;
   payments: Payment[];
-  items: Array<{ productId: number; quantity: number }>;
+  items: Array<{ productId: number; quantity: number; areaId: number }>;
 }
 
 export interface NetworkEvent {
@@ -41,4 +52,5 @@ export interface ApiResult<T> {
   ok: boolean;
   data?: T;
   error?: string;
+  code?: 'AUTH_EXPIRED' | 'REJECTED';
 }

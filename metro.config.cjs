@@ -8,7 +8,7 @@ const unique = (values) => Array.from(new Set(values));
 
 // Expo already includes the common source and asset extensions. Keep only the
 // extra web-facing assets this template needs.
-config.resolver.assetExts = unique([...config.resolver.assetExts, 'woff', 'woff2', 'ico']);
+config.resolver.assetExts = unique([...config.resolver.assetExts, 'woff', 'woff2', 'ico', 'wasm']);
 
 const firstHeaderValue = (value) => {
   if (!value) return undefined;
@@ -93,6 +93,8 @@ config.server = {
 
     return (req, res, next) => {
       normalizeProxyHeaders(req);
+      res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+      res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
       return metroMiddleware(req, res, next);
     };
   },

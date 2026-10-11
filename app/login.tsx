@@ -3,6 +3,7 @@ import { LockKeyhole } from 'lucide-react-native';
 import { useEffect, useState } from 'react';
 import { Alert, View } from 'react-native';
 
+import { LanConnection } from '@/components/LanConnection';
 import { BrandMark } from '@/components/BrandMark';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
@@ -58,10 +59,16 @@ export default function LoginScreen() {
               onSubmitEditing={() => void submit()}
             />
           </TextField>
-          <Checkbox isSelected={remember} onSelectedChange={setRemember}>
-            <Checkbox.Indicator />
-            <Typography.Paragraph>Recordar usuario</Typography.Paragraph>
-          </Checkbox>
+          <View className="flex-row items-center gap-3">
+            <Checkbox
+              accessibilityLabel="Recordar usuario"
+              isSelected={remember}
+              onSelectedChange={setRemember}
+            >
+              <Checkbox.Indicator />
+            </Checkbox>
+            <Typography.Paragraph className="flex-1">Recordar usuario</Typography.Paragraph>
+          </View>
           <Button
             size="lg"
             isDisabled={!username || !password || loading}
@@ -74,6 +81,9 @@ export default function LoginScreen() {
             Primer acceso: admin / admin123
           </Typography.Paragraph>
         </Card>
+        <View className="mt-5">
+          <LanConnection />
+        </View>
       </View>
     </Screen>
   );

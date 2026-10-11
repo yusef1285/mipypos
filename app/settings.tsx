@@ -12,6 +12,7 @@ import { BadgeCheck, LogOut, MonitorSmartphone, ShieldCheck } from 'lucide-react
 import { useEffect, useState } from 'react';
 import { Alert, View } from 'react-native';
 
+import { LanConnection } from '@/components/LanConnection';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
 import { getDeviceInfo, validateLicenseKey } from '@/lib/license';
@@ -104,6 +105,7 @@ export default function Settings() {
         <Row label="Identificador" value={device?.id ?? ''} />
         <Row label="Versión" value={device?.version ?? '1.0.0'} />
       </Card>
+      <LanConnection allowHost />
       <Button variant="danger-soft" size="lg" onPress={logout}>
         <LogOut className="text-danger" size={19} />
         <Button.Label>Cerrar sesión</Button.Label>

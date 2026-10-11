@@ -1,30 +1,32 @@
 import { Card, Chip, Typography } from 'heroui-native';
 import { Banknote, CreditCard, Send, ShoppingBag } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
-import { View } from 'react-native';
+import { Alert, View } from 'react-native';
 
 import { AccessDenied } from '@/components/AccessDenied';
 import { EmptyState, MetricCard, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
-import { getDailyReport } from '@/lib/database';
-import { getHostReport } from '@/lib/network/client';
+import { usePosRepository } from '@/lib/use-pos-repository';
 import { money } from '@/lib/format';
 import type { DailyReport } from '@/lib/models';
 import { canAccess } from '@/lib/permissions';
 
 export default function Reports() {
-  const { user, networkConfig } = useApp();
+  const { user } = useApp();
+  const { getDailyReport } = usePosRepository();
   const [report, setReport] = useState<DailyReport | null>(null);
-  const load = useCallback(
-    async () =>
-      setReport(
-        networkConfig.mode === 'client' && networkConfig.hostUrl
-          ? await getHostReport(networkConfig.hostUrl)
-          : await getDailyReport(),
-      ),
-    [networkConfig.hostUrl, networkConfig.mode],
-  );
+  const load = useCallback(async () => {
+    if (!user || !canAccess(user.role, 'reports')) return;
+    try {
+      setReport(await getDailyReport());
+    } catch (failure) {
+      Alert.alert(
+        'No se pudo cargar el reporte',
+        failure instanceof Error ? failure.message : 'Vuelve a intentarlo.',
+      );
+    }
+  }, [getDailyReport, user]);
   useEffect(() => {
     const timer = setTimeout(() => void load(), 0);
     return () => clearTimeout(timer);
@@ -55,7 +57,7 @@ export default function Reports() {
               <View>
                 <Typography.Paragraph className="font-semibold">{row.user}</Typography.Paragraph>
                 <Typography.Paragraph type="body-sm" color="muted">
-                  {row.count} ventas
+                  {row.count} {row.count === 1 ? 'venta' : 'ventas'}
                 </Typography.Paragraph>
               </View>
               <Typography.Paragraph className="font-semibold">
@@ -72,12 +74,12 @@ export default function Reports() {
         <Card className="p-4">
           {report.byProduct.map((row) => (
             <View
-              key={row.product}
+              key={`${row.product}:${row.unit}`}
               className="border-border flex-row items-center justify-between border-b py-3"
             >
               <Typography.Paragraph className="flex-1">{row.product}</Typography.Paragraph>
               <Chip size="sm" variant="soft">
-                {row.quantity} u.
+                {row.quantity} {row.unit}
               </Chip>
               <Typography.Paragraph className="ml-3">{money(row.total)}</Typography.Paragraph>
             </View>

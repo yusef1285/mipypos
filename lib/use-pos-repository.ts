@@ -1,0 +1,47 @@
+import { useMemo } from 'react';
+import { useApp } from '@/lib/app-context';
+import * as Database from '@/lib/database';
+import { requestHostOperation } from '@/lib/network/client';
+import type { PosOperation, PosArgs, PosResult } from '@/lib/network/operations';
+
+type Repository = { [K in PosOperation]: (...args: PosArgs<K>) => Promise<PosResult<K>> };
+
+export function usePosRepository(): Repository {
+  const { networkConfig } = useApp();
+  return useMemo(() => {
+    const bind =
+      <K extends PosOperation>(
+        operation: K,
+        handler: (...args: PosArgs<K>) => Promise<PosResult<K>>,
+      ): ((...args: PosArgs<K>) => Promise<PosResult<K>>) =>
+      (...args: PosArgs<K>): Promise<PosResult<K>> => {
+        if (networkConfig.mode === 'client') {
+          if (!networkConfig.hostUrl)
+            return Promise.reject(new Error('Escanea el QR del administrador.'));
+          return requestHostOperation(networkConfig.hostUrl, operation, args);
+        }
+        return handler(...args);
+      };
+    return {
+      listProducts: bind('listProducts', Database.listProducts),
+      listAreas: bind('listAreas', Database.listAreas),
+      listAreaStock: bind('listAreaStock', Database.listAreaStock),
+      saveProduct: bind('saveProduct', Database.saveProduct),
+      deleteProduct: bind('deleteProduct', Database.deleteProduct),
+      importProducts: bind('importProducts', Database.importProducts),
+      registerMovement: bind('registerMovement', Database.registerMovement),
+      addArea: bind('addArea', Database.addArea),
+      listMovements: bind('listMovements', Database.listMovements),
+      listUsers: bind('listUsers', Database.listUsers),
+      saveUser: bind('saveUser', Database.saveUser),
+      deleteUser: bind('deleteUser', Database.deleteUser),
+      getCashClosurePreview: bind('getCashClosurePreview', Database.getCashClosurePreview),
+      openCashSession: bind('openCashSession', Database.openCashSession),
+      closeCashSession: bind('closeCashSession', Database.closeCashSession),
+      getDailyReport: bind('getDailyReport', Database.getDailyReport),
+      getHomeSummary: bind('getHomeSummary', Database.getHomeSummary),
+      getExportRows: bind('getExportRows', Database.getExportRows),
+      getSale: bind('getSale', Database.getSale),
+    } satisfies Repository;
+  }, [networkConfig]);
+}

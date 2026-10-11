@@ -1,38 +1,48 @@
-import { Button, Card, Chip, Input, Typography, useThemeColor } from 'heroui-native';
+import * as Haptics from 'expo-haptics';
 import {
-  Banknote,
-  CreditCard,
-  Minus,
-  Plus,
-  Search,
-  Send,
-  ShoppingCart,
-  Trash2,
-} from 'lucide-react-native';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, View } from 'react-native';
-
+  Button,
+  Card,
+  Chip,
+  Input,
+  Label,
+  Skeleton,
+  TextField,
+  Typography,
+  useThemeColor,
+} from 'heroui-native';
+import { Minus, Plus, Trash2 } from 'lucide-react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, FlatList, View } from 'react-native';
+import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { AccessDenied } from '@/components/AccessDenied';
 import { EmptyState, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
 import { money } from '@/lib/format';
-import type { CartItem, PaymentType, Producto, SaleMethod } from '@/lib/models';
+import type { Area, AreaStock, CartItem, PaymentType, Producto, SaleMethod } from '@/lib/models';
 import { canAccess } from '@/lib/permissions';
-import { getPosSale, listPosProducts, registerPosSale } from '@/lib/pos-repository';
+import { registerPosSale } from '@/lib/pos-repository';
+import { getPendingSale, sendPendingSale } from '@/lib/network/pending-sale';
+import { getHostSnapshot } from '@/lib/network/client';
+import { usePosRepository } from '@/lib/use-pos-repository';
 import { createThermalTicket } from '@/lib/ticket';
+import { roundMoney, roundQuantity, validateQuantity } from '@/lib/units';
 
-const methods: Array<{ key: PaymentType; label: string; icon: typeof Banknote }> = [
-  { key: 'cash', label: 'Efectivo', icon: Banknote },
-  { key: 'transfer', label: 'Transferencia', icon: Send },
-  { key: 'card', label: 'Tarjeta', icon: CreditCard },
+const methods: Array<{ key: PaymentType; label: string }> = [
+  { key: 'cash', label: 'Efectivo' },
+  { key: 'transfer', label: 'Transferencia' },
+  { key: 'card', label: 'Tarjeta' },
 ];
-
 export default function Sales() {
   const { user, session, licenseMode, refresh, networkConfig } = useApp();
+  const { listProducts, listAreas, listAreaStock, getSale } = usePosRepository();
   const [products, setProducts] = useState<Producto[]>([]);
+  const [areas, setAreas] = useState<Area[]>([]);
+  const [stocks, setStocks] = useState<AreaStock[]>([]);
+  const [areaId, setAreaId] = useState<number>();
   const [search, setSearch] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
+  const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [method, setMethod] = useState<SaleMethod>('cash');
   const [amounts, setAmounts] = useState<Record<PaymentType, string>>({
     cash: '',
@@ -40,51 +50,102 @@ export default function Sales() {
     card: '',
   });
   const [saving, setSaving] = useState(false);
+  const [pendingSale, setPendingSale] = useState(false);
+  const loadingRef = useRef(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [accent, danger] = useThemeColor(['accent', 'danger']);
-  const load = useCallback(
-    async () => setProducts(await listPosProducts(networkConfig, search)),
-    [networkConfig, search],
-  );
+  const load = useCallback(async () => {
+    if (!user || !canAccess(user.role, 'sales') || loadingRef.current) return;
+    loadingRef.current = true;
+    try {
+      setPendingSale(networkConfig.mode === 'client' && Boolean(await getPendingSale()));
+      const data =
+        networkConfig.mode === 'client'
+          ? await getHostSnapshot(networkConfig.hostUrl)
+          : {
+              products: await listProducts(),
+              areas: await listAreas(),
+              areaStock: await listAreaStock(),
+            };
+      setProducts(data.products);
+      setAreas(data.areas);
+      setStocks(data.areaStock);
+      setAreaId((current) =>
+        data.areas.some((area) => area.id === current) ? current : data.areas[0]?.id,
+      );
+      setError('');
+    } catch (failure) {
+      setError(
+        failure instanceof Error ? failure.message : 'No se pudieron cargar las existencias.',
+      );
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } finally {
+      setLoading(false);
+      loadingRef.current = false;
+    }
+  }, [user, networkConfig, listProducts, listAreas, listAreaStock]);
   useEffect(() => {
-    const timer = setTimeout(() => void load(), 0);
-    return () => clearTimeout(timer);
+    // Synchronize with external SQLite/LAN stock through the polling subscription.
+    const initialTimer = setTimeout(() => void load(), 0);
+    const timer = setInterval(() => void load(), 2500);
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(timer);
+    };
   }, [load]);
-  const total = useMemo(
-    () => cart.reduce((sum, item) => sum + item.price * item.quantity, 0),
-    [cart],
+  const available = useMemo(
+    () =>
+      new Map(
+        stocks
+          .filter((stock) => stock.area_id === areaId)
+          .map((stock) => [stock.product_id, stock.quantity]),
+      ),
+    [stocks, areaId],
   );
-  const add = (product: Producto) => {
-    if (product.stock <= 0) return Alert.alert('Sin stock', 'Este producto no tiene existencias.');
-    setCart((current) => {
-      const item = current.find((row) => row.product.id === product.id);
-      if (item) {
-        if (item.quantity >= product.stock) {
-          Alert.alert('Stock insuficiente');
-          return current;
-        }
-        return current.map((row) =>
-          row.product.id === product.id ? { ...row, quantity: row.quantity + 1 } : row,
-        );
-      }
-      return [
-        ...current,
-        {
-          product,
-          quantity: 1,
-          price: method === 'transfer' ? product.price_transfer : product.price_cash,
-        },
-      ];
-    });
-  };
-  const quantity = (id: number, change: number) =>
+  const visible = products.filter((product) =>
+    `${product.name} ${product.category}`.toLowerCase().includes(search.toLowerCase()),
+  );
+  const total = roundMoney(
+    cart.reduce((sum, item) => sum + roundMoney(item.price * item.quantity), 0),
+  );
+  const updateQuantity = (id: number, value: string) => {
+    setDrafts((current) => ({ ...current, [id]: value }));
+    const quantity = Number(value.replace(',', '.'));
     setCart((current) =>
       current.map((item) =>
         item.product.id === id
-          ? { ...item, quantity: Math.min(item.product.stock, Math.max(1, item.quantity + change)) }
+          ? { ...item, quantity: Number.isFinite(quantity) ? quantity : 0 }
           : item,
       ),
     );
+  };
+  const add = (product: Producto) => {
+    if (!areaId || saving || pendingSale) return;
+    const stock = available.get(product.id) ?? 0;
+    const existing = cart.find((item) => item.product.id === product.id);
+    const quantity = roundQuantity((existing?.quantity ?? 0) + Math.min(1, stock));
+    if (stock <= 0 || quantity > stock) {
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      Alert.alert('Stock insuficiente en esta área');
+      return;
+    }
+    setDrafts((current) => ({ ...current, [product.id]: String(quantity) }));
+    if (existing) updateQuantity(product.id, String(quantity));
+    else
+      setCart((current) => [
+        ...current,
+        {
+          areaId,
+          product,
+          quantity,
+          price: method === 'transfer' ? product.price_transfer : product.price_cash,
+        },
+      ]);
+  };
   const chooseMethod = (next: SaleMethod) => {
+    if (saving || pendingSale) return;
+    void Haptics.selectionAsync();
     setMethod(next);
     setCart((current) =>
       current.map((item) => ({
@@ -94,195 +155,308 @@ export default function Sales() {
     );
     setAmounts({ cash: '', transfer: '', card: '' });
   };
-  const payments = methods.map((item) => ({
-    type: item.key,
-    amount:
-      method === 'mixed'
-        ? Number(amounts[item.key].replace(',', '.')) || 0
-        : item.key === method
-          ? total
-          : 0,
-  }));
   const finish = async () => {
-    if (!user) return;
+    if (!user || saving) return;
+    let committed = false;
     try {
       setSaving(true);
-      const id = await registerPosSale(networkConfig, cart, method, payments, user.username);
+      let id: number;
+      if (pendingSale) {
+        id = await sendPendingSale(networkConfig, user.username);
+      } else {
+        if (!session) throw new Error('Abre la caja antes de vender.');
+        cart.forEach((item) => {
+          validateQuantity(item.quantity, item.product.quantity_decimals);
+          if (item.quantity > (available.get(item.product.id) ?? 0))
+            throw new Error(`Stock insuficiente de ${item.product.name} en esta área.`);
+        });
+        const payments = methods.map(({ key }) => ({
+          type: key,
+          amount:
+            method === 'mixed'
+              ? Number(amounts[key].replace(',', '.'))
+              : method === key
+                ? total
+                : 0,
+        }));
+        id = await registerPosSale(
+          networkConfig,
+          cart,
+          method,
+          payments,
+          user.username,
+          session.id,
+        );
+      }
+      setPendingSale(false);
+      committed = true;
       setCart([]);
+      setDrafts({});
       setAmounts({ cash: '', transfer: '', card: '' });
-      await refresh();
-      await load();
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert(
         'Venta registrada',
-        `Venta #${id} guardada correctamente.`,
-        licenseMode === 'pro' && networkConfig.mode !== 'client'
+        `Venta #${id}`,
+        licenseMode === 'pro'
           ? [
               { text: 'Cerrar' },
               {
-                text: 'Generar ticket',
-                onPress: () =>
+                text: 'Ticket',
+                onPress: () => {
                   void (async () => {
-                    const data = await getPosSale(networkConfig, id);
-                    if (data) await createThermalTicket(data.sale, data.lines, licenseMode);
-                  })(),
+                    try {
+                      const data = await getSale(id);
+                      if (data) await createThermalTicket(data.sale, data.lines, licenseMode);
+                    } catch (failure) {
+                      Alert.alert(
+                        'No se pudo generar el ticket',
+                        failure instanceof Error ? failure.message : 'Inténtalo de nuevo.',
+                      );
+                    }
+                  })();
+                },
               },
             ]
           : [{ text: 'Aceptar' }],
       );
-    } catch (error) {
+      await refresh();
+      await load();
+    } catch (failure) {
+      setPendingSale(networkConfig.mode === 'client' && Boolean(await getPendingSale()));
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       Alert.alert(
-        'No se pudo registrar',
-        error instanceof Error ? error.message : 'Revisa los datos.',
+        committed ? 'Venta guardada; actualización pendiente' : 'No se pudo confirmar la venta',
+        failure instanceof Error ? failure.message : 'Inténtalo de nuevo.',
       );
     } finally {
       setSaving(false);
     }
   };
   if (!user || !canAccess(user.role, 'sales')) return <AccessDenied />;
-  return (
-    <Screen keyboard>
-      <View className="flex-row items-center justify-between">
-        <Typography.Heading type="h2">Nueva venta</Typography.Heading>
-        <Chip color={session ? 'success' : 'danger'} variant="soft">
-          {session ? 'Caja abierta' : 'Caja cerrada'}
-        </Chip>
-      </View>
-      <View className="relative">
-        <View className="absolute top-3 left-3 z-10">
-          <Search color={accent} size={20} />
-        </View>
-        <Input
-          className="pl-10"
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Buscar producto"
-        />
-      </View>
-      <View className="flex-row flex-wrap gap-3">
-        {products.slice(0, 30).map((product) => (
-          <Card key={product.id} className="min-w-40 flex-1 basis-[45%] p-3">
-            <Typography.Paragraph className="font-semibold" numberOfLines={1}>
-              {product.name}
-            </Typography.Paragraph>
-            <Typography.Paragraph
-              type="body-sm"
-              className={product.stock <= 5 ? 'text-warning' : 'text-muted'}
-            >
-              {product.stock} disponibles
-            </Typography.Paragraph>
-            <View className="mt-3 flex-row items-center justify-between">
-              <Typography.Heading type="h4">
-                {money(method === 'transfer' ? product.price_transfer : product.price_cash)}
-              </Typography.Heading>
-              <Button size="sm" isIconOnly onPress={() => add(product)}>
-                <Plus color="white" size={18} />
-              </Button>
-            </View>
-          </Card>
-        ))}
-      </View>
+  const footer = (
+    <View className="gap-5 pt-5">
       <SectionTitle badge={cart.length}>Carrito</SectionTitle>
       {cart.length ? (
-        <Card className="gap-1 p-3">
-          {cart.map((item) => (
-            <View
-              key={item.product.id}
-              className="border-border flex-row items-center gap-2 border-b py-3"
-            >
-              <View className="flex-1">
-                <Typography.Paragraph className="font-semibold">
-                  {item.product.name}
-                </Typography.Paragraph>
-                <Typography.Paragraph type="body-sm" color="muted">
-                  {money(item.price)} · {money(item.price * item.quantity)}
-                </Typography.Paragraph>
-              </View>
-              <Button
-                size="sm"
-                variant="ghost"
-                isIconOnly
-                onPress={() => quantity(item.product.id, -1)}
-              >
-                <Minus color={accent} size={17} />
-              </Button>
-              <Typography.Paragraph className="w-7 text-center">
-                {item.quantity}
+        cart.map((item) => (
+          <Animated.View key={item.product.id} entering={FadeIn} exiting={FadeOut}>
+            <Card className="gap-3 p-3">
+              <Typography.Paragraph className="font-semibold">
+                {item.product.name}
               </Typography.Paragraph>
-              <Button
-                size="sm"
-                variant="ghost"
-                isIconOnly
-                onPress={() => quantity(item.product.id, 1)}
-              >
-                <Plus color={accent} size={17} />
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                isIconOnly
-                onPress={() =>
-                  setCart((current) => current.filter((row) => row.product.id !== item.product.id))
-                }
-              >
-                <Trash2 color={danger} size={17} />
-              </Button>
-            </View>
-          ))}
-        </Card>
+              <Typography.Paragraph type="body-sm" color="muted">
+                {money(item.price)} / {item.product.unit} ·{' '}
+                {money(roundMoney(item.price * item.quantity))}
+              </Typography.Paragraph>
+              <View className="flex-row items-center gap-2">
+                <Button
+                  size="sm"
+                  isIconOnly
+                  variant="ghost"
+                  isDisabled={saving || pendingSale}
+                  onPress={() =>
+                    updateQuantity(
+                      item.product.id,
+                      String(
+                        roundQuantity(
+                          Math.max(item.product.quantity_decimals ? 0.001 : 1, item.quantity - 1),
+                        ),
+                      ),
+                    )
+                  }
+                >
+                  <Minus size={18} color={accent} />
+                </Button>
+                <Input
+                  className="min-w-0 flex-1"
+                  accessibilityLabel={`Cantidad en ${item.product.unit} de ${item.product.name}`}
+                  editable={!saving && !pendingSale}
+                  keyboardType={item.product.quantity_decimals ? 'decimal-pad' : 'number-pad'}
+                  value={drafts[item.product.id] ?? String(item.quantity)}
+                  onChangeText={(value) => updateQuantity(item.product.id, value)}
+                />
+                <Button
+                  size="sm"
+                  isIconOnly
+                  variant="ghost"
+                  isDisabled={saving || pendingSale}
+                  onPress={() =>
+                    updateQuantity(
+                      item.product.id,
+                      String(
+                        roundQuantity(
+                          Math.min(available.get(item.product.id) ?? 0, item.quantity + 1),
+                        ),
+                      ),
+                    )
+                  }
+                >
+                  <Plus size={18} color={accent} />
+                </Button>
+                <Button
+                  size="sm"
+                  isIconOnly
+                  variant="ghost"
+                  isDisabled={saving || pendingSale}
+                  onPress={() =>
+                    setCart((current) =>
+                      current.filter((row) => row.product.id !== item.product.id),
+                    )
+                  }
+                >
+                  <Trash2 size={18} color={danger} />
+                </Button>
+              </View>
+            </Card>
+          </Animated.View>
+        ))
       ) : (
         <EmptyState title="Añade productos para comenzar" />
       )}
       <SectionTitle>Forma de pago</SectionTitle>
       <View className="flex-row flex-wrap gap-2">
-        {(['cash', 'transfer', 'card', 'mixed'] as SaleMethod[]).map((value) => (
+        {[...methods, { key: 'mixed' as const, label: 'Mixto' }].map(({ key, label }) => (
           <Chip
-            key={value}
-            variant={method === value ? 'primary' : 'soft'}
-            onPress={() => chooseMethod(value)}
+            key={key}
+            disabled={saving || pendingSale}
+            variant={method === key ? 'primary' : 'soft'}
+            onPress={() => chooseMethod(key)}
           >
-            {value === 'cash'
-              ? 'Efectivo'
-              : value === 'transfer'
-                ? 'Transferencia'
-                : value === 'card'
-                  ? 'Tarjeta'
-                  : 'Mixto'}
+            <Chip.Label numberOfLines={1}>{label}</Chip.Label>
           </Chip>
         ))}
       </View>
-      {method === 'mixed' ? (
-        <Card className="gap-3 p-4">
-          {methods.map((item) => (
-            <View key={item.key} className="flex-row items-center gap-3">
-              <item.icon color={accent} size={20} />
-              <Typography.Paragraph className="flex-1">{item.label}</Typography.Paragraph>
+      {method === 'mixed'
+        ? methods.map(({ key, label }) => (
+            <TextField key={key}>
+              <Label>{label} (CUP)</Label>
               <Input
-                className="w-32"
+                editable={!saving && !pendingSale}
                 keyboardType="decimal-pad"
-                value={amounts[item.key]}
-                onChangeText={(value) =>
-                  setAmounts((current) => ({ ...current, [item.key]: value }))
-                }
+                value={amounts[key]}
+                onChangeText={(value) => setAmounts((current) => ({ ...current, [key]: value }))}
                 placeholder="0.00"
               />
-            </View>
-          ))}
-        </Card>
+            </TextField>
+          ))
+        : null}
+      <Typography.Heading type="h2">Total: {money(total)}</Typography.Heading>
+      {pendingSale ? (
+        <Typography.Paragraph className="text-warning">
+          Hay una venta pendiente de confirmación. Reintenta para comprobarla sin volver a cobrar.
+        </Typography.Paragraph>
       ) : null}
-      <Card className="flex-row items-center justify-between p-5">
-        <View>
-          <Typography.Paragraph color="muted">Total</Typography.Paragraph>
-          <Typography.Heading type="h1">{money(total)}</Typography.Heading>
-        </View>
-        <ShoppingCart color={accent} size={30} />
-      </Card>
       <Button
         size="lg"
-        isDisabled={!session || !cart.length || saving}
+        isDisabled={
+          saving || (!pendingSale && (!session || !cart.length || !areaId || Boolean(error)))
+        }
         onPress={() => void finish()}
       >
-        <Button.Label>{saving ? 'Registrando…' : 'Completar venta'}</Button.Label>
+        <Button.Label>
+          {saving ? 'Confirmando…' : pendingSale ? 'Confirmar venta pendiente' : 'Completar venta'}
+        </Button.Label>
       </Button>
+    </View>
+  );
+  return (
+    <Screen keyboard scroll={false}>
+      <FlatList
+        data={loading || error ? [] : visible}
+        keyExtractor={(product) => String(product.id)}
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={{
+          padding: 16,
+          paddingBottom: 40,
+          gap: 12,
+          width: '100%',
+          maxWidth: 1024,
+          alignSelf: 'center',
+        }}
+        onRefresh={() => void load()}
+        refreshing={loading}
+        ListHeaderComponent={
+          <View className="gap-4 pb-3">
+            <Typography.Heading type="h2">Nueva venta</Typography.Heading>
+            <Chip color={session ? 'success' : 'danger'} variant="soft">
+              <Chip.Label>{session ? 'Caja abierta' : 'Caja cerrada'}</Chip.Label>
+            </Chip>
+            <SectionTitle>Área de venta</SectionTitle>
+            <View className="flex-row flex-wrap gap-2">
+              {areas.map((area) => (
+                <Chip
+                  key={area.id}
+                  disabled={saving || pendingSale || cart.length > 0}
+                  variant={areaId === area.id ? 'primary' : 'soft'}
+                  onPress={() => {
+                    void Haptics.selectionAsync();
+                    setAreaId(area.id);
+                  }}
+                >
+                  <Chip.Label numberOfLines={1}>{area.name}</Chip.Label>
+                </Chip>
+              ))}
+            </View>
+            {cart.length ? (
+              <Button
+                variant="secondary"
+                isDisabled={saving || pendingSale}
+                onPress={() => {
+                  setCart([]);
+                  setDrafts({});
+                }}
+              >
+                <Button.Label>Vaciar carrito para cambiar de área</Button.Label>
+              </Button>
+            ) : null}
+            <Input value={search} onChangeText={setSearch} placeholder="Buscar producto" />
+          </View>
+        }
+        ListEmptyComponent={
+          loading ? (
+            <View className="gap-3">
+              <Skeleton className="h-20 rounded-xl" />
+              <Skeleton className="h-20 rounded-xl" />
+            </View>
+          ) : error ? (
+            <Card className="gap-3 p-4">
+              <Typography.Paragraph>{error}</Typography.Paragraph>
+              <Button onPress={() => void load()}>
+                <Button.Label>Reintentar</Button.Label>
+              </Button>
+            </Card>
+          ) : (
+            <EmptyState
+              title={search ? 'No hay coincidencias' : 'No hay productos'}
+              action={
+                <Button variant="secondary" onPress={() => (search ? setSearch('') : void load())}>
+                  <Button.Label>{search ? 'Limpiar búsqueda' : 'Actualizar'}</Button.Label>
+                </Button>
+              }
+            />
+          )
+        }
+        renderItem={({ item: product }) => (
+          <Card className="flex-row items-center gap-3 p-3">
+            <View className="flex-1">
+              <Typography.Paragraph className="font-semibold">{product.name}</Typography.Paragraph>
+              <Typography.Paragraph type="body-sm" color="muted">
+                {available.get(product.id) ?? 0} {product.unit} disponibles ·{' '}
+                {money(method === 'transfer' ? product.price_transfer : product.price_cash)} /{' '}
+                {product.unit}
+              </Typography.Paragraph>
+            </View>
+            <Button
+              size="sm"
+              isIconOnly
+              isDisabled={saving || pendingSale || !(available.get(product.id) ?? 0)}
+              onPress={() => add(product)}
+            >
+              <Plus color="white" size={18} />
+            </Button>
+          </Card>
+        )}
+        ListFooterComponent={footer}
+      />
     </Screen>
   );
 }

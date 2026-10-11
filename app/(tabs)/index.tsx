@@ -15,21 +15,32 @@ import { View } from 'react-native';
 import { MetricCard, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
-import { getDailyReport, listProducts } from '@/lib/database';
+import { usePosRepository } from '@/lib/use-pos-repository';
 import { money } from '@/lib/format';
-import type { DailyReport, Producto } from '@/lib/models';
+import type { Producto } from '@/lib/models';
+import type { getHomeSummary as homeSummary } from '@/lib/database';
+import { Alert } from 'react-native';
 import { canAccess } from '@/lib/permissions';
 
 export default function Home() {
   const { user, session, licenseMode, refresh } = useApp();
   const accent = useThemeColor('accent');
-  const [report, setReport] = useState<DailyReport | null>(null);
+  const { getHomeSummary, listProducts } = usePosRepository();
+  const [report, setReport] = useState<Awaited<ReturnType<typeof homeSummary>> | null>(null);
   const [low, setLow] = useState<Producto[]>([]);
   const load = useCallback(async () => {
-    await refresh();
-    setReport(await getDailyReport());
-    setLow((await listProducts()).filter((p) => p.stock <= 5));
-  }, [refresh]);
+    if (!user) return;
+    try {
+      await refresh();
+      setReport(await getHomeSummary());
+      setLow((await listProducts()).filter((p) => p.stock <= 5));
+    } catch (failure) {
+      Alert.alert(
+        'No se pudo actualizar el resumen',
+        failure instanceof Error ? failure.message : 'Vuelve a intentarlo.',
+      );
+    }
+  }, [refresh, getHomeSummary, listProducts, user]);
   useEffect(() => {
     const timer = setTimeout(() => void load(), 0);
     return () => clearTimeout(timer);
@@ -126,7 +137,7 @@ export default function Home() {
               <View key={product.id} className="flex-row items-center justify-between py-3">
                 <Typography.Paragraph>{product.name}</Typography.Paragraph>
                 <Chip size="sm" color="warning" variant="soft">
-                  {product.stock} u.
+                  {product.stock} {product.unit}
                 </Chip>
               </View>
             ))}

@@ -7,7 +7,7 @@ import { AccessDenied } from '@/components/AccessDenied';
 import { EmptyState } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
-import { addArea, listAreas, listMovements, listProducts, listUsers } from '@/lib/database';
+import { usePosRepository } from '@/lib/use-pos-repository';
 import { exportRows } from '@/lib/exports';
 import { shortDate } from '@/lib/format';
 import type { Area, Movimiento, Producto, Usuario } from '@/lib/models';
@@ -15,6 +15,7 @@ import { canAccess } from '@/lib/permissions';
 
 export default function Movements() {
   const { user, licenseMode } = useApp();
+  const { addArea, listAreas, listMovements, listProducts, listUsers } = usePosRepository();
   const [rows, setRows] = useState<Movimiento[]>([]);
   const [areas, setAreas] = useState<Area[]>([]);
   const [products, setProducts] = useState<Producto[]>([]);
@@ -25,25 +26,41 @@ export default function Movements() {
   const [newArea, setNewArea] = useState('');
   const accent = useThemeColor('accent');
   const load = useCallback(async () => {
-    setRows(
-      await listMovements({
-        area: area || undefined,
-        productId: product,
-        user: username || undefined,
-      }),
-    );
-  }, [area, product, username]);
+    if (!user || !canAccess(user.role, 'movements')) return;
+    try {
+      setRows(
+        await listMovements({
+          area: area || undefined,
+          productId: product,
+          user: username || undefined,
+        }),
+      );
+    } catch (failure) {
+      Alert.alert(
+        'No se pudieron cargar los movimientos',
+        failure instanceof Error ? failure.message : 'Vuelve a intentarlo.',
+      );
+    }
+  }, [area, product, username, listMovements, user]);
   useEffect(() => {
     const timer = setTimeout(() => {
       void (async () => {
-        setAreas(await listAreas());
-        setProducts(await listProducts());
-        setUsers(await listUsers());
-        await load();
+        if (!user || !canAccess(user.role, 'movements')) return;
+        try {
+          setAreas(await listAreas());
+          setProducts(await listProducts());
+          setUsers(await listUsers());
+          await load();
+        } catch (failure) {
+          Alert.alert(
+            'No se pudieron cargar los filtros',
+            failure instanceof Error ? failure.message : 'Vuelve a intentarlo.',
+          );
+        }
       })();
     }, 0);
     return () => clearTimeout(timer);
-  }, [load]);
+  }, [load, listAreas, listProducts, listUsers, user]);
   useEffect(() => {
     const timer = setTimeout(() => void load(), 0);
     return () => clearTimeout(timer);
@@ -61,12 +78,20 @@ export default function Movements() {
   return (
     <Screen
       title="Movimientos"
+      keyboard
       onRefresh={load}
       action={
         <Button
           isIconOnly
           variant="secondary"
-          onPress={() => void exportRows('movimientos', rows, 'csv', licenseMode)}
+          onPress={() =>
+            void exportRows('movimientos', rows, 'csv', licenseMode).catch((failure: unknown) =>
+              Alert.alert(
+                'No se pudo exportar',
+                failure instanceof Error ? failure.message : 'Vuelve a intentarlo.',
+              ),
+            )
+          }
         >
           <Download color={accent} />
         </Button>

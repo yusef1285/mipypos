@@ -16,7 +16,8 @@ import { BanknoteThumbnail } from '@/components/BanknoteThumbnail';
 import { MetricCard } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
-import { closeCashSession, getCashClosurePreview, openCashSession } from '@/lib/database';
+import { usePosRepository } from '@/lib/use-pos-repository';
+import * as Haptics from 'expo-haptics';
 import { money, parsePositiveNumber } from '@/lib/format';
 import { CASH_DENOMINATIONS } from '@/lib/models';
 import type { CashClosurePreview } from '@/lib/models';
@@ -45,10 +46,13 @@ function StepHeader({ step }: { step: number }) {
 
 export default function Cash() {
   const { user, session, refresh } = useApp();
+  const { closeCashSession, getCashClosurePreview, openCashSession } = usePosRepository();
+  const [loadError, setLoadError] = useState('');
   const [fund, setFund] = useState('0');
   const [preview, setPreview] = useState<CashClosurePreview | null>(null);
   const [step, setStep] = useState(0);
   const [billCounts, setBillCounts] = useState<Record<number, string>>({});
+  const [coins, setCoins] = useState('0');
   const [transfer, setTransfer] = useState('');
   const [physicalCounts, setPhysicalCounts] = useState<Record<number, string>>({});
   const [productIndex, setProductIndex] = useState(0);
@@ -57,14 +61,24 @@ export default function Cash() {
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
+    if (!user || !canAccess(user.role, 'cash')) return;
     if (session) setPreview(await getCashClosurePreview(session.id));
     else setPreview(null);
-  }, [session]);
+    setLoadError('');
+  }, [session, user, getCashClosurePreview]);
 
   useEffect(() => {
-    const timer = setTimeout(() => void load(), 0);
+    if (step !== 0) return undefined;
+    const timer = setTimeout(
+      () =>
+        void load().catch((error: unknown) => {
+          setLoadError(error instanceof Error ? error.message : 'No se pudo cargar la caja.');
+          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        }),
+      0,
+    );
     return () => clearTimeout(timer);
-  }, [load]);
+  }, [load, step]);
 
   const adminName = adminNameOverride ?? (user?.role === 'admin' ? user.username : '');
 
@@ -72,9 +86,9 @@ export default function Cash() {
     () =>
       CASH_DENOMINATIONS.reduce(
         (total, denomination) => total + denomination * (Number(billCounts[denomination]) || 0),
-        0,
+        Number(coins.replace(',', '.')) || 0,
       ),
-    [billCounts],
+    [billCounts, coins],
   );
   const expectedCash = (preview?.fund ?? 0) + (preview?.cashSales ?? 0);
   const transferCount = Number(transfer.replace(',', '.')) || 0;
@@ -113,6 +127,7 @@ export default function Cash() {
       setSaving(true);
       await load();
       setBillCounts({});
+      setCoins('0');
       setTransfer('');
       setPhysicalCounts({});
       setProductIndex(0);
@@ -129,7 +144,11 @@ export default function Cash() {
   };
 
   const goToInventory = () => {
-    if (!transfer.trim()) {
+    if (
+      !transfer.trim() ||
+      !Number.isFinite(Number(transfer.replace(',', '.'))) ||
+      Number(transfer.replace(',', '.')) < 0
+    ) {
       Alert.alert('Falta el conteo', 'Introduce el total comprobado de transferencias.');
       return;
     }
@@ -164,11 +183,23 @@ export default function Cash() {
     if (!preview || !session) return;
     try {
       setSaving(true);
+      const latest = await getCashClosurePreview(session.id);
+      if (JSON.stringify(latest) !== JSON.stringify(preview)) {
+        setPreview(latest);
+        setStep(1);
+        setPhysicalCounts({});
+        setProductIndex(0);
+        setAdminPassword('');
+        throw new Error(
+          'Hubo nuevas ventas o movimientos durante el conteo. Vuelve a conciliar y contar antes de cerrar.',
+        );
+      }
       await closeCashSession(session.id, {
         denominations: CASH_DENOMINATIONS.map((denomination) => ({
           denomination,
           quantity: Number(billCounts[denomination]) || 0,
         })),
+        coinsCount: Number(coins.replace(',', '.')),
         transferCount,
         products: preview.products.map((product) => ({
           productId: product.productId,
@@ -179,9 +210,11 @@ export default function Cash() {
       });
       setStep(0);
       setAdminPassword('');
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       await refresh();
       Alert.alert('Caja cerrada', 'El turno quedó conciliado y cerrado definitivamente.');
     } catch (error) {
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       Alert.alert(
         'No se pudo cerrar',
         error instanceof Error ? error.message : 'Revisa los datos.',
@@ -218,6 +251,22 @@ export default function Cash() {
       </Screen>
     );
 
+  if (loadError)
+    return (
+      <Screen title="Caja">
+        <Typography.Paragraph>{loadError}</Typography.Paragraph>
+        <Button
+          onPress={() =>
+            void load().catch((error: unknown) =>
+              setLoadError(error instanceof Error ? error.message : 'No se pudo cargar la caja.'),
+            )
+          }
+        >
+          <Button.Label>Reintentar</Button.Label>
+        </Button>
+      </Screen>
+    );
+
   if (!preview)
     return (
       <Screen title={`Caja #${session.id}`}>
@@ -238,7 +287,7 @@ export default function Cash() {
           </View>
           <View className="flex-row flex-wrap gap-3">
             {CASH_DENOMINATIONS.map((denomination) => (
-              <View key={denomination} className="w-[47%] min-w-36 flex-grow gap-2">
+              <View key={denomination} className="min-w-0 flex-1 basis-32 gap-2">
                 <BanknoteThumbnail denomination={denomination} />
                 <TextField>
                   <Label>{money(denomination)}</Label>
@@ -255,13 +304,36 @@ export default function Cash() {
             ))}
           </View>
         </Card>
+        <TextField>
+          <Label>Monedas contadas (CUP)</Label>
+          <Input value={coins} onChangeText={setCoins} keyboardType="decimal-pad" />
+        </TextField>
         <MetricCard label="Efectivo contado" value={money(cashCount)} icon={Banknote} />
         <View className="flex-row gap-3">
           <Button variant="secondary" className="flex-1" onPress={() => setStep(0)}>
             <ArrowLeft size={18} />
             <Button.Label>Cancelar</Button.Label>
           </Button>
-          <Button className="flex-1" onPress={() => setStep(2)}>
+          <Button
+            className="flex-1"
+            onPress={() => {
+              if (
+                !Number.isFinite(Number(coins.replace(',', '.'))) ||
+                Number(coins.replace(',', '.')) < 0 ||
+                CASH_DENOMINATIONS.some(
+                  (denomination) =>
+                    !Number.isInteger(Number(billCounts[denomination] || 0)) ||
+                    Number(billCounts[denomination] || 0) < 0,
+                )
+              ) {
+                void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+                Alert.alert('Conteo inválido', 'Introduce cantidades enteras de billetes.');
+                return;
+              }
+              void Haptics.selectionAsync();
+              setStep(2);
+            }}
+          >
             <Button.Label>Continuar</Button.Label>
             <ArrowRight color="white" size={18} />
           </Button>
@@ -348,7 +420,7 @@ export default function Cash() {
             </Typography.Paragraph>
           </View>
           <TextField>
-            <Label>Unidades físicas</Label>
+            <Label>Cantidad física ({currentProduct.unit}, todas las áreas)</Label>
             <Input
               value={physicalCounts[currentProduct.productId] ?? ''}
               onChangeText={(value) =>
@@ -401,6 +473,11 @@ export default function Cash() {
             Dinero e inventario conciliados
           </Typography.Paragraph>
         </Card>
+        {!preview.products.length ? (
+          <Typography.Paragraph color="muted">
+            No hubo productos vendidos; no se requiere conteo físico.
+          </Typography.Paragraph>
+        ) : null}
         <Card className="gap-3 p-4">
           <View className="flex-row items-center gap-3">
             <ReceiptText className="text-accent" size={22} />
@@ -423,8 +500,23 @@ export default function Cash() {
             <Input secureTextEntry value={adminPassword} onChangeText={setAdminPassword} />
           </TextField>
         </Card>
-        <View className="flex-row gap-3">
-          <Button variant="secondary" className="flex-1" onPress={() => setStep(3)}>
+        <View className="flex-row flex-wrap gap-3">
+          <Button
+            variant="secondary"
+            isDisabled={saving}
+            onPress={() => {
+              setStep(0);
+              setPreview(null);
+            }}
+          >
+            <Button.Label>Reiniciar cierre</Button.Label>
+          </Button>
+          <Button
+            variant="secondary"
+            className="flex-1"
+            isDisabled={saving}
+            onPress={() => setStep(preview.products.length ? 3 : 2)}
+          >
             <ArrowLeft size={18} />
             <Button.Label>Atrás</Button.Label>
           </Button>

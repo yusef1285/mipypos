@@ -17,6 +17,8 @@ export interface Producto {
   category: string;
   subcategory: string;
   stock: number;
+  unit: string;
+  quantity_decimals: number;
   price_cash: number;
   price_transfer: number;
   image_path: string | null;
@@ -40,6 +42,8 @@ export interface Venta {
 export interface LineaVenta {
   id: number;
   sale_id: number;
+  area_id: number | null;
+  unit: string;
   product_id: number;
   name: string;
   quantity: number;
@@ -78,7 +82,14 @@ export interface Movimiento {
   date: string;
 }
 
+export interface AreaStock {
+  area_id: number;
+  product_id: number;
+  quantity: number;
+}
+
 export interface CartItem {
+  areaId: number;
   product: Producto;
   quantity: number;
   price: number;
@@ -96,6 +107,7 @@ export interface DenominationCount {
 export interface CashClosureProductCount {
   productId: number;
   productName: string;
+  unit: string;
   openingStock: number;
   entries: number;
   exits: number;
@@ -117,6 +129,7 @@ export interface CashClosurePreview {
 
 export interface CashClosureInput {
   denominations: DenominationCount[];
+  coinsCount?: number;
   transferCount: number;
   products: Array<{ productId: number; physicalStock: number }>;
   adminUsername: string;
@@ -139,7 +152,7 @@ export interface DailyReport {
   card: number;
   salesCount: number;
   byUser: Array<{ user: string; total: number; count: number }>;
-  byProduct: Array<{ product: string; quantity: number; total: number }>;
+  byProduct: Array<{ product: string; unit: string; quantity: number; total: number }>;
   movements: Movimiento[];
   inventory: Producto[];
 }

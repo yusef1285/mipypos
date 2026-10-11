@@ -16,13 +16,14 @@ import { AccessDenied } from '@/components/AccessDenied';
 import { EmptyState } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
-import { deleteUser, listUsers, saveUser } from '@/lib/database';
+import { usePosRepository } from '@/lib/use-pos-repository';
 import type { Usuario, UserRole } from '@/lib/models';
 import { canAccess } from '@/lib/permissions';
 
 const roles: UserRole[] = ['admin', 'supervisor', 'seller', 'storekeeper'];
 export default function Users() {
   const { user } = useApp();
+  const { deleteUser, listUsers, saveUser } = usePosRepository();
   const [rows, setRows] = useState<Usuario[]>([]);
   const [editing, setEditing] = useState<number>();
   const [username, setUsername] = useState('');
@@ -31,7 +32,17 @@ export default function Users() {
   const [show, setShow] = useState(false);
   const [saving, setSaving] = useState(false);
   const [accent, danger] = useThemeColor(['accent', 'danger']);
-  const load = useCallback(async () => setRows(await listUsers()), []);
+  const load = useCallback(async () => {
+    if (!user || !canAccess(user.role, 'users')) return;
+    try {
+      setRows(await listUsers());
+    } catch (failure) {
+      Alert.alert(
+        'No se pudieron cargar los usuarios',
+        failure instanceof Error ? failure.message : 'Vuelve a intentarlo.',
+      );
+    }
+  }, [listUsers, user]);
   useEffect(() => {
     const timer = setTimeout(() => void load(), 0);
     return () => clearTimeout(timer);

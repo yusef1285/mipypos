@@ -6,7 +6,7 @@ import { Alert, View } from 'react-native';
 import { AccessDenied } from '@/components/AccessDenied';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
-import { getExportRows } from '@/lib/database';
+import { usePosRepository } from '@/lib/use-pos-repository';
 import { exportRows, type ExportFormat } from '@/lib/exports';
 import { canAccess } from '@/lib/permissions';
 
@@ -19,6 +19,7 @@ const exports = [
 ];
 export default function Exports() {
   const { user, licenseMode } = useApp();
+  const { getExportRows } = usePosRepository();
   const [format, setFormat] = useState<ExportFormat>('csv');
   const [loading, setLoading] = useState('');
   const accent = useThemeColor('accent');

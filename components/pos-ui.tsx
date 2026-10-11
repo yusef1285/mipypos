@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+import { PackageOpen } from 'lucide-react-native';
 import type { LucideIcon } from 'lucide-react-native';
 import { Card, Chip, Typography, useThemeColor } from 'heroui-native';
 import { View } from 'react-native';
@@ -44,10 +46,13 @@ export function SectionTitle({ children, badge }: { children: string; badge?: st
   );
 }
 
-export function EmptyState({ title }: { title: string }) {
+export function EmptyState({ title, action }: { title: string; action?: ReactNode }) {
+  const color = useThemeColor('muted');
   return (
-    <Card className="items-center p-8">
+    <Card className="items-center gap-3 p-8">
+      <PackageOpen color={color} size={26} />
       <Typography.Paragraph color="muted">{title}</Typography.Paragraph>
+      {action}
     </Card>
   );
 }
