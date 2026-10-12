@@ -16,6 +16,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Alert, Image, View } from 'react-native';
 
 import { AccessDenied } from '@/components/AccessDenied';
+import { DemoQuota } from '@/components/DemoQuota';
 import { EmptyState } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
@@ -194,6 +195,7 @@ export default function Products() {
         </Button>
       }
     >
+      <DemoQuota resource="products" />
       <View className="flex-row gap-2">
         <Button className="flex-1" variant="secondary" onPress={() => void importCsv()}>
           <Upload color={accent} size={18} />

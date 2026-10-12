@@ -66,7 +66,9 @@ export default function Settings() {
             MipyPOS {licenseMode === 'pro' ? 'Pro' : 'Demo'}
           </Typography.Paragraph>
           <Typography.Paragraph type="body-sm" color="muted">
-            {licenseMode === 'pro' ? 'Todas las funciones activas' : 'Sin impresión ni XLSX'}
+            {licenseMode === 'pro'
+              ? 'Todas las funciones activas'
+              : 'Máximo 5 ventas y 5 productos en total. Sin impresión ni XLSX.'}
           </Typography.Paragraph>
         </View>
         <Chip color={licenseMode === 'pro' ? 'success' : 'warning'} variant="soft">

@@ -31,6 +31,7 @@ type HarnessModules = {
   '@/lib/network/qr': typeof import('../lib/network/qr');
   '@/lib/network/operations': typeof import('../lib/network/operations');
   '@/lib/permissions': typeof import('../lib/permissions');
+  '@/lib/network/pending-withdrawal': typeof import('../lib/network/pending-withdrawal');
   '@/lib/network/pending-sale': typeof import('../lib/network/pending-sale');
 };
 

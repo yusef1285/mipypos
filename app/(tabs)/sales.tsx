@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, FlatList, View } from 'react-native';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { AccessDenied } from '@/components/AccessDenied';
+import { DemoQuota } from '@/components/DemoQuota';
 import { EmptyState, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
@@ -28,10 +29,9 @@ import { usePosRepository } from '@/lib/use-pos-repository';
 import { createThermalTicket } from '@/lib/ticket';
 import { roundMoney, roundQuantity, validateQuantity } from '@/lib/units';
 
-const methods: Array<{ key: PaymentType; label: string }> = [
+const methods: Array<{ key: Exclude<PaymentType, 'card'>; label: string }> = [
   { key: 'cash', label: 'Efectivo' },
   { key: 'transfer', label: 'Transferencia' },
-  { key: 'card', label: 'Tarjeta' },
 ];
 export default function Sales() {
   const { user, session, licenseMode, refresh, networkConfig } = useApp();
@@ -43,11 +43,10 @@ export default function Sales() {
   const [search, setSearch] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
   const [drafts, setDrafts] = useState<Record<number, string>>({});
-  const [method, setMethod] = useState<SaleMethod>('cash');
-  const [amounts, setAmounts] = useState<Record<PaymentType, string>>({
+  const [method, setMethod] = useState<Exclude<SaleMethod, 'card'>>('cash');
+  const [amounts, setAmounts] = useState<Record<Exclude<PaymentType, 'card'>, string>>({
     cash: '',
     transfer: '',
-    card: '',
   });
   const [saving, setSaving] = useState(false);
   const [pendingSale, setPendingSale] = useState(false);
@@ -143,7 +142,7 @@ export default function Sales() {
         },
       ]);
   };
-  const chooseMethod = (next: SaleMethod) => {
+  const chooseMethod = (next: Exclude<SaleMethod, 'card'>) => {
     if (saving || pendingSale) return;
     void Haptics.selectionAsync();
     setMethod(next);
@@ -153,7 +152,7 @@ export default function Sales() {
         price: next === 'transfer' ? item.product.price_transfer : item.product.price_cash,
       })),
     );
-    setAmounts({ cash: '', transfer: '', card: '' });
+    setAmounts({ cash: '', transfer: '' });
   };
   const finish = async () => {
     if (!user || saving) return;
@@ -192,7 +191,7 @@ export default function Sales() {
       committed = true;
       setCart([]);
       setDrafts({});
-      setAmounts({ cash: '', transfer: '', card: '' });
+      setAmounts({ cash: '', transfer: '' });
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert(
         'Venta registrada',
@@ -377,6 +376,7 @@ export default function Sales() {
         ListHeaderComponent={
           <View className="gap-4 pb-3">
             <Typography.Heading type="h2">Nueva venta</Typography.Heading>
+            <DemoQuota resource="sales" />
             <Chip color={session ? 'success' : 'danger'} variant="soft">
               <Chip.Label>{session ? 'Caja abierta' : 'Caja cerrada'}</Chip.Label>
             </Chip>

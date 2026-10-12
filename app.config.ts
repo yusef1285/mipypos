@@ -73,6 +73,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           recordAudioAndroid: false,
         },
       ],
+      './lib/network/withLocalHotspot.ts',
       ['expo-build-properties', { android: { usesCleartextTraffic: true } }],
       ...nativePlugins,
     ],

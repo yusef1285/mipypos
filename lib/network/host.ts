@@ -1,6 +1,7 @@
 import * as Crypto from 'expo-crypto';
 import * as Network from 'expo-network';
 import { NativeModules, Platform } from 'react-native';
+import { getLanHostIp } from '@/lib/network/hotspot';
 import { checkLanHost } from '@/lib/network/client';
 import * as DB from '@/lib/database';
 import type { CartItem, Usuario } from '@/lib/models';
@@ -63,6 +64,7 @@ async function buildSnapshot(): Promise<NetworkSnapshot> {
     )?.revision ?? 0;
   return {
     revision,
+    licenseMode: await DB.getLicenseMode(),
     products: await DB.listProducts(),
     areas: await DB.listAreas(),
     areaStock: await DB.listAreaStock(),
@@ -72,6 +74,8 @@ async function buildSnapshot(): Promise<NetworkSnapshot> {
 
 async function handleOperation(request: OperationRequest, user: Usuario): Promise<unknown> {
   switch (request.operation) {
+    case 'getDemoUsage':
+      return DB.getDemoUsage();
     case 'listProducts':
       return DB.listProducts(...request.args);
     case 'listAreas':
@@ -111,6 +115,12 @@ async function handleOperation(request: OperationRequest, user: Usuario): Promis
       return DB.openCashSession(request.args[0], user.username);
     case 'closeCashSession':
       return DB.closeCashSession(...request.args);
+    case 'registerCashWithdrawal':
+      return DB.registerCashWithdrawal(request.args[0], request.args[1], user.username);
+    case 'authorizeCashDifference':
+      return DB.authorizeCashDifference(...request.args);
+    case 'listCashClosures':
+      return DB.listCashClosures();
     case 'getHomeSummary':
       return DB.getHomeSummary();
     case 'getDailyReport':
@@ -158,10 +168,29 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
 export async function startLanHost(): Promise<string> {
   if (Platform.OS !== 'android')
     throw new Error('El host local requiere una compilación Android con el servidor LAN.');
-  const ip = await Network.getIpAddressAsync();
+  const db = await DB.getDatabase();
+  const defaultPassword = await DB.hashPassword('admin123');
+  const unsafeAdmin = await db.getFirstAsync<{ id: number }>(
+    "SELECT id FROM users WHERE role='admin' AND password_hash=? LIMIT 1",
+    defaultPassword,
+  );
+  if (unsafeAdmin)
+    throw new Error(
+      'Cambia la contraseña inicial del administrador en Usuarios antes de iniciar la red local.',
+    );
+  let ip = await getLanHostIp();
+  for (let attempt = 0; !ip && attempt < 5; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    ip = await getLanHostIp();
+  }
+  ip ??= await Network.getIpAddressAsync();
   if (!ip || ip === '0.0.0.0' || ip === '127.0.0.1')
     throw new Error('Conecta el Wi-Fi o activa el hotspot antes de iniciar el host.');
-  if (server) return `http://${ip}:${LAN_PORT}`;
+  if (server) {
+    const address = `http://${ip}:${LAN_PORT}`;
+    await checkLanHost(address);
+    return address;
+  }
   if (!NativeModules.HttpServer)
     throw new Error(
       'Esta instalación no incluye el servidor LAN. Instala una compilación Android con el módulo de red.',

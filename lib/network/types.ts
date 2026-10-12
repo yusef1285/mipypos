@@ -25,6 +25,7 @@ export interface NetworkSession {
 
 export interface NetworkSnapshot {
   revision: number;
+  licenseMode: import('@/lib/models').LicenseMode;
   products: Producto[];
   areas: Area[];
   areaStock: AreaStock[];

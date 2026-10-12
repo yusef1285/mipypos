@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { z } from 'zod';
 let passed = 0;
 let failed = 0;
 function regression(name: string, action: () => void | Promise<void>) {
@@ -72,6 +73,7 @@ async function fixture() {
     const preview = await db.getCashClosurePreview(sessionId);
     return {
       denominations: [],
+      withdrawalCount: preview.withdrawalTotal,
       transferCount: preview.transferSales,
       products: preview.products.map((p) => ({
         productId: p.productId,
@@ -388,3 +390,355 @@ void regression('venta pendiente conserva UUID tras timeout y reanudación', asy
   assert.equal(commands[0], commands[1]);
   assert.equal(await pending.getPendingSale(), null);
 });
+
+const adminCredentials = { adminUsername: 'admin', adminPassword: 'admin123' };
+const withdrawalInput = (amount: number, commandId = 'withdrawal-a') => ({
+  ...adminCredentials,
+  commandId,
+  amount,
+  reason: 'Entrega a propietario',
+});
+void regression(
+  'nuevas ventas rechazan tarjeta individual y en mixto sin consumir cuota',
+  async () => {
+    const f = await fixture();
+    await assert.rejects(
+      f.db.registerSale(f.cart(1), 'card', [{ type: 'card', amount: 100 }], 'admin'),
+      /métodos/,
+    );
+    await assert.rejects(
+      f.db.registerSale(
+        f.cart(1),
+        'mixed',
+        [
+          { type: 'cash', amount: 50 },
+          { type: 'card', amount: 50 },
+        ],
+        'admin',
+      ),
+      /métodos/,
+    );
+    assert.equal((await f.db.getDemoUsage()).sales, 0);
+    assert.equal((await f.db.getProduct(f.product.id))?.stock, 10);
+    await f.db.registerSale(
+      f.cart(1),
+      'mixed',
+      [
+        { type: 'cash', amount: 40 },
+        { type: 'transfer', amount: 60 },
+      ],
+      'admin',
+    );
+    assert.equal((await f.db.getCashSummary(f.sessionId)).cashSales, 40);
+  },
+);
+void regression(
+  'extracción autorizada rebaja efectivo y reintento no duplica el retiro',
+  async () => {
+    const f = await fixture();
+    await f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin');
+    const ids = await Promise.all([
+      f.db.registerCashWithdrawal(f.sessionId, withdrawalInput(30), 'admin'),
+      f.db.registerCashWithdrawal(f.sessionId, withdrawalInput(30), 'admin'),
+    ]);
+    assert.equal(ids[0], ids[1]);
+    assert.equal((await f.db.getCashSummary(f.sessionId)).expectedCash, 70);
+    const preview = await f.db.getCashClosurePreview(f.sessionId);
+    assert.equal(preview.withdrawals.length, 1);
+    assert.equal(preview.withdrawals[0]?.authorized_by, 'admin');
+    await f.db.closeCashSession(f.sessionId, {
+      ...(await f.closure()),
+      denominations: [
+        { denomination: 50, quantity: 1 },
+        { denomination: 20, quantity: 1 },
+      ],
+    });
+    assert.equal((await f.db.listCashClosures()).length, 1);
+  },
+);
+void regression('extracción exige administrador, motivo y efectivo suficiente', async () => {
+  const f = await fixture();
+  await f.db.saveUser({ username: 'vendedor', password: 'vende123', role: 'seller' });
+  await assert.rejects(
+    f.db.registerCashWithdrawal(
+      f.sessionId,
+      { ...withdrawalInput(10), adminUsername: 'vendedor', adminPassword: 'vende123' },
+      'admin',
+    ),
+    /credenciales/,
+  );
+  await assert.rejects(
+    f.db.registerCashWithdrawal(f.sessionId, withdrawalInput(10), 'admin'),
+    /supera/,
+  );
+  await assert.rejects(
+    f.db.registerCashWithdrawal(f.sessionId, { ...withdrawalInput(10), reason: '' }, 'admin'),
+    /motivo/,
+  );
+  assert.equal((await f.db.getCashClosurePreview(f.sessionId)).withdrawals.length, 0);
+});
+void regression('extracciones concurrentes no retiran más que el efectivo disponible', async () => {
+  const f = await fixture();
+  await f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin');
+  const results = await Promise.allSettled([
+    f.db.registerCashWithdrawal(f.sessionId, withdrawalInput(80, 'a'), 'admin'),
+    f.db.registerCashWithdrawal(f.sessionId, withdrawalInput(80, 'b'), 'admin'),
+  ]);
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal((await f.db.getCashSummary(f.sessionId)).expectedCash, 20);
+});
+void regression('fallo de auditoría revierte la extracción', async () => {
+  const f = await fixture();
+  await f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin');
+  f.failWritesContaining('INSERT INTO audit_log');
+  await assert.rejects(
+    f.db.registerCashWithdrawal(f.sessionId, withdrawalInput(20), 'admin'),
+    /Injected/,
+  );
+  assert.equal((await f.db.getCashSummary(f.sessionId)).expectedCash, 100);
+});
+void regression(
+  'diferencias de extracciones no reemplazan retiros reales y requieren aprobación',
+  async () => {
+    const f = await fixture();
+    const input = { ...(await f.closure()), withdrawalCount: 500 };
+    await assert.rejects(f.db.closeCashSession(f.sessionId, input), /autorización/);
+    const approval = await f.db.authorizeCashDifference(f.sessionId, {
+      ...adminCredentials,
+      kind: 'withdrawals',
+      counted: 500,
+      reason: 'Comprobantes de otro turno incluidos por error',
+    });
+    await f.db.closeCashSession(f.sessionId, { ...input, approvalIds: [approval.id] });
+    const detail = z
+      .object({
+        withdrawalTotal: z.number(),
+        withdrawalDifference: z.number(),
+        approvals: z.array(z.object({ reason: z.string() })),
+      })
+      .parse(JSON.parse((await f.db.listCashClosures())[0].detail));
+    assert.equal(detail.withdrawalTotal, 0);
+    assert.equal(detail.withdrawalDifference, 500);
+    assert.equal(detail.approvals[0]?.reason, 'Comprobantes de otro turno incluidos por error');
+  },
+);
+void regression(
+  'cierre admite diferencias monetarias e inventario autorizadas sin alterar stock',
+  async () => {
+    const f = await fixture();
+    await f.db.registerSale(f.cart(1), 'transfer', f.pay(100), 'admin');
+    const input = await f.closure();
+    input.transferCount = 90;
+    input.products[0].physicalStock = 8;
+    const money = await f.db.authorizeCashDifference(f.sessionId, {
+      ...adminCredentials,
+      kind: 'money',
+      counted: 0,
+      transferCount: 90,
+      reason: 'Transferencia pendiente de acreditar',
+    });
+    const inventory = await f.db.authorizeCashDifference(f.sessionId, {
+      ...adminCredentials,
+      kind: 'inventory',
+      productId: f.product.id,
+      counted: 8,
+      reason: 'Merma pendiente de ajuste',
+    });
+    await f.db.closeCashSession(f.sessionId, { ...input, approvalIds: [money.id, inventory.id] });
+    assert.equal((await f.db.getProduct(f.product.id))?.stock, 9);
+    const detail = z
+      .object({ approvals: z.array(z.unknown()) })
+      .parse(JSON.parse((await f.db.listCashClosures())[0].detail));
+    assert.equal(detail.approvals.length, 2);
+  },
+);
+void regression('autorización no sirve para conteos editados ni nuevas ventas', async () => {
+  const f = await fixture();
+  await f.db.registerSale(f.cart(1), 'transfer', f.pay(100), 'admin');
+  const approval = await f.db.authorizeCashDifference(f.sessionId, {
+    ...adminCredentials,
+    kind: 'money',
+    counted: 0,
+    transferCount: 90,
+    reason: 'Pendiente',
+  });
+  await assert.rejects(
+    f.db.closeCashSession(f.sessionId, {
+      ...(await f.closure()),
+      transferCount: 80,
+      approvalIds: [approval.id],
+    }),
+    /autorización/,
+  );
+  await f.db.registerSale(f.cart(1), 'transfer', f.pay(100), 'admin');
+  await assert.rejects(
+    f.db.closeCashSession(f.sessionId, {
+      ...(await f.closure()),
+      transferCount: 90,
+      approvalIds: [approval.id],
+    }),
+    /autorización/,
+  );
+});
+void regression(
+  'demo permite cinco ventas acumuladas, no seis; reintento conserva cuota',
+  async () => {
+    const f = await fixture();
+    for (let index = 0; index < 5; index += 1)
+      await f.db.registerSale(f.cart(1), 'transfer', f.pay(100), 'admin', {
+        commandId: `sale-${index}`,
+        clientId: 'a',
+      });
+    assert.equal((await f.db.getDemoUsage()).sales, 5);
+    await f.db.registerSale(f.cart(1), 'transfer', f.pay(100), 'admin', {
+      commandId: 'sale-4',
+      clientId: 'a',
+    });
+    await assert.rejects(f.db.registerSale(f.cart(1), 'transfer', f.pay(100), 'admin'), /5 ventas/);
+    assert.equal((await f.db.getProduct(f.product.id))?.stock, 5);
+    await f.db.closeCashSession(f.sessionId, await f.closure());
+    await f.db.openCashSession(0, 'admin');
+    await assert.rejects(f.db.registerSale(f.cart(1), 'transfer', f.pay(100), 'admin'), /5 ventas/);
+    await f.db.setSetting('license_mode', 'pro');
+    await f.db.registerSale(f.cart(1), 'transfer', f.pay(100), 'admin');
+  },
+);
+void regression(
+  'demo conserva cuota de altas al borrar y permite actualizar productos',
+  async () => {
+    const f = await fixture();
+    for (let index = 0; index < 4; index += 1) {
+      const id = await f.db.saveProduct(
+        { ...f.product, id: undefined, name: `Temporal ${index}`, stock: 0 },
+        'admin',
+      );
+      await f.db.deleteProduct(id);
+    }
+    assert.equal((await f.db.getDemoUsage()).products, 5);
+    await assert.rejects(
+      f.db.saveProduct({ ...f.product, id: undefined, name: 'Sexto' }, 'admin'),
+      /5 productos/,
+    );
+    await f.db.saveProduct({ ...f.product, name: 'Arroz actualizado' }, 'admin');
+    await f.db.initializeDatabase();
+    assert.equal((await f.db.getDemoUsage()).products, 5);
+  },
+);
+void regression('importación sobre cuota revierte lote y contador completo', async () => {
+  const f = await fixture();
+  await assert.rejects(
+    f.db.importProducts(
+      Array.from({ length: 5 }, (_, i) => ({ name: `Importado ${i}`, stock: 0 })),
+      'admin',
+    ),
+    /5 productos/,
+  );
+  assert.equal((await f.db.listProducts()).length, 1);
+  assert.equal((await f.db.getDemoUsage()).products, 1);
+  await f.db.importProducts([{ name: 'Importado', stock: 0 }], 'admin');
+  assert.equal((await f.db.getDemoUsage()).products, 2);
+});
+void regression('ventas concurrentes respetan la última plaza demo', async () => {
+  const f = await fixture();
+  for (let i = 0; i < 4; i += 1)
+    await f.db.registerSale(f.cart(1), 'transfer', f.pay(100), 'admin');
+  const results = await Promise.allSettled([
+    f.db.registerSale(f.cart(1), 'transfer', f.pay(100), 'admin'),
+    f.db.registerSale(f.cart(1), 'transfer', f.pay(100), 'admin'),
+  ]);
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+  assert.equal((await f.db.getDemoUsage()).sales, 5);
+});
+void regression(
+  'QR de hotspot conserva credenciales válidas y compatibilidad con QR anterior',
+  () => {
+    const qr = createHarness().load('@/lib/network/qr');
+    const wifi = { ssid: 'MipyPOS-local', password: 'redlocal123' };
+    assert.deepEqual(qr.parseLanConnection(qr.createLanQr('http://192.168.43.1:8787', wifi)), {
+      hostUrl: 'http://192.168.43.1:8787',
+      wifi,
+    });
+    assert.throws(
+      () =>
+        qr.parseLanConnection(
+          '{"app":"MipyPOS","version":3,"hostUrl":"http://192.168.43.1:8787","wifi":{"ssid":"red","password":"123"}}',
+        ),
+      /credenciales/,
+    );
+  },
+);
+void regression(
+  'extracción pendiente sobrevive timeout y se reintenta con mismo UUID',
+  async () => {
+    class HostRejection extends Error {
+      constructor(public code: string) {
+        super(code);
+      }
+    }
+    const h = createHarness({ '@/lib/network/client': { HostRejection } });
+    const pending = h.load('@/lib/network/pending-withdrawal');
+    const ids: string[] = [];
+    const register = async (_session: number, input: { commandId: string }) => {
+      ids.push(input.commandId);
+      if (ids.length === 1) throw new Error('timeout');
+      return 3;
+    };
+    const values = {
+      authority: 'http://192.168.43.1:8787',
+      username: 'admin',
+      sessionId: 1,
+      amount: 50,
+      reason: 'Entrega',
+    };
+    await assert.rejects(pending.submitWithdrawal(values, adminCredentials, register), /timeout/);
+    assert.ok(await pending.getPendingWithdrawal());
+    await assert.rejects(
+      pending.submitWithdrawal({ ...values, username: 'otro' }, adminCredentials, register),
+      /mismo usuario/,
+    );
+    assert.equal(await pending.submitWithdrawal(values, adminCredentials, register), 3);
+    assert.equal(ids[0], ids[1]);
+    assert.equal(await pending.getPendingWithdrawal(), null);
+  },
+);
+void regression('pagos y transferencias rechazan fracciones inferiores al centavo', async () => {
+  const f = await fixture();
+  await assert.rejects(
+    f.db.registerSale(
+      f.cart(1),
+      'mixed',
+      [
+        { type: 'cash', amount: 49.997 },
+        { type: 'transfer', amount: 50.003 },
+      ],
+      'admin',
+    ),
+    /pagos/,
+  );
+  await assert.rejects(
+    f.db.closeCashSession(f.sessionId, { ...(await f.closure()), transferCount: 0.003 }),
+    /transferencias/,
+  );
+});
+void regression(
+  'autorización de inventario respeta precisión configurada de unidades personalizadas',
+  async () => {
+    const f = await fixture();
+    await f.db.saveProduct({ ...f.product, unit: 'medida', quantity_decimals: 3 }, 'admin');
+    const product = await f.db.getProduct(f.product.id);
+    assert.ok(product);
+    await f.db.registerSale(f.cart(1, undefined, product), 'transfer', f.pay(100), 'admin');
+    const approval = await f.db.authorizeCashDifference(f.sessionId, {
+      ...adminCredentials,
+      kind: 'inventory',
+      productId: product.id,
+      counted: 8.997,
+      reason: 'Variación de medida',
+    });
+    const input = await f.closure();
+    const count = input.products[0];
+    assert.ok(count);
+    count.physicalStock = 8.997;
+    await f.db.closeCashSession(f.sessionId, { ...input, approvalIds: [approval.id] });
+  },
+);

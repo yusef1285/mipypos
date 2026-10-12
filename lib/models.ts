@@ -117,12 +117,57 @@ export interface CashClosureProductCount {
   difference: number;
 }
 
+export interface CashWithdrawal {
+  id: number;
+  session_id: number;
+  command_id: string;
+  amount: number;
+  reason: string;
+  username: string;
+  authorized_by: string;
+  date: string;
+}
+
+export interface CashWithdrawalInput {
+  commandId: string;
+  amount: number;
+  reason: string;
+  adminUsername: string;
+  adminPassword: string;
+}
+
+export type CashDifferenceKind = 'money' | 'withdrawals' | 'inventory';
+export interface CashDifferenceInput {
+  kind: CashDifferenceKind;
+  counted: number;
+  transferCount?: number;
+  productId?: number;
+  reason: string;
+  adminUsername: string;
+  adminPassword: string;
+}
+export interface CashDifferenceApproval {
+  id: number;
+  reason: string;
+  authorized_by: string;
+  date: string;
+  detail: string;
+}
+export interface CashClosureRecord {
+  session_id: number;
+  authorized_by: string;
+  date: string;
+  detail: string;
+}
+
 export interface CashClosurePreview {
   sessionId: number;
   fund: number;
   cashSales: number;
   transferSales: number;
   cardSales: number;
+  withdrawalTotal: number;
+  withdrawals: CashWithdrawal[];
   salesTotal: number;
   products: Omit<CashClosureProductCount, 'physicalStock' | 'difference'>[];
 }
@@ -131,6 +176,8 @@ export interface CashClosureInput {
   denominations: DenominationCount[];
   coinsCount?: number;
   transferCount: number;
+  withdrawalCount: number;
+  approvalIds?: number[];
   products: Array<{ productId: number; physicalStock: number }>;
   adminUsername: string;
   adminPassword: string;
@@ -141,6 +188,8 @@ export interface CashClosureReconciliation {
   expectedCash: number;
   cashDifference: number;
   transferDifference: number;
+  withdrawalDifference: number;
+  withdrawalTotal: number;
   totalDifference: number;
   products: CashClosureProductCount[];
 }
@@ -163,4 +212,5 @@ export interface CashSummary {
   transferSales: number;
   cardSales: number;
   expectedCash: number;
+  withdrawalTotal: number;
 }

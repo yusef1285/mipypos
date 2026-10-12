@@ -2,6 +2,7 @@ import type * as Database from '@/lib/database';
 import type { ModuleKey } from '@/lib/permissions';
 
 export const operationPermissions = {
+  getDemoUsage: 'home',
   listProducts: 'home',
   listAreas: 'home',
   listAreaStock: 'home',
@@ -17,6 +18,9 @@ export const operationPermissions = {
   getCashClosurePreview: 'cash',
   openCashSession: 'cash',
   closeCashSession: 'cash',
+  registerCashWithdrawal: 'cash',
+  authorizeCashDifference: 'cash',
+  listCashClosures: 'cash',
   getDailyReport: 'reports',
   getHomeSummary: 'home',
   getExportRows: 'exports',

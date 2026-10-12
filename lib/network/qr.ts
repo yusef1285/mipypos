@@ -1,3 +1,4 @@
+import type { HotspotCredentials } from '@/lib/network/hotspot';
 import { LAN_PORT } from '@/lib/network/types';
 export const QR_COLORS = { background: '#ffffff', foreground: '#000000' };
 export function validateLanUrl(value: string): string {
@@ -27,10 +28,18 @@ export function validateLanUrl(value: string): string {
     throw new Error('Escanea un QR de MipyPOS generado por el administrador en la red local.');
   return url.origin;
 }
-export function createLanQr(hostUrl: string) {
-  return JSON.stringify({ app: 'MipyPOS', version: 2, hostUrl: validateLanUrl(hostUrl) });
+export function createLanQr(hostUrl: string, wifi?: HotspotCredentials) {
+  return JSON.stringify({
+    app: 'MipyPOS',
+    version: wifi ? 3 : 2,
+    hostUrl: validateLanUrl(hostUrl),
+    ...(wifi ? { wifi } : {}),
+  });
 }
 export function parseLanQr(data: string): string {
+  return parseLanConnection(data).hostUrl;
+}
+export function parseLanConnection(data: string): { hostUrl: string; wifi?: HotspotCredentials } {
   let value: unknown;
   try {
     value = JSON.parse(data);
@@ -43,10 +52,26 @@ export function parseLanQr(data: string): string {
     !('app' in value) ||
     value.app !== 'MipyPOS' ||
     !('version' in value) ||
-    value.version !== 2 ||
+    (value.version !== 2 && value.version !== 3) ||
     !('hostUrl' in value) ||
     typeof value.hostUrl !== 'string'
   )
     throw new Error('Este QR no es compatible. Genera uno nuevo en el administrador.');
-  return validateLanUrl(value.hostUrl);
+  const hostUrl = validateLanUrl(value.hostUrl);
+  if (value.version === 2) return { hostUrl };
+  if (
+    !('wifi' in value) ||
+    !value.wifi ||
+    typeof value.wifi !== 'object' ||
+    !('ssid' in value.wifi) ||
+    typeof value.wifi.ssid !== 'string' ||
+    !value.wifi.ssid.length ||
+    value.wifi.ssid.length > 32 ||
+    !('password' in value.wifi) ||
+    typeof value.wifi.password !== 'string' ||
+    value.wifi.password.length < 8 ||
+    value.wifi.password.length > 63
+  )
+    throw new Error('El QR no contiene credenciales Wi-Fi válidas. Genera uno nuevo.');
+  return { hostUrl, wifi: { ssid: value.wifi.ssid, password: value.wifi.password } };
 }

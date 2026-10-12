@@ -23,6 +23,7 @@ export function usePosRepository(): Repository {
         return handler(...args);
       };
     return {
+      getDemoUsage: bind('getDemoUsage', Database.getDemoUsage),
       listProducts: bind('listProducts', Database.listProducts),
       listAreas: bind('listAreas', Database.listAreas),
       listAreaStock: bind('listAreaStock', Database.listAreaStock),
@@ -38,6 +39,9 @@ export function usePosRepository(): Repository {
       getCashClosurePreview: bind('getCashClosurePreview', Database.getCashClosurePreview),
       openCashSession: bind('openCashSession', Database.openCashSession),
       closeCashSession: bind('closeCashSession', Database.closeCashSession),
+      registerCashWithdrawal: bind('registerCashWithdrawal', Database.registerCashWithdrawal),
+      authorizeCashDifference: bind('authorizeCashDifference', Database.authorizeCashDifference),
+      listCashClosures: bind('listCashClosures', Database.listCashClosures),
       getDailyReport: bind('getDailyReport', Database.getDailyReport),
       getHomeSummary: bind('getHomeSummary', Database.getHomeSummary),
       getExportRows: bind('getExportRows', Database.getExportRows),

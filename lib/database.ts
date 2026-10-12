@@ -12,7 +12,12 @@ import type {
   CashClosurePreview,
   CashClosureProductCount,
   CashClosureReconciliation,
+  CashClosureRecord,
+  CashDifferenceInput,
+  CashDifferenceApproval,
   CashSummary,
+  CashWithdrawal,
+  CashWithdrawalInput,
   DailyReport,
   LineaVenta,
   LicenseMode,
@@ -169,6 +174,31 @@ export async function initializeDatabase() {
       entity_id INTEGER,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS cash_withdrawals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL REFERENCES cash_sessions(id),
+      command_id TEXT NOT NULL UNIQUE,
+      amount REAL NOT NULL CHECK(amount > 0),
+      reason TEXT NOT NULL,
+      username TEXT NOT NULL,
+      authorized_by TEXT NOT NULL,
+      date TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS withdrawals_session_idx ON cash_withdrawals(session_id);
+    CREATE TABLE IF NOT EXISTS cash_difference_approvals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL REFERENCES cash_sessions(id),
+      detail TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      authorized_by TEXT NOT NULL,
+      date TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS cash_closures (
+      session_id INTEGER PRIMARY KEY REFERENCES cash_sessions(id),
+      authorized_by TEXT NOT NULL,
+      date TEXT NOT NULL,
+      detail TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS audit_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       action TEXT NOT NULL,
@@ -183,7 +213,7 @@ export async function initializeDatabase() {
   `);
   // Keep upgrades atomic and never downgrade a newer installation.
   const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
-  if ((version?.user_version ?? 0) > 3)
+  if ((version?.user_version ?? 0) > 4)
     throw new Error('Esta base de datos necesita una versión más reciente de MipyPOS.');
   await transaction(db, async () => {
     const columns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(products)');
@@ -203,7 +233,11 @@ export async function initializeDatabase() {
     );
     if (!sessionColumns.some((column) => column.name === 'movement_start_id'))
       await db.execAsync('ALTER TABLE cash_sessions ADD COLUMN movement_start_id INTEGER');
-    await db.execAsync('PRAGMA user_version = 3');
+    await db.execAsync(`
+      INSERT OR IGNORE INTO settings(key,value) SELECT 'usage_products',CAST(MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='products'),0),(SELECT COUNT(*) FROM products)) AS TEXT);
+      INSERT OR IGNORE INTO settings(key,value) SELECT 'usage_sales',CAST(MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='sales'),0),(SELECT COUNT(*) FROM sales)) AS TEXT);
+      PRAGMA user_version = 4;
+    `);
   });
   const count = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM users');
   if (!count?.count) {
@@ -263,6 +297,37 @@ export async function setSetting(key: string, value: string) {
 }
 export async function getLicenseMode(): Promise<LicenseMode> {
   return (await getSetting('license_mode')) === 'pro' ? 'pro' : 'demo';
+}
+
+export async function getDemoUsage() {
+  return {
+    mode: await getLicenseMode(),
+    sales: Number(await getSetting('usage_sales')) || 0,
+    products: Number(await getSetting('usage_products')) || 0,
+    limit: 5,
+  };
+}
+// Called only inside the mutation transaction, so failed writes never consume a slot.
+async function consumeDemoQuota(db: SQLite.SQLiteDatabase, resource: 'sales' | 'products') {
+  const key = `usage_${resource}`;
+  const used = Number(
+    (await db.getFirstAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', key))
+      ?.value ?? 0,
+  );
+  const mode = (
+    await db.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='license_mode'")
+  )?.value;
+  if (mode !== 'pro' && used >= 5)
+    throw new Error(
+      resource === 'sales'
+        ? 'Has alcanzado las 5 ventas de la demo. Activa una licencia Pro para seguir vendiendo.'
+        : 'Has alcanzado los 5 productos de la demo. Activa una licencia Pro para agregar más.',
+    );
+  await db.runAsync(
+    'INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+    key,
+    String(used + 1),
+  );
 }
 
 export async function authenticate(username: string, password: string) {
@@ -417,6 +482,7 @@ export async function saveProduct(
         );
         return;
       }
+      await consumeDemoQuota(db, 'products');
       const result = await db.runAsync(
         'INSERT INTO products(name,category,subcategory,unit,quantity_decimals,stock,price_cash,price_transfer,image_path) VALUES(?,?,?,?,?,?,?,?,?)',
         product.name.trim(),
@@ -532,6 +598,77 @@ export async function openCashSession(fund: number, username: string) {
     throw error;
   }
 }
+export async function registerCashWithdrawal(
+  sessionId: number,
+  input: CashWithdrawalInput,
+  username: string,
+): Promise<number> {
+  const db = await getDatabase();
+  return transaction(db, async () => {
+    const administrator = await authenticate(input.adminUsername, input.adminPassword);
+    if (!administrator || administrator.role !== 'admin')
+      throw new Error('Las credenciales del administrador no son válidas.');
+    if (
+      !input.commandId ||
+      !input.reason.trim() ||
+      !Number.isFinite(input.amount) ||
+      input.amount <= 0 ||
+      roundMoney(input.amount) !== input.amount
+    )
+      throw new Error('Introduce un importe positivo con hasta dos decimales y un motivo.');
+    const previous = await db.getFirstAsync<CashWithdrawal>(
+      'SELECT * FROM cash_withdrawals WHERE command_id=?',
+      input.commandId,
+    );
+    if (previous) {
+      if (
+        previous.session_id !== sessionId ||
+        previous.amount !== input.amount ||
+        previous.reason !== input.reason.trim() ||
+        previous.username !== username
+      )
+        throw new Error('La extracción pendiente no coincide. Revisa el registro de caja.');
+      return previous.id;
+    }
+    const session = await getOpenSession();
+    if (!session || session.id !== sessionId) throw new Error('La caja cambió o ya está cerrada.');
+    const summary = await getCashSummary(sessionId);
+    if (input.amount - summary.expectedCash > 0.005)
+      throw new Error('La extracción supera el efectivo disponible en caja.');
+    const date = now();
+    const result = await db.runAsync(
+      'INSERT INTO cash_withdrawals(session_id,command_id,amount,reason,username,authorized_by,date) VALUES(?,?,?,?,?,?,?)',
+      sessionId,
+      input.commandId,
+      input.amount,
+      input.reason.trim(),
+      username,
+      administrator.username,
+      date,
+    );
+    await db.runAsync(
+      'INSERT INTO audit_log(action,username,entity_id,date,detail) VALUES(?,?,?,?,?)',
+      'cash_withdrawal',
+      administrator.username,
+      sessionId,
+      date,
+      json({
+        withdrawalId: result.lastInsertRowId,
+        amount: input.amount,
+        reason: input.reason.trim(),
+        recordedBy: username,
+      }),
+    );
+    await db.runAsync(
+      'INSERT INTO network_events(type,entity_id,created_at) VALUES(?,?,?)',
+      'cash.withdrawal',
+      result.lastInsertRowId,
+      date,
+    );
+    return result.lastInsertRowId;
+  });
+}
+
 export async function getCashSummary(sessionId: number): Promise<CashSummary> {
   const db = await getDatabase();
   const session = await db.getFirstAsync<{ fund: number }>(
@@ -539,17 +676,25 @@ export async function getCashSummary(sessionId: number): Promise<CashSummary> {
     sessionId,
   );
   const rows = await db.getAllAsync<{ type: string; amount: number }>(
-    "SELECT json_extract(value,'$.type') AS type, SUM(json_extract(value,'$.amount')) AS amount FROM sales,json_each(sales.payments) WHERE session_id=? GROUP BY type",
+    "SELECT json_extract(value,'$.type') AS type, SUM(json_extract(value,'$.amount')) AS amount FROM sales,json_each(sales.payments) WHERE session_id=? GROUP BY json_extract(value,'$.type')",
     sessionId,
   );
   const amount = (type: string) => rows.find((row) => row.type === type)?.amount ?? 0;
   const cashSales = amount('cash');
+  const withdrawalTotal =
+    (
+      await db.getFirstAsync<{ total: number }>(
+        'SELECT COALESCE(SUM(amount),0) AS total FROM cash_withdrawals WHERE session_id=?',
+        sessionId,
+      )
+    )?.total ?? 0;
   return {
     salesTotal: rows.reduce((sum, row) => sum + row.amount, 0),
     cashSales,
     transferSales: amount('transfer'),
     cardSales: amount('card'),
-    expectedCash: (session?.fund ?? 0) + cashSales,
+    withdrawalTotal,
+    expectedCash: roundMoney((session?.fund ?? 0) + cashSales - withdrawalTotal),
   };
 }
 export async function getCashClosurePreview(sessionId: number): Promise<CashClosurePreview> {
@@ -596,6 +741,11 @@ export async function getCashClosurePreview(sessionId: number): Promise<CashClos
     transferSales: summary.transferSales,
     cardSales: summary.cardSales,
     salesTotal: summary.salesTotal,
+    withdrawalTotal: summary.withdrawalTotal,
+    withdrawals: await db.getAllAsync<CashWithdrawal>(
+      'SELECT * FROM cash_withdrawals WHERE session_id=? ORDER BY id',
+      sessionId,
+    ),
     products: products
       .filter((product) => (soldByProduct.get(product.id) ?? 0) > 0)
       .map((product) => {
@@ -642,7 +792,11 @@ function reconcileCashClosure(
     suppliedDenominations.add(item.denomination);
     cashCount += item.denomination * item.quantity;
   }
-  if (!Number.isFinite(input.transferCount) || input.transferCount < 0)
+  if (
+    !Number.isFinite(input.transferCount) ||
+    input.transferCount < 0 ||
+    Math.abs(roundMoney(input.transferCount) - input.transferCount) > 0.000001
+  )
     throw new Error('El conteo de transferencias no es válido.');
 
   const physicalByProduct = new Map<number, number>();
@@ -668,16 +822,125 @@ function reconcileCashClosure(
   if (physicalByProduct.size !== preview.products.length)
     throw new Error('El conteo físico contiene productos que no pertenecen al cierre.');
 
-  const expectedCash = preview.fund + preview.cashSales;
+  const expectedCash = roundMoney(preview.fund + preview.cashSales - preview.withdrawalTotal);
+  if (
+    !Number.isFinite(input.withdrawalCount) ||
+    input.withdrawalCount < 0 ||
+    roundMoney(input.withdrawalCount) !== input.withdrawalCount
+  )
+    throw new Error('El monto comprobado de extracciones no es válido.');
   return {
     cashCount,
     expectedCash,
-    cashDifference: cashCount - expectedCash,
-    transferDifference: input.transferCount - preview.transferSales,
-    totalDifference:
-      cashCount - preview.fund + input.transferCount + preview.cardSales - preview.salesTotal,
+    cashDifference: roundMoney(cashCount - expectedCash),
+    transferDifference: roundMoney(input.transferCount - preview.transferSales),
+    withdrawalTotal: preview.withdrawalTotal,
+    withdrawalDifference: roundMoney(input.withdrawalCount - preview.withdrawalTotal),
+    totalDifference: roundMoney(
+      cashCount -
+        preview.fund +
+        preview.withdrawalTotal +
+        input.transferCount +
+        preview.cardSales -
+        preview.salesTotal,
+    ),
     products: reconciledProducts,
   };
+}
+
+function differenceDetail(
+  preview: CashClosurePreview,
+  input: Pick<CashDifferenceInput, 'kind' | 'counted' | 'transferCount' | 'productId'>,
+): string {
+  if (!Number.isFinite(input.counted) || input.counted < 0)
+    throw new Error('Introduce un conteo válido.');
+  switch (input.kind) {
+    case 'money':
+      if (
+        !Number.isFinite(input.transferCount) ||
+        input.transferCount! < 0 ||
+        Math.abs(roundMoney(input.counted) - input.counted) > 0.000001 ||
+        Math.abs(roundMoney(input.transferCount!) - input.transferCount!) > 0.000001
+      )
+        throw new Error('Introduce conteos monetarios con hasta dos decimales.');
+      return json({
+        kind: input.kind,
+        expectedCash: roundMoney(preview.fund + preview.cashSales - preview.withdrawalTotal),
+        cashCount: input.counted,
+        expectedTransfer: preview.transferSales,
+        transferCount: input.transferCount,
+      });
+    case 'withdrawals':
+      if (Math.abs(roundMoney(input.counted) - input.counted) > 0.000001)
+        throw new Error('Introduce un importe con hasta dos decimales.');
+      return json({ kind: input.kind, expected: preview.withdrawalTotal, counted: input.counted });
+    case 'inventory': {
+      const product = preview.products.find((p) => p.productId === input.productId);
+      if (!product) throw new Error('El producto no pertenece al cierre.');
+      return json({
+        kind: input.kind,
+        productId: product.productId,
+        expected: product.expectedStock,
+        counted: input.counted,
+      });
+    }
+    default:
+      throw new Error('El paso del cierre no es válido.');
+  }
+}
+export async function authorizeCashDifference(
+  sessionId: number,
+  input: CashDifferenceInput,
+): Promise<CashDifferenceApproval> {
+  const db = await getDatabase();
+  return transaction(db, async () => {
+    const administrator = await authenticate(input.adminUsername, input.adminPassword);
+    if (!administrator || administrator.role !== 'admin')
+      throw new Error('Las credenciales del administrador no son válidas.');
+    if (!input.reason.trim()) throw new Error('Explica el motivo de la diferencia.');
+    if (input.kind === 'inventory') {
+      const product = await db.getFirstAsync<Producto>(
+        'SELECT * FROM products WHERE id=?',
+        input.productId ?? 0,
+      );
+      if (!product) throw new Error('El producto no pertenece al cierre.');
+      validateQuantity(input.counted, product.quantity_decimals, true);
+    }
+    const detail = differenceDetail(await getCashClosurePreview(sessionId), input);
+    const date = now();
+    const result = await db.runAsync(
+      'INSERT INTO cash_difference_approvals(session_id,detail,reason,authorized_by,date) VALUES(?,?,?,?,?)',
+      sessionId,
+      detail,
+      input.reason.trim(),
+      administrator.username,
+      date,
+    );
+    await db.runAsync(
+      'INSERT INTO audit_log(action,username,entity_id,date,detail) VALUES(?,?,?,?,?)',
+      'cash_difference_approved',
+      administrator.username,
+      sessionId,
+      date,
+      json({
+        approvalId: result.lastInsertRowId,
+        reason: input.reason.trim(),
+        values: parseJson(detail),
+      }),
+    );
+    return {
+      id: result.lastInsertRowId,
+      detail,
+      reason: input.reason.trim(),
+      authorized_by: administrator.username,
+      date,
+    };
+  });
+}
+export async function listCashClosures(): Promise<CashClosureRecord[]> {
+  return (await getDatabase()).getAllAsync<CashClosureRecord>(
+    'SELECT * FROM cash_closures ORDER BY session_id DESC',
+  );
 }
 
 export async function closeCashSession(sessionId: number, input: CashClosureInput) {
@@ -689,21 +952,79 @@ export async function closeCashSession(sessionId: number, input: CashClosureInpu
       throw new Error('Las credenciales del administrador no son válidas.');
     const preview = await getCashClosurePreview(sessionId);
     const reconciliation = reconcileCashClosure(preview, input);
+    const approvals = await db.getAllAsync<CashDifferenceApproval>(
+      'SELECT id,detail,reason,authorized_by,date FROM cash_difference_approvals WHERE session_id=?',
+      sessionId,
+    );
+    const usedApprovals: CashDifferenceApproval[] = [];
+    const requireApproval = (
+      difference: Pick<CashDifferenceInput, 'kind' | 'counted' | 'transferCount' | 'productId'>,
+    ) => {
+      const detail = differenceDetail(preview, difference);
+      const approved = approvals.find(
+        (approval) => input.approvalIds?.includes(approval.id) && approval.detail === detail,
+      );
+      if (!approved)
+        throw new Error(
+          'Los conteos deben coincidir o tener una autorización administrativa vigente para esa diferencia.',
+        );
+      usedApprovals.push(approved);
+    };
     if (
       Math.abs(reconciliation.cashDifference) > 0.005 ||
       Math.abs(reconciliation.transferDifference) > 0.005 ||
       Math.abs(reconciliation.totalDifference) > 0.005
     )
-      throw new Error('El efectivo y las transferencias deben coincidir antes de cerrar.');
-    const productDifference = reconciliation.products.find(
-      (product) => Math.abs(product.difference) > 0.0001,
-    );
-    if (productDifference)
-      throw new Error(
-        `El conteo de ${productDifference.productName} no coincide con el inventario esperado.`,
+      requireApproval({
+        kind: 'money',
+        counted: reconciliation.cashCount,
+        transferCount: input.transferCount,
+      });
+    if (Math.abs(reconciliation.withdrawalDifference) > 0.005)
+      requireApproval({ kind: 'withdrawals', counted: input.withdrawalCount });
+    for (const product of reconciliation.products) {
+      const original = await db.getFirstAsync<Producto>(
+        'SELECT * FROM products WHERE id=?',
+        product.productId,
       );
+      if (original) validateQuantity(product.physicalStock, original.quantity_decimals, true);
+      if (Math.abs(product.difference) > 0.0001)
+        requireApproval({
+          kind: 'inventory',
+          counted: product.physicalStock,
+          productId: product.productId,
+        });
+    }
 
     const closeDate = now();
+    const closureDetail = json({
+      coinsCount: input.coinsCount ?? 0,
+      denominations: input.denominations,
+      cashCount: reconciliation.cashCount,
+      expectedCash: reconciliation.expectedCash,
+      transferCount: input.transferCount,
+      expectedTransfer: preview.transferSales,
+      salesTotal: preview.salesTotal,
+      withdrawalCount: input.withdrawalCount,
+      withdrawalTotal: preview.withdrawalTotal,
+      withdrawals: preview.withdrawals,
+      cashDifference: reconciliation.cashDifference,
+      transferDifference: reconciliation.transferDifference,
+      withdrawalDifference: reconciliation.withdrawalDifference,
+      totalDifference: reconciliation.totalDifference,
+      inventory: reconciliation.products,
+      approvals: usedApprovals.map((approval) => ({
+        ...approval,
+        detail: parseJson(approval.detail),
+      })),
+    });
+    await db.runAsync(
+      'INSERT INTO cash_closures(session_id,authorized_by,date,detail) VALUES(?,?,?,?)',
+      sessionId,
+      administrator.username,
+      closeDate,
+      closureDetail,
+    );
     await db.runAsync(
       'UPDATE cash_sessions SET close_date=?,final_cash=?,expected_cash=?,transfer_total=?,products_end=?,cash_count=?,transfer_count=? WHERE id=? AND close_date IS NULL',
       closeDate,
@@ -725,14 +1046,7 @@ export async function closeCashSession(sessionId: number, input: CashClosureInpu
       administrator.username,
       sessionId,
       closeDate,
-      json({
-        coinsCount: input.coinsCount ?? 0,
-        denominations: input.denominations,
-        cashDifference: reconciliation.cashDifference,
-        transferDifference: reconciliation.transferDifference,
-        totalDifference: reconciliation.totalDifference,
-        inventory: reconciliation.products,
-      }),
+      closureDetail,
     );
     result = reconciliation;
   });
@@ -742,13 +1056,21 @@ export async function closeCashSession(sessionId: number, input: CashClosureInpu
 
 function validatePayments(total: number, method: SaleMethod, payments: Payment[]) {
   if (
-    !['cash', 'transfer', 'card', 'mixed'].includes(method) ||
-    payments.some((p) => !['cash', 'transfer', 'card'].includes(p.type)) ||
+    !['cash', 'transfer', 'mixed'].includes(method) ||
+    payments.some((p) => !['cash', 'transfer'].includes(p.type)) ||
     new Set(payments.map((p) => p.type)).size !== payments.length
   )
     throw new Error('Los métodos de pago no son válidos.');
   const positive = payments.filter((p) => p.amount > 0);
-  if (!positive.length || payments.some((p) => !Number.isFinite(p.amount) || p.amount < 0))
+  if (
+    !positive.length ||
+    payments.some(
+      (p) =>
+        !Number.isFinite(p.amount) ||
+        p.amount < 0 ||
+        Math.abs(roundMoney(p.amount) - p.amount) > 0.000001,
+    )
+  )
     throw new Error('Los pagos no son válidos.');
   const sum = positive.reduce((value, p) => value + p.amount, 0);
   if (Math.abs(sum - total) > 0.005)
@@ -825,6 +1147,7 @@ export async function registerSale(
         throw new Error('La venta ya se está procesando.');
       }
     }
+    await consumeDemoQuota(db, 'sales');
     const session = await db.getFirstAsync<{ id: number }>(
       'SELECT id FROM cash_sessions WHERE close_date IS NULL LIMIT 1',
     );
@@ -1102,7 +1425,7 @@ export async function getDailyReport(date = new Date()): Promise<DailyReport> {
     end,
   );
   const paymentRows = await db.getAllAsync<{ type: string; amount: number }>(
-    "SELECT json_extract(value,'$.type') AS type,SUM(json_extract(value,'$.amount')) AS amount FROM sales,json_each(sales.payments) WHERE date BETWEEN ? AND ? GROUP BY type",
+    "SELECT json_extract(value,'$.type') AS type,SUM(json_extract(value,'$.amount')) AS amount FROM sales,json_each(sales.payments) WHERE date BETWEEN ? AND ? GROUP BY json_extract(value,'$.type')",
     start,
     end,
   );
@@ -1198,6 +1521,7 @@ export async function importProducts(
           : Number(row.quantity_decimals);
       if (!unit || ![0, 3].includes(decimals)) throw new Error(`Unidad inválida para ${name}.`);
       validateQuantity(stock, decimals, true);
+      await consumeDemoQuota(db, 'products');
       const result = await db.runAsync(
         'INSERT INTO products(name,category,subcategory,unit,quantity_decimals,stock,price_cash,price_transfer,image_path) VALUES(?,?,?,?,?,?,?,?,NULL)',
         name,

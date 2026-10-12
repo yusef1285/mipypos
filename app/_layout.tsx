@@ -61,6 +61,7 @@ function AppStack() {
       <Stack.Screen name="movements" options={{ headerShown: true, title: 'Movimientos' }} />
       <Stack.Screen name="users" options={{ headerShown: true, title: 'Usuarios' }} />
       <Stack.Screen name="exports" options={{ headerShown: true, title: 'Exportaciones' }} />
+      <Stack.Screen name="cash-history" options={{ headerShown: true, title: 'Cierres de caja' }} />
       <Stack.Screen name="settings" options={{ headerShown: true, title: 'Configuración' }} />
     </Stack>
   );
