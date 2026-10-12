@@ -32,6 +32,12 @@ type HarnessModules = {
   '@/lib/network/operations': typeof import('../lib/network/operations');
   '@/lib/permissions': typeof import('../lib/permissions');
   '@/lib/network/pending-withdrawal': typeof import('../lib/network/pending-withdrawal');
+  '@/lib/network/pending-operation': typeof import('../lib/network/pending-operation');
+  '@/lib/network/client': typeof import('../lib/network/client');
+  '@/lib/network/config': typeof import('../lib/network/config');
+  '@/lib/csv': typeof import('../lib/csv');
+  '@/lib/network/host': typeof import('../lib/network/host');
+  '@/lib/network/tls': typeof import('../lib/network/tls');
   '@/lib/network/pending-sale': typeof import('../lib/network/pending-sale');
 };
 
@@ -92,6 +98,17 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
         removeItem: async (key: string) => {
           storage.delete(key);
         },
+      },
+    },
+    'react-native': { Platform: { OS: 'android' }, NativeModules: {} },
+    'expo-secure-store': {
+      WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'device',
+      getItemAsync: async (key: string) => storage.get(`secure:${key}`) ?? null,
+      setItemAsync: async (key: string, value: string) => {
+        storage.set(`secure:${key}`, value);
+      },
+      deleteItemAsync: async (key: string) => {
+        storage.delete(`secure:${key}`);
       },
     },
     ...overrides,

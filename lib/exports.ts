@@ -3,6 +3,7 @@ import * as Sharing from 'expo-sharing';
 import * as XLSX from 'xlsx';
 
 import type { LicenseMode } from '@/lib/models';
+import { escapeCsvCell } from '@/lib/csv';
 
 export type ExportFormat = 'csv' | 'xlsx' | 'txt';
 
@@ -13,7 +14,7 @@ const cellText = (value: unknown): string => {
     return String(value);
   return JSON.stringify(value);
 };
-const escapeCell = (value: unknown) => `"${cellText(value).replaceAll('"', '""')}"`;
+const escapeCell = escapeCsvCell;
 const getCellValue = (row: object, key: string): unknown =>
   Object.entries(row).find(([entryKey]) => entryKey === key)?.[1];
 
@@ -41,7 +42,7 @@ export async function exportRows(
     const content =
       format === 'csv'
         ? [
-            keys.join(','),
+            keys.map(escapeCell).join(','),
             ...rows.map((row) => keys.map((key) => escapeCell(getCellValue(row, key))).join(',')),
           ].join('\n')
         : rows

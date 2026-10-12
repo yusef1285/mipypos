@@ -33,6 +33,24 @@ type LocalPosResult<K extends PosOperation> = Awaited<ReturnType<(typeof Databas
 export type PosResult<K extends PosOperation> =
   | LocalPosResult<K>
   | (void extends LocalPosResult<K> ? null : never);
+export const mutationOperations: ReadonlySet<PosOperation> = new Set([
+  'saveProduct',
+  'deleteProduct',
+  'importProducts',
+  'registerMovement',
+  'addArea',
+  'saveUser',
+  'deleteUser',
+  'openCashSession',
+  'closeCashSession',
+  'authorizeCashDifference',
+]);
 export type OperationRequest = {
-  [K in PosOperation]: { operation: K; args: PosArgs<K>; token: string };
+  [K in PosOperation]: {
+    operation: K;
+    args: PosArgs<K>;
+    token: string;
+    commandId?: string;
+    clientId?: string;
+  };
 }[PosOperation];

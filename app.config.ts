@@ -23,7 +23,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     ios: {
       infoPlist: {
         NSLocalNetworkUsageDescription: 'Conecta MipyPOS al administrador por Wi-Fi sin internet.',
-        NSAppTransportSecurity: { NSAllowsLocalNetworking: true, NSAllowsArbitraryLoads: true },
+        NSAppTransportSecurity: { NSAllowsLocalNetworking: true },
         ITSAppUsesNonExemptEncryption: false,
       },
       supportsTablet: true,
@@ -66,6 +66,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       'expo-splash-screen',
       'expo-sqlite',
       'expo-sharing',
+      'expo-secure-store',
       [
         'expo-camera',
         {
@@ -74,7 +75,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         },
       ],
       './lib/network/withLocalHotspot.ts',
-      ['expo-build-properties', { android: { usesCleartextTraffic: true } }],
+      ['expo-build-properties', { android: { usesCleartextTraffic: false } }],
       ...nativePlugins,
     ],
     experiments: {

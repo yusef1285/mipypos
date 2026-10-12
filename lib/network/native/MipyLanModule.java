@@ -104,8 +104,10 @@ public class MipyLanModule extends ReactContextBaseJavaModule {
     } catch (Exception error) { promise.reject("ADDRESS", "No se pudo leer la dirección de la red local.", error); }
   }
   private void releaseConnection() {
+    ConnectivityManager.NetworkCallback previous = connection;
+    connection = null;
     connectivity.bindProcessToNetwork(null);
-    if (connection != null) { connectivity.unregisterNetworkCallback(connection); connection = null; }
+    if (previous != null) { try { connectivity.unregisterNetworkCallback(previous); } catch (IllegalArgumentException ignored) { /* Android may already have removed it. */ } }
   }
   @ReactMethod public void disconnect(Promise promise) {
     try { releaseConnection(); promise.resolve(null); } catch (Exception error) { promise.reject("DISCONNECT", "No se pudo liberar la conexión Wi-Fi.", error); }
@@ -118,25 +120,32 @@ public class MipyLanModule extends ReactContextBaseJavaModule {
       NetworkRequest request = new NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).setNetworkSpecifier(specifier).build();
       ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
         private boolean settled = false;
+        private Network boundNetwork;
         private void bind(Network network) {
-          if (settled) return;
+          if (connection != this) return;
           LinkProperties properties = connectivity.getLinkProperties(network);
           if (properties == null || properties.getLinkAddresses().isEmpty()) return;
-          settled = true;
-          if (connectivity.bindProcessToNetwork(network)) promise.resolve(null);
-          else { promise.reject("CONNECT", "No se pudo usar la red local."); }
+          if (connectivity.bindProcessToNetwork(network)) {
+            boundNetwork = network;
+            if (!settled) { settled = true; promise.resolve(null); }
+          } else if (!settled) { settled = true; releaseConnection(); promise.reject("CONNECT", "No se pudo usar la red local."); }
         }
         @Override public void onAvailable(Network network) { bind(network); }
         @Override public void onLinkPropertiesChanged(Network network, LinkProperties properties) { bind(network); }
         @Override public void onUnavailable() {
+          if (connection != this) return;
           if (!settled) { settled = true; promise.reject("CONNECT", "No se pudo conectar al Wi-Fi del administrador. Acepta la solicitud de Android e inténtalo de nuevo."); }
-          if (connection == this) { connectivity.unregisterNetworkCallback(this); connection = null; }
+          releaseConnection();
         }
-        @Override public void onLost(Network network) { connectivity.bindProcessToNetwork(null); }
+        @Override public void onLost(Network network) {
+          if (connection != this || (boundNetwork != null && !boundNetwork.equals(network))) return;
+          if (!settled) { settled = true; promise.reject("CONNECT", "Se perdió la red local. Escanea nuevamente el QR."); }
+          releaseConnection();
+        }
       };
       connection = callback;
       connectivity.requestNetwork(request, callback, 45000);
-    } catch (Exception error) { promise.reject("CONNECT", "No se pudo conectar. Revisa los permisos de dispositivos cercanos y Wi-Fi.", error); }
+    } catch (Exception error) { releaseConnection(); promise.reject("CONNECT", "No se pudo conectar. Revisa los permisos de dispositivos cercanos y Wi-Fi.", error); }
   }
   @Override public void invalidate() {
     if (reservation != null) reservation.close();

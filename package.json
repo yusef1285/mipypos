@@ -10,7 +10,7 @@
     "build:pwa": "expo export -p web && workbox generateSW workbox-config.js",
     "lint": "oxlint --type-aware --type-check",
     "lint:css": "node scripts/lint-css.mjs && npm run validate:pos",
-    "validate:pos": "tsx --test scripts/pos-regression.test.ts",
+    "validate:pos": "tsx --test scripts/pos-regression.test.ts scripts/lan-security.test.ts",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check ."
   },
@@ -46,6 +46,7 @@
     "expo-network": "~57.0.2",
     "expo-print": "~57.0.2",
     "expo-router": "~57.0.26",
+    "expo-secure-store": "~57.0.4",
     "expo-sharing": "~57.0.23",
     "expo-splash-screen": "~57.0.10",
     "expo-sqlite": "~57.0.4",
@@ -60,7 +61,6 @@
     "react-hook-form": "~7.76.1",
     "react-native": "0.86.3",
     "react-native-gesture-handler": "~2.32.0",
-    "react-native-http-bridge-refurbished": "1.2.9",
     "react-native-maps": "1.27.2",
     "react-native-qrcode-svg": "^6.3.26",
     "react-native-reanimated": "4.5.1",
@@ -96,22 +96,8 @@
     "typescript": "~6.0.3",
     "workbox-cli": "^7.4.1"
   },
-  "overrides": {
-    "react-native-http-bridge-refurbished": {
-      "react": "19.2.3"
-    }
-  },
   "engines": {
     "node": ">=20.19.4"
   },
-  "packageManager": "npm@10.9.0",
-  "expo": {
-    "doctor": {
-      "reactNativeDirectoryCheck": {
-        "exclude": [
-          "react-native-http-bridge-refurbished"
-        ]
-      }
-    }
-  }
+  "packageManager": "npm@10.9.0"
 }

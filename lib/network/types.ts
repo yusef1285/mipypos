@@ -15,6 +15,7 @@ export type NetworkMode = 'standalone' | 'host' | 'client';
 export interface NetworkConfig {
   mode: NetworkMode;
   hostUrl: string;
+  hostPin?: string;
   clientId: string;
 }
 

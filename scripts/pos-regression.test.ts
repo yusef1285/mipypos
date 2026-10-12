@@ -325,23 +325,33 @@ void regression('cierre en efectivo con centavos incluye billetes y monedas cont
   });
   assert.equal(await f.db.getOpenSession(), null);
 });
-void regression('QR acepta solo protocolo MipyPOS y direcciones LAN privadas', () => {
+const securePin = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+void regression('QR acepta solo TLS con identidad y direcciones LAN privadas', () => {
   const h = createHarness();
   const qr = h.load('@/lib/network/qr');
   assert.equal(
-    qr.parseLanQr(qr.createLanQr('http://192.168.43.1:8787')),
-    'http://192.168.43.1:8787',
+    qr.parseLanQr(qr.createLanQr('https://192.168.43.1:8787', undefined, securePin)),
+    'https://192.168.43.1:8787',
   );
   for (const url of [
-    'http://8.8.8.8:8787',
-    'https://192.168.1.1:8787',
-    'http://192.168.1.1:80',
-    'http://user:pass@192.168.1.1:8787',
-    'http://192.168.1.1:8787/sale',
+    'https://8.8.8.8:8787',
+    'http://192.168.1.1:8787',
+    'https://192.168.1.1:80',
+    'https://user:pass@192.168.1.1:8787',
+    'https://192.168.1.1:8787/sale',
   ])
-    assert.throws(() => qr.createLanQr(url));
+    assert.throws(() => qr.createLanQr(url, undefined, securePin));
+  assert.throws(() => qr.createLanQr('https://192.168.1.1:8787'));
+  for (const version of [2, 3])
+    assert.throws(
+      () =>
+        qr.parseLanQr(
+          JSON.stringify({ app: 'MipyPOS', version, hostUrl: 'http://192.168.1.1:8787' }),
+        ),
+      /compatible/,
+    );
   assert.throws(() =>
-    qr.parseLanQr('{"app":"Otra","version":2,"hostUrl":"http://192.168.1.1:8787"}'),
+    qr.parseLanQr('{"app":"Otra","version":4,"hostUrl":"https://192.168.1.1:8787"}'),
   );
 });
 void regression('permisos LAN impiden al vendedor consultar el reporte completo', () => {
@@ -649,24 +659,31 @@ void regression('ventas concurrentes respetan la última plaza demo', async () =
   assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
   assert.equal((await f.db.getDemoUsage()).sales, 5);
 });
-void regression(
-  'QR de hotspot conserva credenciales válidas y compatibilidad con QR anterior',
-  () => {
-    const qr = createHarness().load('@/lib/network/qr');
-    const wifi = { ssid: 'MipyPOS-local', password: 'redlocal123' };
-    assert.deepEqual(qr.parseLanConnection(qr.createLanQr('http://192.168.43.1:8787', wifi)), {
-      hostUrl: 'http://192.168.43.1:8787',
+void regression('QR seguro de hotspot conserva credenciales y rechaza versiones anteriores', () => {
+  const qr = createHarness().load('@/lib/network/qr');
+  const wifi = { ssid: 'MipyPOS-local', password: 'redlocal123' };
+  assert.deepEqual(
+    qr.parseLanConnection(qr.createLanQr('https://192.168.43.1:8787', wifi, securePin)),
+    {
+      hostUrl: 'https://192.168.43.1:8787',
+      hostPin: securePin,
       wifi,
-    });
-    assert.throws(
-      () =>
-        qr.parseLanConnection(
-          '{"app":"MipyPOS","version":3,"hostUrl":"http://192.168.43.1:8787","wifi":{"ssid":"red","password":"123"}}',
-        ),
-      /credenciales/,
-    );
-  },
-);
+    },
+  );
+  assert.throws(
+    () =>
+      qr.parseLanConnection(
+        JSON.stringify({
+          app: 'MipyPOS',
+          version: 4,
+          hostUrl: 'https://192.168.43.1:8787',
+          hostPin: securePin,
+          wifi: { ssid: 'red', password: '123' },
+        }),
+      ),
+    /credenciales/,
+  );
+});
 void regression(
   'extracción pendiente sobrevive timeout y se reintenta con mismo UUID',
   async () => {

@@ -14,7 +14,7 @@ import {
 } from 'react';
 
 import {
-  authenticate,
+  authenticateForLogin,
   getLicenseMode,
   getOpenSession,
   getSetting,
@@ -22,6 +22,7 @@ import {
   setSetting,
 } from '@/lib/database';
 import { getPendingWithdrawal } from '@/lib/network/pending-withdrawal';
+import { getPendingOperation } from '@/lib/network/pending-operation';
 import { getPendingSale } from '@/lib/network/pending-sale';
 import { HostRejection, getHostSnapshot, loginToHost, logoutFromHost } from '@/lib/network/client';
 import { loadNetworkConfig, saveNetworkConfig } from '@/lib/network/config';
@@ -146,7 +147,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       const authenticated =
         networkConfig.mode === 'client' && networkConfig.hostUrl
           ? await loginToHost(networkConfig.hostUrl, username, password)
-          : await authenticate(username, password);
+          : await authenticateForLogin(username, password);
       if (!authenticated) throw new Error('Usuario o contraseña incorrectos.');
       if (remember)
         await AsyncStorage.setItem('mipypos.rememberedUsername', authenticated.username);
@@ -159,10 +160,16 @@ export function AppProvider({ children }: PropsWithChildren) {
   );
   const logout = useCallback(() => {
     setUser(null);
-    if (networkConfig.mode === 'client') void logoutFromHost();
-  }, [networkConfig.mode]);
+    if (networkConfig.mode === 'client')
+      void logoutFromHost(networkConfig.hostUrl, networkConfig.hostPin).catch(() => undefined);
+  }, [networkConfig.mode, networkConfig.hostUrl, networkConfig.hostPin]);
   const configureNetwork = useCallback(
     async (next: NetworkConfig) => {
+      const operation = await getPendingOperation();
+      if (operation && (next.mode !== 'client' || next.hostUrl !== operation.hostUrl))
+        throw new Error(
+          'Confirma la operación pendiente iniciando sesión antes de cambiar de administrador.',
+        );
       const pending = await getPendingSale();
       if (pending && (next.mode !== 'client' || next.hostUrl !== pending.hostUrl))
         throw new Error(
@@ -173,23 +180,34 @@ export function AppProvider({ children }: PropsWithChildren) {
         throw new Error(
           'Confirma la extracción pendiente antes de cambiar de administrador o trabajar solo.',
         );
+      if (
+        (operation || pending || withdrawal) &&
+        networkConfig.hostPin &&
+        next.hostPin !== networkConfig.hostPin
+      )
+        throw new Error(
+          'Confirma las operaciones pendientes con la identidad original del administrador.',
+        );
       if (next.mode === 'host' && user?.role !== 'admin')
         throw new Error('Solo un administrador puede iniciar el host.');
       const address = next.mode === 'host' ? await startLanHost() : '';
+      await logoutFromHost(
+        networkConfig.mode === 'client' ? networkConfig.hostUrl : undefined,
+        networkConfig.hostPin,
+      );
       await saveNetworkConfig(next);
       if (next.mode !== 'host') {
         stopLanHost();
         if (await getLocalHotspot()) await stopLocalHotspot();
       }
       if (next.mode === 'standalone') await disconnectHotspot();
-      await logoutFromHost();
       const changedAuthority = networkConfig.mode === 'client' || next.mode === 'client';
       setNetworkConfig(next);
       if (changedAuthority) setUser(null);
       setSession(next.mode === 'client' ? null : await getOpenSession());
       setHostAddress(address);
     },
-    [user, networkConfig.mode],
+    [user, networkConfig.mode, networkConfig.hostUrl, networkConfig.hostPin],
   );
   const setLicense = useCallback(async (mode: LicenseMode, key?: string) => {
     if (mode === 'pro') {

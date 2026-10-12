@@ -17,8 +17,13 @@ import {
   stopLocalHotspot,
   type HotspotCredentials,
 } from '@/lib/network/hotspot';
-import { getPendingWithdrawal } from '@/lib/network/pending-withdrawal';
-import { getPendingSale } from '@/lib/network/pending-sale';
+import {
+  getPendingWithdrawal,
+  upgradePendingWithdrawalTransport,
+} from '@/lib/network/pending-withdrawal';
+import { getHostPin } from '@/lib/network/tls';
+import { getPendingOperation, rebindPendingOperation } from '@/lib/network/pending-operation';
+import { getPendingSale, upgradePendingSaleTransport } from '@/lib/network/pending-sale';
 
 export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
   const { networkConfig, configureNetwork, hostAddress, user } = useApp();
@@ -38,6 +43,8 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       setBusy(true);
       setError('');
       if (createNetwork) {
+        if (await getPendingOperation())
+          throw new Error('Confirma la operación pendiente antes de crear otra red.');
         if (await getPendingSale())
           throw new Error('Confirma la venta pendiente antes de crear otra red.');
         if (await getPendingWithdrawal())
@@ -65,19 +72,38 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
   const connect = async (data: string) => {
     let joinedWifi = false;
     try {
-      const { hostUrl, wifi } = parseLanConnection(data);
+      const { hostUrl, hostPin, wifi } = parseLanConnection(data);
+      const sameIdentity = !!networkConfig.hostPin && networkConfig.hostPin === hostPin;
+      const retainsAuthority = (previous: string) =>
+        previous.replace(/^http:/, 'https:') === hostUrl ||
+        (sameIdentity && previous === networkConfig.hostUrl);
+      const operation = await getPendingOperation();
+      if (operation && !retainsAuthority(operation.hostUrl))
+        throw new Error('Confirma la operación pendiente antes de cambiar de administrador.');
       const pending = await getPendingSale();
-      if (pending && pending.hostUrl !== hostUrl)
+      if (pending && !retainsAuthority(pending.hostUrl))
         throw new Error('Confirma la venta pendiente antes de cambiar de administrador.');
       const withdrawal = await getPendingWithdrawal();
-      if (withdrawal && withdrawal.authority !== hostUrl)
+      if (withdrawal && !retainsAuthority(withdrawal.authority))
         throw new Error('Confirma la extracción pendiente antes de cambiar de administrador.');
+      if (
+        (operation || pending || withdrawal) &&
+        networkConfig.hostPin &&
+        networkConfig.hostPin !== hostPin
+      )
+        throw new Error(
+          'Confirma las operaciones pendientes con el administrador original antes de escanear otro QR.',
+        );
       if (wifi) {
         await connectHotspot(wifi);
         joinedWifi = true;
       }
-      await checkLanHost(hostUrl);
-      await configureNetwork({ ...networkConfig, mode: 'client', hostUrl });
+      await checkLanHost(hostUrl, hostPin);
+      const previousHost = sameIdentity ? networkConfig.hostUrl : undefined;
+      await upgradePendingSaleTransport(hostUrl, previousHost);
+      await upgradePendingWithdrawalTransport(hostUrl, previousHost);
+      if (previousHost) await rebindPendingOperation(previousHost, hostUrl);
+      await configureNetwork({ ...networkConfig, mode: 'client', hostUrl, hostPin });
       setScanning(false);
       setError('');
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -88,9 +114,9 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
     }
   };
   let qr = '';
-  if (networkConfig.mode === 'host' && hostAddress.startsWith('http://')) {
+  if (networkConfig.mode === 'host' && hostAddress.startsWith('https://')) {
     try {
-      qr = createLanQr(hostAddress, hotspot ?? undefined);
+      qr = createLanQr(hostAddress, hotspot ?? undefined, getHostPin());
     } catch {
       qr = '';
     }
@@ -140,7 +166,7 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       ) : null}
       {networkConfig.mode === 'host' && !qr ? (
         <Typography.Paragraph className="text-danger">
-          {hostAddress && !hostAddress.startsWith('http://')
+          {hostAddress && !hostAddress.startsWith('https://')
             ? hostAddress
             : 'El host no está disponible. Conecta el Wi-Fi o hotspot y vuelve a iniciarlo.'}
         </Typography.Paragraph>
@@ -151,7 +177,7 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       ) : (
         <Button
           variant="secondary"
-          isDisabled={busy}
+          isDisabled={busy || Platform.OS !== 'android'}
           onPress={() => {
             setError('');
             setScanning(true);

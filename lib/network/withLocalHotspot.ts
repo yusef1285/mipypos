@@ -1,4 +1,5 @@
 import {
+  withAppBuildGradle,
   withAndroidManifest,
   withDangerousMod,
   withMainApplication,
@@ -31,6 +32,18 @@ const withLocalHotspot: ConfigPlugin = (config) => {
     mod.modResults.manifest['uses-permission'] = permissions;
     return mod;
   });
+  config = withAppBuildGradle(config, (mod) => {
+    const dependency = 'implementation("org.nanohttpd:nanohttpd:2.3.1")';
+    if (!mod.modResults.contents.includes(dependency)) {
+      if (!/dependencies\s*\{/.test(mod.modResults.contents))
+        throw new Error('No se pudo añadir el servidor TLS a Gradle.');
+      mod.modResults.contents = mod.modResults.contents.replace(
+        /dependencies\s*\{/,
+        `$&\n    ${dependency}`,
+      );
+    }
+    return mod;
+  });
   config = withMainApplication(config, (mod) => {
     const marker = 'com.mipypos.lan.MipyLanPackage';
     if (mod.modResults.contents.includes(marker)) return mod;
@@ -61,7 +74,12 @@ const withLocalHotspot: ConfigPlugin = (config) => {
         'app/src/main/java/com/mipypos/lan',
       );
       mkdirSync(directory, { recursive: true });
-      for (const file of ['MipyLanModule.java', 'MipyLanPackage.java'])
+      for (const file of [
+        'MipyLanModule.java',
+        'MipyLanPackage.java',
+        'MipyTlsModule.java',
+        'LanIdentity.java',
+      ])
         writeFileSync(
           join(directory, file),
           readFileSync(join(mod.modRequest.projectRoot, 'lib/network/native', file), 'utf8'),

@@ -1,3 +1,30 @@
+// Text is quoted AND neutralized; CSV quoting alone does not prevent formulas.
+export function escapeCsvCell(value: unknown): string {
+  const text =
+    value == null
+      ? ''
+      : typeof value === 'object'
+        ? JSON.stringify(value)
+        : typeof value === 'string'
+          ? value
+          : typeof value === 'number' ||
+              typeof value === 'boolean' ||
+              typeof value === 'bigint' ||
+              typeof value === 'symbol'
+            ? String(value)
+            : Function.prototype.toString.call(value);
+  // Strip leading whitespace/control characters before checking for formula markers.
+  let start = 0;
+  while (start < text.length && (/\s/.test(text[start]) || text.charCodeAt(start) <= 31))
+    start += 1;
+  const formulaText = text.slice(start);
+  const safe =
+    typeof value === 'string' && (/^[=+@-]/.test(formulaText) || /^[\t\r\n]/.test(text))
+      ? `'${text}`
+      : text;
+  return `"${safe.replaceAll('"', '""')}"`;
+}
+
 export function parseCsv(text: string): Array<Record<string, string>> {
   const rows: string[][] = [];
   let row: string[] = [];

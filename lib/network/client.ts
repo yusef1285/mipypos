@@ -1,5 +1,13 @@
+import { z } from 'zod';
+import { pinnedRequest } from '@/lib/network/tls';
 import type { DailyReport, Payment, Producto, SaleMethod, SesionCaja } from '@/lib/models';
-import { clearNetworkToken, getNetworkToken, saveNetworkToken } from '@/lib/network/config';
+import {
+  clearNetworkToken,
+  getNetworkToken,
+  saveNetworkToken,
+  loadNetworkConfig,
+} from '@/lib/network/config';
+import { flushRevocations, revokeOrDefer } from '@/lib/network/revocations';
 import type {
   ApiResult,
   NetworkSaleCommand,
@@ -7,32 +15,69 @@ import type {
   NetworkSnapshot,
 } from '@/lib/network/types';
 
-import type { PosOperation, PosArgs, PosResult } from '@/lib/network/operations';
+import {
+  mutationOperations,
+  type PosOperation,
+  type PosArgs,
+  type PosResult,
+} from '@/lib/network/operations';
+import {
+  prepareOperation,
+  getPendingOperation,
+  clearPendingOperation,
+} from '@/lib/network/pending-operation';
+
+let operationQueue: Promise<unknown> = Promise.resolve();
 
 export async function requestHostOperation<K extends PosOperation>(
   hostUrl: string,
   operation: K,
   args: PosArgs<K>,
+  username = '',
+  clientId = '',
 ): Promise<PosResult<K>> {
-  const token = await getNetworkToken();
-  if (!token) throw new Error('Inicia sesión en el teléfono administrador.');
-  return request<PosResult<K>>(hostUrl, '/v1/operation', { operation, args, token });
+  const run = async (): Promise<PosResult<K>> => {
+    const token = await getNetworkToken();
+    if (!token)
+      throw new HostRejection('Inicia sesión en el teléfono administrador.', 'AUTH_EXPIRED');
+    if (!mutationOperations.has(operation))
+      return request<PosResult<K>>(hostUrl, '/v1/operation', { operation, args, token });
+    const pending = await prepareOperation({ hostUrl, username, clientId, operation, args });
+    try {
+      const receipt = await request<{ found: boolean; value: PosResult<K> }>(
+        hostUrl,
+        '/v1/receipt',
+        { ...pending, token },
+      );
+      const result = receipt.found
+        ? receipt.value
+        : await request<PosResult<K>>(hostUrl, '/v1/operation', { ...pending, token });
+      await clearPendingOperation();
+      return result;
+    } catch (error) {
+      if (error instanceof HostRejection && error.code === 'REJECTED')
+        await clearPendingOperation();
+      throw error;
+    }
+  };
+  if (!mutationOperations.has(operation)) return run();
+  const running = operationQueue.then(run);
+  operationQueue = running.catch(() => undefined);
+  return running;
 }
 
-export async function checkLanHost(hostUrl: string) {
-  const response = await fetch(`${hostUrl}/v1/health`, { signal: AbortSignal.timeout(8000) });
-  const result: ApiResult<{
-    name: string;
-    protocol: number;
-    ready: boolean;
-  }> = await response.json();
-  if (
-    !response.ok ||
-    !result.ok ||
-    result.data?.name !== 'MipyPOS' ||
-    result.data.protocol !== 2 ||
-    !result.data.ready
-  )
+export async function checkLanHost(hostUrl: string, pin?: string) {
+  const result = z
+    .object({
+      ok: z.literal(true),
+      data: z.object({
+        name: z.literal('MipyPOS'),
+        protocol: z.literal(4),
+        ready: z.literal(true),
+      }),
+    })
+    .safeParse(JSON.parse(await pinnedRequest(hostUrl, '/v1/health', undefined, pin)));
+  if (!result.success)
     throw new Error('El administrador no está disponible o necesita actualizar MipyPOS.');
 }
 
@@ -46,31 +91,49 @@ export class HostRejection extends Error {
 }
 
 async function request<T>(hostUrl: string, path: string, body: object): Promise<T> {
-  const response = await fetch(`${hostUrl.replace(/\/$/, '')}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(15000),
-  });
-  const result: ApiResult<T> = await response.json();
-  if (!result.ok)
+  const result = JSON.parse(await pinnedRequest(hostUrl, path, body)) as ApiResult<T>;
+  if (!result || typeof result.ok !== 'boolean')
+    throw new Error('No se pudo confirmar la respuesta del administrador.');
+  if (!result.ok) {
+    if (result.code === 'AUTH_EXPIRED') await clearNetworkToken();
     throw new HostRejection(
       result.error ?? 'El administrador rechazó la operación.',
       result.code ?? 'REJECTED',
     );
-  if (!response.ok || result.data === undefined)
+  }
+  if (result.data === undefined)
     throw new Error('No se pudo confirmar la respuesta del administrador.');
   return result.data;
 }
 
 export async function loginToHost(hostUrl: string, username: string, password: string) {
+  await flushRevocations(hostUrl);
   const session = await request<NetworkSession>(hostUrl, '/v1/login', { username, password });
   await saveNetworkToken(session.token);
+  const pending = await getPendingOperation();
+  if (pending && pending.hostUrl === hostUrl && pending.username === session.user.username) {
+    try {
+      const receipt = await request<{ found: boolean }>(hostUrl, '/v1/receipt', {
+        ...pending,
+        token: session.token,
+      });
+      if (!receipt.found)
+        await request(hostUrl, '/v1/operation', { ...pending, token: session.token });
+      await clearPendingOperation();
+    } catch (error) {
+      if (error instanceof HostRejection && error.code === 'REJECTED')
+        await clearPendingOperation();
+      throw error;
+    }
+  }
   return session.user;
 }
 
-export async function logoutFromHost() {
+export async function logoutFromHost(hostUrl?: string, hostPin?: string) {
+  const token = await getNetworkToken();
+  const config = await loadNetworkConfig();
   await clearNetworkToken();
+  if (hostUrl && token) await revokeOrDefer(hostUrl, hostPin ?? config.hostPin ?? '', token);
 }
 
 const snapshotRequests = new Map<string, Promise<NetworkSnapshot>>();

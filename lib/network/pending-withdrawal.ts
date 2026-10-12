@@ -18,6 +18,19 @@ export async function getPendingWithdrawal(): Promise<PendingWithdrawal | null> 
   const value = await AsyncStorage.getItem(KEY);
   return value ? schema.parse(JSON.parse(value)) : null;
 }
+export async function upgradePendingWithdrawalTransport(
+  hostUrl: string,
+  verifiedPreviousHost?: string,
+) {
+  const pending = await getPendingWithdrawal();
+  if (
+    pending &&
+    ((pending.authority.startsWith('http:') &&
+      pending.authority.replace(/^http:/, 'https:') === hostUrl) ||
+      pending.authority === verifiedPreviousHost)
+  )
+    await AsyncStorage.setItem(KEY, JSON.stringify({ ...pending, authority: hostUrl }));
+}
 let sending = false;
 export async function submitWithdrawal(
   values: Omit<PendingWithdrawal, 'commandId'>,

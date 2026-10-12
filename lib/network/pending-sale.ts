@@ -61,6 +61,16 @@ export async function getPendingSale(): Promise<PendingSale | null> {
   if (!isPendingSale(pending)) throw new Error('El formato de la venta pendiente no es válido.');
   return pending;
 }
+export async function upgradePendingSaleTransport(hostUrl: string, verifiedPreviousHost?: string) {
+  const pending = await getPendingSale();
+  if (
+    pending &&
+    ((pending.hostUrl.startsWith('http:') &&
+      pending.hostUrl.replace(/^http:/, 'https:') === hostUrl) ||
+      pending.hostUrl === verifiedPreviousHost)
+  )
+    await AsyncStorage.setItem(KEY, JSON.stringify({ ...pending, hostUrl }));
+}
 let sending = false;
 let creating = false;
 export async function sendPendingSale(config: NetworkConfig, username: string): Promise<number> {

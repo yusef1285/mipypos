@@ -7,7 +7,7 @@ import type { PosOperation, PosArgs, PosResult } from '@/lib/network/operations'
 type Repository = { [K in PosOperation]: (...args: PosArgs<K>) => Promise<PosResult<K>> };
 
 export function usePosRepository(): Repository {
-  const { networkConfig } = useApp();
+  const { networkConfig, user } = useApp();
   return useMemo(() => {
     const bind =
       <K extends PosOperation>(
@@ -18,7 +18,13 @@ export function usePosRepository(): Repository {
         if (networkConfig.mode === 'client') {
           if (!networkConfig.hostUrl)
             return Promise.reject(new Error('Escanea el QR del administrador.'));
-          return requestHostOperation(networkConfig.hostUrl, operation, args);
+          return requestHostOperation(
+            networkConfig.hostUrl,
+            operation,
+            args,
+            user?.username ?? '',
+            networkConfig.clientId,
+          );
         }
         return handler(...args);
       };
@@ -47,5 +53,5 @@ export function usePosRepository(): Repository {
       getExportRows: bind('getExportRows', Database.getExportRows),
       getSale: bind('getSale', Database.getSale),
     } satisfies Repository;
-  }, [networkConfig]);
+  }, [networkConfig, user?.username]);
 }

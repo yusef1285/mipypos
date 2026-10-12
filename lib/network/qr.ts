@@ -17,7 +17,7 @@ export function validateLanUrl(value: string): string {
       (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31));
   if (
     !privateIp ||
-    url.protocol !== 'http:' ||
+    url.protocol !== 'https:' ||
     url.port !== String(LAN_PORT) ||
     url.username ||
     url.password ||
@@ -28,18 +28,28 @@ export function validateLanUrl(value: string): string {
     throw new Error('Escanea un QR de MipyPOS generado por el administrador en la red local.');
   return url.origin;
 }
-export function createLanQr(hostUrl: string, wifi?: HotspotCredentials) {
+export function validateHostPin(pin: string): string {
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(pin))
+    throw new Error('El QR no contiene una identidad segura válida. Genera uno nuevo.');
+  return pin;
+}
+export function createLanQr(hostUrl: string, wifi?: HotspotCredentials, hostPin = '') {
   return JSON.stringify({
     app: 'MipyPOS',
-    version: wifi ? 3 : 2,
+    version: 4,
     hostUrl: validateLanUrl(hostUrl),
+    hostPin: validateHostPin(hostPin),
     ...(wifi ? { wifi } : {}),
   });
 }
 export function parseLanQr(data: string): string {
   return parseLanConnection(data).hostUrl;
 }
-export function parseLanConnection(data: string): { hostUrl: string; wifi?: HotspotCredentials } {
+export function parseLanConnection(data: string): {
+  hostUrl: string;
+  hostPin: string;
+  wifi?: HotspotCredentials;
+} {
   let value: unknown;
   try {
     value = JSON.parse(data);
@@ -52,13 +62,16 @@ export function parseLanConnection(data: string): { hostUrl: string; wifi?: Hots
     !('app' in value) ||
     value.app !== 'MipyPOS' ||
     !('version' in value) ||
-    (value.version !== 2 && value.version !== 3) ||
+    value.version !== 4 ||
+    !('hostPin' in value) ||
+    typeof value.hostPin !== 'string' ||
     !('hostUrl' in value) ||
     typeof value.hostUrl !== 'string'
   )
     throw new Error('Este QR no es compatible. Genera uno nuevo en el administrador.');
   const hostUrl = validateLanUrl(value.hostUrl);
-  if (value.version === 2) return { hostUrl };
+  const hostPin = validateHostPin(value.hostPin);
+  if (!('wifi' in value)) return { hostUrl, hostPin };
   if (
     !('wifi' in value) ||
     !value.wifi ||
@@ -73,5 +86,5 @@ export function parseLanConnection(data: string): { hostUrl: string; wifi?: Hots
     value.wifi.password.length > 63
   )
     throw new Error('El QR no contiene credenciales Wi-Fi válidas. Genera uno nuevo.');
-  return { hostUrl, wifi: { ssid: value.wifi.ssid, password: value.wifi.password } };
+  return { hostUrl, hostPin, wifi: { ssid: value.wifi.ssid, password: value.wifi.password } };
 }
