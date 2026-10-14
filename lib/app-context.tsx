@@ -27,6 +27,7 @@ import { getPendingSale } from '@/lib/network/pending-sale';
 import { HostRejection, getHostSnapshot, loginToHost, logoutFromHost } from '@/lib/network/client';
 import { loadNetworkConfig, saveNetworkConfig } from '@/lib/network/config';
 import { disconnectHotspot, getLocalHotspot, stopLocalHotspot } from '@/lib/network/hotspot';
+import { disconnectDirect, getDirectInfo } from '@/lib/network/direct';
 import { startLanHost, stopLanHost } from '@/lib/network/host';
 import type { NetworkConfig } from '@/lib/network/types';
 import { validateLicenseKey } from '@/lib/license';
@@ -89,6 +90,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       setNetworkConfig(storedNetwork);
       if (storedNetwork.mode === 'host') {
         try {
+          if (storedNetwork.transport === 'direct' && !(await getDirectInfo())?.isOwner)
+            throw new Error(
+              'Vuelve a crear Wi-Fi Direct y empareja las terminales con el nuevo QR.',
+            );
           setHostAddress(await startLanHost());
         } catch (failure) {
           setHostAddress(
@@ -200,7 +205,10 @@ export function AppProvider({ children }: PropsWithChildren) {
         stopLanHost();
         if (await getLocalHotspot()) await stopLocalHotspot();
       }
-      if (next.mode === 'standalone') await disconnectHotspot();
+      if (next.mode === 'standalone') {
+        await disconnectHotspot();
+        await disconnectDirect();
+      }
       const changedAuthority = networkConfig.mode === 'client' || next.mode === 'client';
       setNetworkConfig(next);
       if (changedAuthority) setUser(null);

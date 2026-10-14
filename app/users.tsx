@@ -20,7 +20,7 @@ import { usePosRepository } from '@/lib/use-pos-repository';
 import type { Usuario, UserRole } from '@/lib/models';
 import { canAccess } from '@/lib/permissions';
 
-const roles: UserRole[] = ['admin', 'supervisor', 'seller', 'storekeeper'];
+const roles: UserRole[] = ['admin', 'supervisor', 'seller', 'storekeeper', 'auditor'];
 export default function Users() {
   const { user } = useApp();
   const { deleteUser, listUsers, saveUser } = usePosRepository();

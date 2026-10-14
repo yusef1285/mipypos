@@ -25,6 +25,7 @@ export async function loadNetworkConfig(): Promise<NetworkConfig> {
       mode: parsed.mode === 'host' || parsed.mode === 'client' ? parsed.mode : 'standalone',
       hostUrl: typeof parsed.hostUrl === 'string' ? parsed.hostUrl : '',
       hostPin,
+      transport: parsed.transport === 'direct' ? 'direct' : 'wifi',
       clientId:
         typeof parsed.clientId === 'string' && parsed.clientId
           ? parsed.clientId
@@ -38,7 +39,12 @@ export async function loadNetworkConfig(): Promise<NetworkConfig> {
 export async function saveNetworkConfig(config: NetworkConfig) {
   if (config.hostPin) await setSecret(PIN_KEY, config.hostPin);
   else await removeSecret(PIN_KEY);
-  const publicConfig = { mode: config.mode, hostUrl: config.hostUrl, clientId: config.clientId };
+  const publicConfig = {
+    mode: config.mode,
+    hostUrl: config.hostUrl,
+    clientId: config.clientId,
+    transport: config.transport,
+  };
   await AsyncStorage.setItem(CONFIG_KEY, JSON.stringify(publicConfig));
 }
 

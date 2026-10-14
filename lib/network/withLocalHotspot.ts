@@ -33,6 +33,12 @@ const withLocalHotspot: ConfigPlugin = (config) => {
     return mod;
   });
   config = withAppBuildGradle(config, (mod) => {
+    const ocrDependency = 'implementation("com.google.mlkit:text-recognition:16.0.1")';
+    if (!mod.modResults.contents.includes(ocrDependency))
+      mod.modResults.contents = mod.modResults.contents.replace(
+        /dependencies\s*\{/,
+        `$&\n    ${ocrDependency}`,
+      );
     const dependency = 'implementation("org.nanohttpd:nanohttpd:2.3.1")';
     if (!mod.modResults.contents.includes(dependency)) {
       if (!/dependencies\s*\{/.test(mod.modResults.contents))
@@ -79,6 +85,8 @@ const withLocalHotspot: ConfigPlugin = (config) => {
         'MipyLanPackage.java',
         'MipyTlsModule.java',
         'LanIdentity.java',
+        'MipyReceiptModule.java',
+        'MipyDirectModule.java',
       ])
         writeFileSync(
           join(directory, file),

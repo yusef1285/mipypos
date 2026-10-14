@@ -68,6 +68,22 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       'expo-sharing',
       'expo-secure-store',
       [
+        'expo-media-library',
+        {
+          photosPermission: 'Permite leer los comprobantes de transferencia.',
+          savePhotosPermission: 'Permite guardar los comprobantes de transferencia en la galería.',
+          granularPermissions: ['photo'],
+        },
+      ],
+      [
+        'expo-image-picker',
+        {
+          cameraPermission: 'Permite fotografiar comprobantes de transferencia.',
+          photosPermission: 'Permite seleccionar comprobantes de transferencia.',
+          microphonePermission: false,
+        },
+      ],
+      [
         'expo-camera',
         {
           cameraPermission: 'Permite a MipyPOS leer el QR del administrador.',

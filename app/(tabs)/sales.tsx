@@ -16,6 +16,8 @@ import { Alert, FlatList, View } from 'react-native';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { AccessDenied } from '@/components/AccessDenied';
 import { DemoQuota } from '@/components/DemoQuota';
+import { TransferReceiptForm, emptyTransferReceipt } from '@/components/TransferReceiptForm';
+import { validateSettlement } from '@/lib/settlement';
 import { EmptyState, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
@@ -48,7 +50,11 @@ export default function Sales() {
     cash: '',
     transfer: '',
   });
-  const [saving, setSaving] = useState(false);
+  const [cashReceived, setCashReceived] = useState('');
+  const [receipt, setReceipt] = useState(emptyTransferReceipt);
+  const [receiptBusy, setReceiptBusy] = useState(false);
+  const [submitting, setSaving] = useState(false);
+  const saving = submitting || receiptBusy;
   const [pendingSale, setPendingSale] = useState(false);
   const loadingRef = useRef(false);
   const [loading, setLoading] = useState(true);
@@ -108,6 +114,10 @@ export default function Sales() {
   const total = roundMoney(
     cart.reduce((sum, item) => sum + roundMoney(item.price * item.quantity), 0),
   );
+  const cashPart =
+    method === 'cash' ? total : method === 'mixed' ? Number(amounts.cash.replace(',', '.')) : 0;
+  const tender = Number(cashReceived.replace(',', '.'));
+  const change = roundMoney(tender - cashPart);
   const updateQuantity = (id: number, value: string) => {
     setDrafts((current) => ({ ...current, [id]: value }));
     const quantity = Number(value.replace(',', '.'));
@@ -146,6 +156,8 @@ export default function Sales() {
     if (saving || pendingSale) return;
     void Haptics.selectionAsync();
     setMethod(next);
+    setCashReceived('');
+    setReceipt(emptyTransferReceipt());
     setCart((current) =>
       current.map((item) => ({
         ...item,
@@ -178,6 +190,11 @@ export default function Sales() {
                 ? total
                 : 0,
         }));
+        const settlement = {
+          cashReceived: cashPart > 0 ? (cashReceived.trim() ? tender : NaN) : null,
+          transferReceipt: method !== 'cash' ? receipt : null,
+        };
+        validateSettlement(payments, settlement);
         id = await registerPosSale(
           networkConfig,
           cart,
@@ -185,17 +202,20 @@ export default function Sales() {
           payments,
           user.username,
           session.id,
+          settlement,
         );
       }
       setPendingSale(false);
       committed = true;
       setCart([]);
       setDrafts({});
+      setCashReceived('');
+      setReceipt(emptyTransferReceipt());
       setAmounts({ cash: '', transfer: '' });
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert(
         'Venta registrada',
-        `Venta #${id}`,
+        `Venta #${id}${cashPart > 0 && !pendingSale ? `\nVuelto: ${money(change)}` : ''}`,
         licenseMode === 'pro'
           ? [
               { text: 'Cerrar' },
@@ -338,6 +358,42 @@ export default function Sales() {
             </TextField>
           ))
         : null}
+      {method !== 'cash' ? (
+        <TransferReceiptForm
+          value={receipt}
+          onChange={setReceipt}
+          disabled={saving || pendingSale}
+          onBusyChange={setReceiptBusy}
+          onAmount={(amount) =>
+            setAmounts((current) => ({
+              ...current,
+              transfer: String(amount),
+              cash:
+                method === 'mixed' ? String(roundMoney(Math.max(0, total - amount))) : current.cash,
+            }))
+          }
+        />
+      ) : null}
+      {method !== 'transfer' ? (
+        <>
+          <TextField isDisabled={saving || pendingSale}>
+            <Label>Efectivo recibido (CUP)</Label>
+            <Input
+              keyboardType="decimal-pad"
+              value={cashReceived}
+              onChangeText={setCashReceived}
+              placeholder="0.00"
+            />
+          </TextField>
+          <Typography.Heading type="h3">
+            {cashReceived.trim() && Number.isFinite(change)
+              ? change < 0
+                ? `Faltan: ${money(-change)}`
+                : `Vuelto: ${money(change)}`
+              : 'Vuelto: —'}
+          </Typography.Heading>
+        </>
+      ) : null}
       <Typography.Heading type="h2">Total: {money(total)}</Typography.Heading>
       {pendingSale ? (
         <Typography.Paragraph className="text-warning">

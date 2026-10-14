@@ -21,6 +21,13 @@ import {
   getPendingWithdrawal,
   upgradePendingWithdrawalTransport,
 } from '@/lib/network/pending-withdrawal';
+import {
+  createDirectGroup,
+  connectDirectPeer,
+  disconnectDirect,
+  getDirectInfo,
+  type DirectInfo,
+} from '@/lib/network/direct';
 import { getHostPin } from '@/lib/network/tls';
 import { getPendingOperation, rebindPendingOperation } from '@/lib/network/pending-operation';
 import { getPendingSale, upgradePendingSaleTransport } from '@/lib/network/pending-sale';
@@ -30,6 +37,7 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
   const [scanning, setScanning] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [direct, setDirect] = useState<DirectInfo | null>(null);
   const [hotspot, setHotspot] = useState<HotspotCredentials | null>(null);
   useEffect(() => {
     void getLocalHotspot()
@@ -38,6 +46,58 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
     // Host address and mode changes invalidate credentials held by the native Wi-Fi service.
     // eslint-disable-next-line react/exhaustive-effect-dependencies
   }, [hostAddress, networkConfig.mode]);
+  useEffect(() => {
+    let active = true;
+    const update = () => {
+      void getDirectInfo()
+        .then((info) => {
+          if (active) setDirect(info);
+        })
+        .catch(() => {
+          if (active) setDirect(null);
+        });
+    };
+    update();
+    const timer = setInterval(update, 3000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [hostAddress, networkConfig.mode]);
+  const startDirect = async () => {
+    try {
+      setBusy(true);
+      setError('');
+      if (
+        (await getPendingOperation()) ||
+        (await getPendingSale()) ||
+        (await getPendingWithdrawal())
+      )
+        throw new Error('Confirma las operaciones pendientes antes de crear otra red.');
+      if (await getLocalHotspot()) await stopLocalHotspot();
+      await disconnectHotspot();
+      const info = await createDirectGroup();
+      try {
+        await configureNetwork({
+          ...networkConfig,
+          mode: 'host',
+          hostUrl: '',
+          transport: 'direct',
+        });
+      } catch (failure) {
+        await disconnectDirect();
+        throw failure;
+      }
+      setDirect(info);
+      setHotspot(null);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'No se pudo crear Wi-Fi Direct.');
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } finally {
+      setBusy(false);
+    }
+  };
   const changeMode = async (mode: 'host' | 'standalone', createNetwork = false) => {
     try {
       setBusy(true);
@@ -49,9 +109,15 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
           throw new Error('Confirma la venta pendiente antes de crear otra red.');
         if (await getPendingWithdrawal())
           throw new Error('Confirma la extracción pendiente antes de crear otra red.');
+        await disconnectDirect();
         const credentials = await startLocalHotspot();
         try {
-          await configureNetwork({ ...networkConfig, mode: 'host', hostUrl: '' });
+          await configureNetwork({
+            ...networkConfig,
+            mode: 'host',
+            hostUrl: '',
+            transport: 'wifi',
+          });
         } catch (failure) {
           await stopLocalHotspot();
           throw failure;
@@ -71,8 +137,10 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
   };
   const connect = async (data: string) => {
     let joinedWifi = false;
+    let joinedDirect = false;
     try {
-      const { hostUrl, hostPin, wifi } = parseLanConnection(data);
+      setBusy(true);
+      const { hostUrl, hostPin, wifi, directAddress } = parseLanConnection(data);
       const sameIdentity = !!networkConfig.hostPin && networkConfig.hostPin === hostPin;
       const retainsAuthority = (previous: string) =>
         previous.replace(/^http:/, 'https:') === hostUrl ||
@@ -94,7 +162,25 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
         throw new Error(
           'Confirma las operaciones pendientes con el administrador original antes de escanear otro QR.',
         );
-      if (wifi) {
+      if (directAddress) {
+        await disconnectHotspot();
+        const current = await getDirectInfo();
+        if (
+          current &&
+          (current.isOwner || current.deviceAddress.toLowerCase() !== directAddress.toLowerCase())
+        )
+          await disconnectDirect();
+        const info =
+          current &&
+          !current.isOwner &&
+          current.deviceAddress.toLowerCase() === directAddress.toLowerCase()
+            ? current
+            : await connectDirectPeer(directAddress);
+        joinedDirect = true;
+        if (new URL(hostUrl).hostname !== info.hostIp)
+          throw new Error('La dirección del administrador cambió. Genera y escanea un QR nuevo.');
+      } else if (wifi) {
+        await disconnectDirect();
         await connectHotspot(wifi);
         joinedWifi = true;
       }
@@ -103,23 +189,38 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       await upgradePendingSaleTransport(hostUrl, previousHost);
       await upgradePendingWithdrawalTransport(hostUrl, previousHost);
       if (previousHost) await rebindPendingOperation(previousHost, hostUrl);
-      await configureNetwork({ ...networkConfig, mode: 'client', hostUrl, hostPin });
+      await configureNetwork({
+        ...networkConfig,
+        mode: 'client',
+        hostUrl,
+        hostPin,
+        transport: directAddress ? 'direct' : 'wifi',
+      });
       setScanning(false);
       setError('');
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (failure) {
       if (joinedWifi) await disconnectHotspot();
+      if (joinedDirect) await disconnectDirect();
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       throw failure;
+    } finally {
+      setBusy(false);
     }
   };
   let qr = '';
   if (networkConfig.mode === 'host' && hostAddress.startsWith('https://')) {
-    try {
-      qr = createLanQr(hostAddress, hotspot ?? undefined, getHostPin());
-    } catch {
-      qr = '';
-    }
+    if (networkConfig.transport !== 'direct' || direct?.isOwner)
+      try {
+        qr = createLanQr(
+          hostAddress,
+          direct?.isOwner ? undefined : (hotspot ?? undefined),
+          getHostPin(),
+          direct?.isOwner ? direct.deviceAddress : undefined,
+        );
+      } catch {
+        qr = '';
+      }
   }
   return (
     <Card className="gap-4 p-4">
@@ -153,9 +254,11 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
             {hostAddress}
           </Typography.Paragraph>
           <Typography.Paragraph>
-            {hotspot
-              ? `Escanea desde MipyPOS en el otro teléfono y acepta la conexión Wi-Fi de Android. Red: ${hotspot.ssid}.`
-              : 'Conecta ambos teléfonos al mismo Wi-Fi o hotspot y escanea este QR desde el otro teléfono.'}
+            {direct?.isOwner
+              ? 'Wi-Fi Direct: escanea este QR desde MipyPOS en el otro Android, activa ubicación y acepta la conexión del sistema. No requiere internet ni router.'
+              : hotspot
+                ? `Escanea desde MipyPOS en el otro teléfono y acepta la conexión Wi-Fi de Android. Red: ${hotspot.ssid}.`
+                : 'Conecta ambos teléfonos al mismo Wi-Fi o hotspot y escanea este QR desde el otro teléfono.'}
           </Typography.Paragraph>
           {hotspot ? (
             <Typography.Paragraph type="body-sm" color="muted">
@@ -189,6 +292,9 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       )}
       {allowHost && user?.role === 'admin' && Platform.OS === 'android' ? (
         <View className="gap-3">
+          <Button isDisabled={busy} onPress={() => void startDirect()}>
+            <Button.Label>{busy ? 'Conectando…' : 'Crear Wi-Fi Direct y mostrar QR'}</Button.Label>
+          </Button>
           <Button isDisabled={busy} onPress={() => void changeMode('host', true)}>
             <Button.Label>{busy ? 'Creando red…' : 'Crear hotspot y mostrar QR'}</Button.Label>
           </Button>

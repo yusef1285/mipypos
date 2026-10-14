@@ -16,6 +16,7 @@ export interface NetworkConfig {
   mode: NetworkMode;
   hostUrl: string;
   hostPin?: string;
+  transport?: 'direct' | 'wifi';
   clientId: string;
 }
 
@@ -40,6 +41,7 @@ export interface NetworkSaleCommand {
   method: SaleMethod;
   sessionId: number;
   payments: Payment[];
+  settlement?: import('@/lib/models').SaleSettlement;
   items: Array<{ productId: number; quantity: number; areaId: number }>;
 }
 

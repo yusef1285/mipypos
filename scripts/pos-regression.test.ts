@@ -30,7 +30,8 @@ after(() => {
 });
 import { createHarness, prepareHarness } from './pos-test-harness';
 before(prepareHarness);
-import type { CartItem, CashClosureInput, Producto } from '../lib/models';
+import type { CartItem, CashClosureInput, Producto, TransferReceipt } from '../lib/models';
+import { receiptAmount, validateSettlement } from '../lib/settlement';
 
 const pay = (amount: number) => [{ type: 'transfer' as const, amount }];
 
@@ -759,3 +760,222 @@ void regression(
     await f.db.closeCashSession(f.sessionId, { ...input, approvalIds: [approval.id] });
   },
 );
+
+const sampleReceipt = (amount = 100, reference = 'OPERACION-123'): TransferReceipt => ({
+  ci: '90010112345',
+  fullName: 'Cliente de prueba',
+  address: 'Dirección de prueba',
+  amount,
+  rawText: `Monto: ${amount} CUP`,
+  reference,
+  receiptDate: '14/10/2026',
+  imageBase64: '/9j/AA==',
+  reviewed: true,
+});
+void regression('efectivo recibido calcula vuelto y no infla el efectivo de caja', async () => {
+  const f = await fixture();
+  const id = await f.db.registerSale(
+    f.cart(1),
+    'cash',
+    [{ type: 'cash', amount: 100 }],
+    'admin',
+    undefined,
+    f.sessionId,
+    { cashReceived: 150, transferReceipt: null },
+  );
+  const data = await f.db.getSale(id);
+  assert.equal(data?.sale.settlement?.changeDue, 50);
+  assert.equal((await f.db.getCashClosurePreview(f.sessionId)).cashSales, 100);
+  assert.equal((await f.db.getExportRows('sales'))[0].cash_received, 150);
+});
+void regression(
+  'efectivo insuficiente, ausente o con precisión inválida no consume stock ni cuota',
+  async () => {
+    const f = await fixture();
+    for (const cashReceived of [null, 99, 100.001, NaN])
+      await assert.rejects(
+        f.db.registerSale(
+          f.cart(1),
+          'cash',
+          [{ type: 'cash', amount: 100 }],
+          'admin',
+          undefined,
+          f.sessionId,
+          { cashReceived, transferReceipt: null },
+        ),
+        /efectivo recibido/,
+      );
+    assert.equal((await f.db.getDemoUsage()).sales, 0);
+    assert.equal((await f.db.getProduct(f.product.id))?.stock, 10);
+  },
+);
+void regression('mixto calcula vuelto solo sobre efectivo y conserva comprobante', async () => {
+  const f = await fixture();
+  const receipt = sampleReceipt(60);
+  const id = await f.db.registerSale(
+    f.cart(1),
+    'mixed',
+    [
+      { type: 'cash', amount: 40 },
+      { type: 'transfer', amount: 60 },
+    ],
+    'admin',
+    undefined,
+    f.sessionId,
+    { cashReceived: 50, transferReceipt: receipt },
+  );
+  const sale = await f.db.getSale(id);
+  assert.equal(sale?.sale.settlement?.changeDue, 10);
+  assert.deepEqual(sale?.sale.settlement?.transferReceipt, receipt);
+});
+void regression('transferencia exige datos personales, revisión, foto e importe exacto', () => {
+  for (const change of [
+    { ci: '' },
+    { fullName: '' },
+    { address: '' },
+    { reviewed: false },
+    { imageBase64: '' },
+    { amount: 101 },
+  ])
+    assert.throws(() =>
+      validateSettlement(pay(100), {
+        cashReceived: null,
+        transferReceipt: { ...sampleReceipt(), ...change },
+      }),
+    );
+  assert.equal(
+    validateSettlement(pay(100), { cashReceived: null, transferReceipt: sampleReceipt() })
+      ?.changeDue,
+    0,
+  );
+});
+void regression(
+  'lectura del importe ignora saldo y teléfonos, soporta separadores y exige monto único',
+  () => {
+    assert.equal(receiptAmount('Monto: 1.250,50 CUP\nSaldo: 5000\nTeléfono: 55551234'), 1250.5);
+    assert.equal(receiptAmount('Transferencia de 1,250.50 CUP'), 1250.5);
+    assert.equal(receiptAmount('Monto: 100 CUP\nImporte: 200 CUP'), null);
+    assert.equal(receiptAmount('Saldo: 1000\nTarjeta: 1234567890'), null);
+  },
+);
+void regression(
+  'comprobante repetido se bloquea; reintento de venta confirmada conserva UUID',
+  async () => {
+    const f = await fixture();
+    const input = { cashReceived: null, transferReceipt: sampleReceipt() };
+    const identity = { commandId: 'sale-receipt', clientId: 'a' };
+    const id = await f.db.registerSale(
+      f.cart(1),
+      'transfer',
+      pay(100),
+      'admin',
+      identity,
+      f.sessionId,
+      input,
+    );
+    assert.equal(
+      await f.db.registerSale(
+        f.cart(1),
+        'transfer',
+        pay(100),
+        'admin',
+        identity,
+        f.sessionId,
+        input,
+      ),
+      id,
+    );
+    await assert.rejects(
+      f.db.registerSale(f.cart(1), 'transfer', pay(100), 'admin', undefined, f.sessionId, input),
+      /ya se usó/,
+    );
+    assert.equal((await f.db.getDemoUsage()).sales, 1);
+  },
+);
+void regression('archivo exige cierre previo y permisos de administrador', async () => {
+  const f = await fixture();
+  await assert.rejects(f.db.createBusinessArchive('admin'), /Cierra la caja/);
+  await f.db.closeCashSession(f.sessionId, await f.closure());
+  await f.db.saveUser({ username: 'auditor', role: 'auditor', password: 'auditor123' });
+  await assert.rejects(f.db.createBusinessArchive('auditor'), /administrador/);
+});
+async function closedArchive() {
+  const f = await fixture();
+  await f.db.saveUser({ username: 'auditor', role: 'auditor', password: 'auditor123' });
+  await f.db.registerSale(f.cart(1), 'transfer', pay(100), 'admin', undefined, f.sessionId, {
+    cashReceived: null,
+    transferReceipt: sampleReceipt(),
+  });
+  await f.db.closeCashSession(f.sessionId, await f.closure());
+  return { source: f, archive: await f.db.createBusinessArchive('admin') };
+}
+void regression(
+  'traslado completo restaura historia, stock, imágenes y hashes sin copiar licencia',
+  async () => {
+    const { source, archive } = await closedArchive();
+    const target = createHarness();
+    const db = target.load('@/lib/database');
+    await db.initializeDatabase();
+    await db.setSetting('license_mode', 'pro');
+    await db.setSetting('license_key', 'destination-only');
+    await db.setSetting('usage_sales', '4');
+    assert.equal(await db.restoreBusinessArchive(archive, 'admin'), archive.openingFund);
+    assert.equal(await db.getSetting('license_key'), 'destination-only');
+    assert.equal(await db.getSetting('license_mode'), 'pro');
+    assert.equal((await db.getProduct(source.product.id))?.stock, 9);
+    assert.equal((await db.listCashClosures()).length, 1);
+    assert.equal(
+      (await db.getSale(1))?.sale.settlement?.transferReceipt?.imageBase64,
+      sampleReceipt().imageBase64,
+    );
+    assert.equal((await db.authenticate('auditor', 'auditor123'))?.role, 'auditor');
+    assert.equal(
+      (await db.authenticate('admin', 'admin123'))?.password_hash,
+      archive.tables.users.find((row) => row.role === 'admin')?.password_hash,
+    );
+    assert.equal((await db.getDemoUsage()).sales, 4);
+    assert.equal(await db.getSetting('next_opening_fund'), String(archive.openingFund));
+    const next = await db.openCashSession(archive.openingFund, 'admin');
+    assert.ok(next > source.sessionId);
+    assert.equal(await db.getSetting('next_opening_fund'), null);
+  },
+);
+void regression('importación en destino con datos o repetida no mezcla negocios', async () => {
+  const { source, archive } = await closedArchive();
+  await assert.rejects(source.db.restoreBusinessArchive(archive, 'admin'), /No se mezclan/);
+  const h = createHarness();
+  const db = h.load('@/lib/database');
+  await db.initializeDatabase();
+  await db.restoreBusinessArchive(archive, 'admin');
+  await assert.rejects(db.restoreBusinessArchive(archive, 'admin'), /No se mezclan/);
+  assert.equal((await db.getAuditSnapshot()).sales.length, 1);
+});
+void regression(
+  'archivo incompleto, versión incorrecta o stock inconsistente revierte toda importación',
+  async () => {
+    const { archive } = await closedArchive();
+    for (const corrupt of [
+      { ...archive, version: 999 },
+      { ...archive, tables: { ...archive.tables, users: [] } },
+      { ...archive, tables: { ...archive.tables, area_stock: [] } },
+    ]) {
+      const h = createHarness();
+      const db = h.load('@/lib/database');
+      await db.initializeDatabase();
+      await assert.rejects(db.restoreBusinessArchive(corrupt, 'admin'));
+      assert.equal((await db.listProducts()).length, 0);
+      assert.equal((await db.listCashClosures()).length, 0);
+      assert.ok(await db.authenticate('admin', 'admin123'));
+    }
+  },
+);
+void regression('fallo de escritura durante importación deja intacto el destino', async () => {
+  const { archive } = await closedArchive();
+  const h = createHarness();
+  const db = h.load('@/lib/database');
+  await db.initializeDatabase();
+  h.failWritesContaining('INSERT INTO sales(');
+  await assert.rejects(db.restoreBusinessArchive(archive, 'admin'));
+  assert.equal((await db.listProducts()).length, 0);
+  assert.equal(await db.getSetting('last_archive_id'), null);
+});

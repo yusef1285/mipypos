@@ -2,6 +2,7 @@ import type * as Database from '@/lib/database';
 import type { ModuleKey } from '@/lib/permissions';
 
 export const operationPermissions = {
+  getAuditSnapshot: 'audit',
   getDemoUsage: 'home',
   listProducts: 'home',
   listAreas: 'home',

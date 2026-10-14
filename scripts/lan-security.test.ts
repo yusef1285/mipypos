@@ -1,6 +1,32 @@
 import assert from 'node:assert/strict';
-import { before, test } from 'node:test';
-import { readFileSync } from 'node:fs';
+import { before, after, test as nodeTest } from 'node:test';
+import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+let passed = 0;
+let failed = 0;
+function test(name: string, action: () => void | Promise<void>) {
+  return nodeTest(name, async () => {
+    try {
+      await action();
+      passed += 1;
+    } catch (error) {
+      failed += 1;
+      throw error;
+    }
+  });
+}
+after(() => {
+  const directory = join(process.cwd(), '.expo');
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(
+    join(directory, 'lan-security-results.json'),
+    JSON.stringify(
+      { ranAt: new Date().toISOString(), tests: passed + failed, passed, failed },
+      null,
+      2,
+    ),
+  );
+});
 import { z } from 'zod';
 import { createHarness, prepareHarness } from './pos-test-harness';
 
@@ -668,4 +694,135 @@ void test('configuración nativa mantiene pin, firma, validez y hostname; sin HT
   const config = readFileSync('app.config.ts', 'utf8');
   assert.ok(config.includes('usesCleartextTraffic: false'));
   assert.ok(!config.includes('NSAllowsArbitraryLoads: true'));
+});
+void test('auditor LAN consulta sin cerrar caja ni impedir ventas y rechaza todas las mutaciones', async () => {
+  const f = await lanFixture();
+  await f.db.saveUser({ username: 'auditor', password: 'auditor123', role: 'auditor' });
+  const id = await f.db.saveProduct(base, 'admin');
+  const sessionId = await f.db.openCashSession(0, 'admin');
+  await f.client.loginToHost(url, 'auditor', 'auditor123');
+  const data = await f.client.requestHostOperation(
+    url,
+    'getAuditSnapshot',
+    [],
+    'auditor',
+    'terminal-a',
+  );
+  assert.equal(data.sales.length, 0);
+  assert.equal(data.products.length, 1);
+  const cfg = f.load('@/lib/network/config');
+  const token = await cfg.getNetworkToken();
+  assert.ok(token);
+  const operations = f.load('@/lib/network/operations');
+  for (const operation of [...operations.mutationOperations, 'registerCashWithdrawal']) {
+    const route = f.routes.get('/v1/operation');
+    assert.ok(route);
+    const result = await route({
+      data: { token, operation, args: [], commandId: 'audit-attempt', clientId: 'terminal-a' },
+    });
+    assert.equal(failureSchema.parse(result).code, 'REJECTED');
+  }
+  const saleRoute = f.routes.get('/v1/sale');
+  assert.ok(saleRoute);
+  assert.equal(
+    failureSchema.parse(
+      await saleRoute({
+        data: {
+          token,
+          commandId: 'audit-sale',
+          clientId: 'terminal-a',
+          items: [{ productId: id, quantity: 1, areaId: 1 }],
+        },
+      }),
+    ).code,
+    'REJECTED',
+  );
+  const product = await f.db.getProduct(id);
+  assert.ok(product);
+  await f.db.registerSale(
+    [{ product, quantity: 1, price: 100, areaId: 1 }],
+    'cash',
+    [{ type: 'cash', amount: 100 }],
+    'admin',
+    undefined,
+    sessionId,
+    { cashReceived: 200, transferReceipt: null },
+  );
+  const latest = await f.client.requestHostOperation(
+    url,
+    'getAuditSnapshot',
+    [],
+    'auditor',
+    'terminal-a',
+  );
+  assert.equal(latest.sales.length, 1);
+  assert.equal((await f.db.getOpenSession())?.id, sessionId);
+  assert.equal(
+    (
+      await f.client.requestHostOperation(
+        url,
+        'getSale',
+        [latest.sales[0].id],
+        'auditor',
+        'terminal-a',
+      )
+    )?.sale.settlement?.changeDue,
+    100,
+  );
+});
+void test('venta LAN exige cobro nuevo, calcula vuelto y conserva resultado al reintentar', async () => {
+  const f = await lanFixture();
+  const id = await f.db.saveProduct(base, 'admin');
+  const sid = await f.db.openCashSession(0, 'admin');
+  const input = {
+    commandId: 'cash-new',
+    clientId: 'terminal-a',
+    sessionId: sid,
+    method: 'cash' as const,
+    payments: [{ type: 'cash' as const, amount: 100 }],
+    items: [{ productId: id, areaId: 1, quantity: 1 }],
+  };
+  await assert.rejects(f.client.registerHostSale(url, input), /Actualiza la terminal/);
+  const sale = await f.client.registerHostSale(url, {
+    ...input,
+    settlement: { cashReceived: 150, transferReceipt: null },
+  });
+  assert.equal(
+    await f.client.registerHostSale(url, {
+      ...input,
+      settlement: { cashReceived: 150, transferReceipt: null },
+    }),
+    sale,
+  );
+  assert.equal((await f.db.getSale(sale))?.sale.settlement?.changeDue, 50);
+  assert.equal((await f.db.getDemoUsage()).sales, 1);
+});
+void test('QR Wi-Fi Direct conserva pin y propietario y rechaza identidad inválida', () => {
+  const h = createHarness();
+  const qr = h.load('@/lib/network/qr');
+  const code = qr.createLanQr('https://192.168.49.1:8787', undefined, pin, 'aa:bb:cc:dd:ee:ff');
+  const connection = qr.parseLanConnection(code);
+  assert.equal(connection.directAddress, 'aa:bb:cc:dd:ee:ff');
+  assert.equal(connection.hostPin, pin);
+  assert.equal(connection.wifi, undefined);
+  assert.throws(() =>
+    qr.parseLanConnection(qr.createLanQr(url, undefined, pin, '02:00:00:00:00:00')),
+  );
+});
+void test('puentes Android usan P2P real y OCR incluido, no downloads de modelos en uso', () => {
+  // Static verification only; hardware discovery and recognition still require an APK.
+  const java = readFileSync('lib/network/native/MipyDirectModule.java', 'utf8');
+  for (const call of [
+    'WifiP2pManager',
+    'manager.createGroup',
+    'manager.discoverPeers',
+    'manager.connect',
+    'manager.removeGroup',
+    'groupOwnerIntent = 0',
+    'deadline',
+  ])
+    assert.ok(java.includes(call));
+  const plugin = readFileSync('lib/network/withLocalHotspot.ts', 'utf8');
+  assert.ok(plugin.includes('com.google.mlkit:text-recognition:16.0.1'));
+  assert.ok(!plugin.includes('play-services-mlkit-text-recognition'));
 });

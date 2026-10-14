@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'supervisor' | 'seller' | 'storekeeper';
+export type UserRole = 'admin' | 'supervisor' | 'seller' | 'storekeeper' | 'auditor';
 export type SaleMethod = 'cash' | 'transfer' | 'card' | 'mixed';
 export type PaymentType = Exclude<SaleMethod, 'mixed'>;
 export type MovementType = 'entrada' | 'salida' | 'traslado';
@@ -29,6 +29,22 @@ export interface Payment {
   amount: number;
 }
 
+export interface TransferReceipt {
+  ci: string;
+  fullName: string;
+  address: string;
+  amount: number;
+  rawText: string;
+  reference: string;
+  receiptDate: string;
+  imageBase64: string;
+  reviewed: boolean;
+}
+export interface SaleSettlement {
+  cashReceived: number | null;
+  transferReceipt: TransferReceipt | null;
+}
+
 export interface Venta {
   id: number;
   session_id: number;
@@ -37,6 +53,7 @@ export interface Venta {
   total: number;
   method: SaleMethod;
   payments: Payment[];
+  settlement?: (SaleSettlement & { changeDue: number }) | null;
 }
 
 export interface LineaVenta {

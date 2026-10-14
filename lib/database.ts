@@ -3,7 +3,15 @@ import * as SQLite from 'expo-sqlite';
 
 import { dayRange } from '@/lib/format';
 import { fractionalUnit, validateQuantity, roundMoney, roundQuantity } from '@/lib/units';
-import { CASH_DENOMINATIONS } from '@/lib/models';
+import { CASH_DENOMINATIONS, type SaleSettlement } from '@/lib/models';
+import { validateSettlement } from '@/lib/settlement';
+import {
+  BUSINESS_TABLES,
+  archiveSchema,
+  parseBusinessArchive,
+  type BusinessArchive,
+  type ArchiveRow,
+} from '@/lib/business-archive';
 import type {
   Area,
   AreaStock,
@@ -148,6 +156,190 @@ const parsePayments = (value: string | null): Payment[] => {
   );
 };
 
+async function consistentRead<T>(action: () => Promise<T>): Promise<T> {
+  const db = await getDatabase();
+  let result: T;
+  const pending = mutationQueue.then(() =>
+    db.withTransactionAsync(async () => {
+      result = await action();
+    }),
+  );
+  mutationQueue = pending.catch(() => undefined);
+  await pending;
+  return result!;
+}
+export async function getAuditSnapshot() {
+  return consistentRead(async () => {
+    const db = await getDatabase();
+    const { start, end } = dayRange(new Date());
+    return {
+      sales: await db.getAllAsync<{
+        id: number;
+        user: string;
+        date: string;
+        total: number;
+        method: SaleMethod;
+      }>(
+        'SELECT id,user,date,total,method FROM sales WHERE date>=? AND date<=? ORDER BY id DESC',
+        start,
+        end,
+      ),
+      products: await listProducts(),
+      areas: await listAreas(),
+      stocks: await listAreaStock(),
+      movements: await listMovements(),
+      closures: await listCashClosures(),
+    };
+  });
+}
+
+export async function createBusinessArchive(username: string): Promise<BusinessArchive> {
+  const db = await getDatabase();
+  return transaction(db, async () => {
+    const user = await db.getFirstAsync<Usuario>('SELECT * FROM users WHERE username=?', username);
+    if (user?.role !== 'admin')
+      throw new Error('Solo un administrador puede trasladar el negocio.');
+    if (await db.getFirstAsync('SELECT id FROM cash_sessions WHERE close_date IS NULL'))
+      throw new Error('Cierra la caja antes de crear el archivo de traslado.');
+    const latest = await db.getFirstAsync<{ final_cash: number }>(
+      'SELECT final_cash FROM cash_sessions WHERE close_date IS NOT NULL ORDER BY id DESC LIMIT 1',
+    );
+    if (!latest) throw new Error('Realiza un cierre de caja antes de trasladar el negocio.');
+    const tables = archiveSchema.shape.tables.parse(
+      Object.fromEntries(
+        await Promise.all(
+          BUSINESS_TABLES.map(async (table) => [
+            table,
+            await db.getAllAsync<ArchiveRow>(`SELECT * FROM ${table}`),
+          ]),
+        ),
+      ),
+    );
+    const usage = await getDemoUsage();
+    const sequences = (
+      await db.getAllAsync<{ name: string; seq: number }>('SELECT name,seq FROM sqlite_sequence')
+    ).filter((row): row is BusinessArchive['sequences'][number] =>
+      BUSINESS_TABLES.some((table) => table === row.name),
+    );
+    return {
+      app: 'MipyPOS',
+      format: 'business-close',
+      version: 1,
+      schemaVersion: 5,
+      archiveId: Crypto.randomUUID(),
+      createdAt: now(),
+      sourceUser: username,
+      tables,
+      usage: { products: usage.products, sales: usage.sales },
+      sequences,
+      openingFund: latest.final_cash,
+    };
+  });
+}
+
+export async function restoreBusinessArchive(value: unknown, username: string) {
+  const archive = parseBusinessArchive(value);
+  const db = await getDatabase();
+  return transaction(db, async () => {
+    const user = await db.getFirstAsync<Usuario>('SELECT * FROM users WHERE username=?', username);
+    if (user?.role !== 'admin') throw new Error('Solo un administrador puede recibir el negocio.');
+    if (
+      (await db.getFirstAsync('SELECT id FROM cash_sessions LIMIT 1')) ||
+      (await db.getFirstAsync('SELECT id FROM sales LIMIT 1')) ||
+      (await db.getFirstAsync('SELECT id FROM movements LIMIT 1')) ||
+      (await db.getFirstAsync('SELECT id FROM products LIMIT 1'))
+    )
+      throw new Error(
+        'Importa en un teléfono sin productos, ventas, movimientos ni turnos. No se mezclan negocios.',
+      );
+    if (await getSetting('last_archive_id'))
+      throw new Error(
+        'Este teléfono ya recibió un negocio. No vuelvas a importar el mismo cierre.',
+      );
+    const usage = await getDemoUsage();
+    for (let index = BUSINESS_TABLES.length - 1; index >= 0; index -= 1)
+      await db.execAsync(`DELETE FROM ${BUSINESS_TABLES[index]}`);
+    for (const table of BUSINESS_TABLES) {
+      const columns = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`);
+      const allowed = new Set(columns.map((column) => column.name));
+      for (const row of archive.tables[table]) {
+        const keys = Object.keys(row);
+        if (keys.length !== columns.length || keys.some((key) => !allowed.has(key)))
+          throw new Error('El archivo contiene columnas incompatibles.');
+        await db.runAsync(
+          `INSERT INTO ${table}(${keys.map((key) => `"${key}"`).join(',')}) VALUES(${keys.map(() => '?').join(',')})`,
+          keys.map((key) => row[key]),
+        );
+      }
+    }
+    const foreignErrors = await db.getAllAsync('PRAGMA foreign_key_check');
+    if (foreignErrors.length) throw new Error('El archivo contiene referencias incompletas.');
+    const stockError = await db.getFirstAsync(
+      `SELECT p.id FROM products p WHERE ABS(p.stock-COALESCE((SELECT SUM(quantity) FROM area_stock WHERE product_id=p.id),0))>0.001 LIMIT 1`,
+    );
+    if (stockError) throw new Error('Las existencias por área no coinciden con el inventario.');
+    const saleError = await db.getFirstAsync(
+      `SELECT s.id FROM sales s WHERE ABS(s.total-COALESCE((SELECT SUM(subtotal) FROM sale_lines WHERE sale_id=s.id),0))>0.005 LIMIT 1`,
+    );
+    if (saleError) throw new Error('Los totales de ventas no coinciden con sus líneas.');
+    for (const sale of archive.tables.sales) {
+      if (typeof sale.payments !== 'string') throw new Error('Una venta no tiene pagos válidos.');
+      const payments = parsePayments(sale.payments);
+      if (
+        Math.abs(payments.reduce((sum, payment) => sum + payment.amount, 0) - Number(sale.total)) >
+        0.005
+      )
+        throw new Error('Los pagos no coinciden con sus ventas.');
+    }
+    const latest = await db.getFirstAsync<{ final_cash: number }>(
+      'SELECT final_cash FROM cash_sessions ORDER BY id DESC LIMIT 1',
+    );
+    if (!latest || Math.abs(latest.final_cash - archive.openingFund) > 0.005)
+      throw new Error('El fondo de apertura no coincide con el cierre.');
+    for (const sequence of archive.sequences) {
+      const current = await db.getFirstAsync<{ seq: number }>(
+        'SELECT seq FROM sqlite_sequence WHERE name=?',
+        sequence.name,
+      );
+      if (current && current.seq < sequence.seq)
+        await db.runAsync(
+          'UPDATE sqlite_sequence SET seq=? WHERE name=?',
+          sequence.seq,
+          sequence.name,
+        );
+      if (!current)
+        await db.runAsync(
+          'INSERT INTO sqlite_sequence(name,seq) VALUES(?,?)',
+          sequence.name,
+          sequence.seq,
+        );
+    }
+    for (const [key, val] of Object.entries({
+      usage_sales: Math.max(usage.sales, archive.usage.sales),
+      usage_products: Math.max(usage.products, archive.usage.products),
+      next_opening_fund: archive.openingFund,
+      last_archive_id: archive.archiveId,
+    }))
+      await db.runAsync(
+        'INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+        key,
+        String(val),
+      );
+    await db.runAsync(
+      'INSERT INTO audit_log(action,username,date,detail) VALUES(?,?,?,?)',
+      'business.imported',
+      username,
+      now(),
+      json({
+        archiveId: archive.archiveId,
+        sourceUser: archive.sourceUser,
+        createdAt: archive.createdAt,
+      }),
+    );
+    return archive.openingFund;
+  });
+}
+
 export async function hashPassword(password: string) {
   return Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, `MipyPOS:${password}`);
 }
@@ -166,7 +358,7 @@ export async function initializeDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT NOT NULL COLLATE NOCASE UNIQUE,
       password_hash TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('admin','supervisor','seller','storekeeper'))
+      role TEXT NOT NULL CHECK(role IN ('admin','supervisor','seller','storekeeper','auditor'))
     );
     CREATE TABLE IF NOT EXISTS products (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -285,9 +477,29 @@ export async function initializeDatabase() {
   `);
   // Keep upgrades atomic and never downgrade a newer installation.
   const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
-  if ((version?.user_version ?? 0) > 4)
+  if ((version?.user_version ?? 0) > 5)
     throw new Error('Esta base de datos necesita una versión más reciente de MipyPOS.');
   await transaction(db, async () => {
+    const userSchema = await db.getFirstAsync<{ sql: string }>(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'",
+    );
+    if (userSchema && !userSchema.sql.includes("'auditor'")) {
+      const sequence = await db.getFirstAsync<{ seq: number }>(
+        "SELECT seq FROM sqlite_sequence WHERE name='users'",
+      );
+      await db.execAsync(`CREATE TABLE users_upgrade (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL COLLATE NOCASE UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','supervisor','seller','storekeeper','auditor')));
+        INSERT INTO users_upgrade SELECT * FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_upgrade RENAME TO users;`);
+      if (sequence)
+        await db.runAsync(
+          "UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name='users'",
+          sequence.seq,
+        );
+    }
+    const saleColumns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(sales)');
+    if (!saleColumns.some((column) => column.name === 'settlement'))
+      await db.execAsync('ALTER TABLE sales ADD COLUMN settlement TEXT');
     const columns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(products)');
     if (!columns.some((column) => column.name === 'unit'))
       await db.execAsync("ALTER TABLE products ADD COLUMN unit TEXT NOT NULL DEFAULT 'u'");
@@ -308,7 +520,7 @@ export async function initializeDatabase() {
     await db.execAsync(`
       INSERT OR IGNORE INTO settings(key,value) SELECT 'usage_products',CAST(MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='products'),0),(SELECT COUNT(*) FROM products)) AS TEXT);
       INSERT OR IGNORE INTO settings(key,value) SELECT 'usage_sales',CAST(MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='sales'),0),(SELECT COUNT(*) FROM sales)) AS TEXT);
-      PRAGMA user_version = 4;
+      PRAGMA user_version = 5;
     `);
   });
   const count = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM users');
@@ -716,6 +928,7 @@ export async function openCashSession(fund: number, username: string, command?: 
           result.lastInsertRowId,
           now(),
         );
+        await db.runAsync("DELETE FROM settings WHERE key='next_opening_fund'");
         return result.lastInsertRowId;
       },
       command,
@@ -1246,6 +1459,7 @@ export async function registerSale(
   username: string,
   networkCommand?: { commandId: string; clientId: string },
   expectedSessionId?: number,
+  settlement?: SaleSettlement,
 ) {
   if (!items.length) throw new Error('El carrito está vacío.');
   const db = await getDatabase();
@@ -1253,6 +1467,7 @@ export async function registerSale(
     items.reduce((sum, item) => sum + roundMoney(item.price * item.quantity), 0),
   );
   const validPayments = validatePayments(total, method, payments);
+  const validSettlement = validateSettlement(validPayments, settlement);
   let saleId = 0;
   await transaction(db, async () => {
     if (networkCommand) {
@@ -1284,6 +1499,16 @@ export async function registerSale(
         }
         throw new Error('La venta ya se está procesando.');
       }
+    }
+    if (validSettlement?.transferReceipt) {
+      const receipt = validSettlement.transferReceipt;
+      const duplicate = await db.getFirstAsync<{ id: number }>(
+        `SELECT id FROM sales WHERE json_extract(settlement,'$.transferReceipt.imageBase64')=? OR (?<>'' AND json_extract(settlement,'$.transferReceipt.reference')=?) LIMIT 1`,
+        receipt.imageBase64,
+        receipt.reference.trim(),
+        receipt.reference.trim(),
+      );
+      if (duplicate) throw new Error(`Este comprobante ya se usó en la venta #${duplicate.id}.`);
     }
     await consumeDemoQuota(db, 'sales');
     const session = await db.getFirstAsync<{ id: number }>(
@@ -1322,13 +1547,14 @@ export async function registerSale(
         throw new Error(`Stock insuficiente de ${current.name} en el área seleccionada.`);
     }
     const sale = await db.runAsync(
-      'INSERT INTO sales(session_id,user,date,total,method,payments) VALUES(?,?,?,?,?,?)',
+      'INSERT INTO sales(session_id,user,date,total,method,payments,settlement) VALUES(?,?,?,?,?,?,?)',
       session.id,
       username,
       now(),
       total,
       method,
       json(validPayments),
+      validSettlement ? json(validSettlement) : null,
     );
     saleId = sale.lastInsertRowId;
     for (const item of items) {
@@ -1380,16 +1606,24 @@ export async function registerSale(
 }
 export async function getSale(id: number) {
   const db = await getDatabase();
-  const row = await db.getFirstAsync<Omit<Venta, 'payments'> & { payments: string }>(
-    'SELECT * FROM sales WHERE id=?',
-    id,
-  );
+  const row = await db.getFirstAsync<
+    Omit<Venta, 'payments' | 'settlement'> & { payments: string; settlement: string | null }
+  >('SELECT * FROM sales WHERE id=?', id);
   if (!row) return null;
   const lines = await db.getAllAsync<LineaVenta>(
     'SELECT * FROM sale_lines WHERE sale_id=? ORDER BY id',
     id,
   );
-  return { sale: { ...row, payments: parsePayments(row.payments) }, lines };
+  return {
+    sale: {
+      ...row,
+      payments: parsePayments(row.payments),
+      settlement: row.settlement
+        ? (JSON.parse(row.settlement) as SaleSettlement & { changeDue: number })
+        : null,
+    },
+    lines,
+  };
 }
 
 export async function listAreaStock() {
@@ -1621,7 +1855,7 @@ export async function getExportRows(
   const { start, end } = dayRange();
   if (type === 'sales')
     return db.getAllAsync<Record<string, SQLite.SQLiteBindValue>>(
-      'SELECT id,session_id,user,date,total,method FROM sales WHERE date BETWEEN ? AND ? ORDER BY date',
+      "SELECT id,session_id,user,date,total,method,json_extract(settlement,'$.cashReceived') AS cash_received,json_extract(settlement,'$.changeDue') AS change_due,json_extract(settlement,'$.transferReceipt.ci') AS customer_ci,json_extract(settlement,'$.transferReceipt.fullName') AS customer_name,json_extract(settlement,'$.transferReceipt.address') AS customer_address,json_extract(settlement,'$.transferReceipt.amount') AS transfer_amount,json_extract(settlement,'$.transferReceipt.reference') AS transfer_reference,json_extract(settlement,'$.transferReceipt.receiptDate') AS receipt_date,json_extract(settlement,'$.transferReceipt.rawText') AS receipt_text FROM sales WHERE date BETWEEN ? AND ? ORDER BY date",
       start,
       end,
     );

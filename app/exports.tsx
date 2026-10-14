@@ -5,6 +5,7 @@ import { Alert, View } from 'react-native';
 
 import { AccessDenied } from '@/components/AccessDenied';
 import { Screen } from '@/components/Screen';
+import { BusinessTransfer } from '@/components/BusinessTransfer';
 import { useApp } from '@/lib/app-context';
 import { usePosRepository } from '@/lib/use-pos-repository';
 import { exportRows, type ExportFormat } from '@/lib/exports';
@@ -40,6 +41,7 @@ export default function Exports() {
   };
   return (
     <Screen title="Exportaciones">
+      <BusinessTransfer />
       <View className="flex-row gap-2">
         {(['csv', 'xlsx', 'txt'] as ExportFormat[]).map((value) => (
           <Chip

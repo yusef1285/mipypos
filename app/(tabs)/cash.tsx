@@ -1,4 +1,4 @@
-import { Link } from 'expo-router';
+import { Link, router } from 'expo-router';
 import { Button, Card, Input, Label, TextField, Typography } from 'heroui-native';
 import {
   ArrowLeft,
@@ -24,6 +24,7 @@ import * as Haptics from 'expo-haptics';
 import { money, parsePositiveNumber } from '@/lib/format';
 import { CASH_DENOMINATIONS } from '@/lib/models';
 import type { CashClosurePreview } from '@/lib/models';
+import { getSetting } from '@/lib/database';
 import { getPendingWithdrawal } from '@/lib/network/pending-withdrawal';
 import { canAccess } from '@/lib/permissions';
 
@@ -49,7 +50,7 @@ function StepHeader({ step }: { step: number }) {
 }
 
 export default function Cash() {
-  const { user, session, refresh } = useApp();
+  const { user, session, refresh, networkConfig } = useApp();
   const { closeCashSession, getCashClosurePreview, openCashSession } = usePosRepository();
   const [loadError, setLoadError] = useState('');
   const [fund, setFund] = useState('0');
@@ -88,6 +89,13 @@ export default function Cash() {
     );
     return () => clearTimeout(timer);
   }, [load, step]);
+
+  useEffect(() => {
+    if (session || networkConfig.mode === 'client') return;
+    void getSetting('next_opening_fund').then((value) => {
+      if (value) setFund(value);
+    });
+  }, [session, networkConfig.mode]);
 
   const adminName = adminNameOverride ?? (user?.role === 'admin' ? user.username : '');
 
@@ -242,6 +250,12 @@ export default function Cash() {
         hasDifferences
           ? 'Se guardó el cierre con diferencias y sus autorizaciones.'
           : 'El turno quedó conciliado y cerrado definitivamente.',
+        user.role === 'admin'
+          ? [
+              { text: 'Cerrar' },
+              { text: 'Enviar cierre completo', onPress: () => router.push('/exports') },
+            ]
+          : [{ text: 'Cerrar' }],
       );
     } catch (error) {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);

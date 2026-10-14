@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { useApp } from '@/lib/app-context';
 import * as Database from '@/lib/database';
 import { requestHostOperation } from '@/lib/network/client';
+import { mutationOperations } from '@/lib/network/operations';
 import type { PosOperation, PosArgs, PosResult } from '@/lib/network/operations';
 
 type Repository = { [K in PosOperation]: (...args: PosArgs<K>) => Promise<PosResult<K>> };
@@ -15,6 +16,11 @@ export function usePosRepository(): Repository {
         handler: (...args: PosArgs<K>) => Promise<PosResult<K>>,
       ): ((...args: PosArgs<K>) => Promise<PosResult<K>>) =>
       (...args: PosArgs<K>): Promise<PosResult<K>> => {
+        if (
+          user?.role === 'auditor' &&
+          (mutationOperations.has(operation) || operation === 'registerCashWithdrawal')
+        )
+          return Promise.reject(new Error('El auditor solo puede consultar.'));
         if (networkConfig.mode === 'client') {
           if (!networkConfig.hostUrl)
             return Promise.reject(new Error('Escanea el QR del administrador.'));
@@ -29,6 +35,7 @@ export function usePosRepository(): Repository {
         return handler(...args);
       };
     return {
+      getAuditSnapshot: bind('getAuditSnapshot', Database.getAuditSnapshot),
       getDemoUsage: bind('getDemoUsage', Database.getDemoUsage),
       listProducts: bind('listProducts', Database.listProducts),
       listAreas: bind('listAreas', Database.listAreas),
@@ -53,5 +60,5 @@ export function usePosRepository(): Repository {
       getExportRows: bind('getExportRows', Database.getExportRows),
       getSale: bind('getSale', Database.getSale),
     } satisfies Repository;
-  }, [networkConfig, user?.username]);
+  }, [networkConfig, user?.username, user?.role]);
 }

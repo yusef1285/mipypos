@@ -12,9 +12,10 @@ import { canAccess, type ModuleKey } from '@/lib/permissions';
 const items: Array<{
   module: ModuleKey;
   label: string;
-  href: '/products' | '/movements' | '/users' | '/exports' | '/settings';
+  href: '/products' | '/movements' | '/users' | '/exports' | '/settings' | '/audit';
   icon: (typeof appIcons)[keyof typeof appIcons];
 }> = [
+  { module: 'audit', label: 'Auditoría', href: '/audit', icon: appIcons.reports },
   { module: 'products', label: 'Productos', href: '/products', icon: appIcons.products },
   { module: 'movements', label: 'Movimientos', href: '/movements', icon: appIcons.movements },
   { module: 'users', label: 'Usuarios', href: '/users', icon: appIcons.users },

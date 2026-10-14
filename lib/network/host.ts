@@ -39,7 +39,7 @@ function failure(error: unknown): ApiResult<never> {
   };
 }
 
-async function authorized(token: string, module: ModuleKey) {
+async function authorized(token: string, module: ModuleKey, auditRead = false) {
   const entry = sessions.get(token);
   if (!entry || entry.expiresAt < Date.now()) {
     sessions.delete(token);
@@ -52,7 +52,7 @@ async function authorized(token: string, module: ModuleKey) {
     sessions.delete(token);
     throw new ExpiredSession('Inicia sesión nuevamente.');
   }
-  if (!canAccess(current.role, module))
+  if (!canAccess(current.role, module) && !(current.role === 'auditor' && auditRead))
     throw new Error(
       'Tu rol no permite esta operación. Pide al administrador que revise tu acceso.',
     );
@@ -79,6 +79,11 @@ async function buildSnapshot(): Promise<NetworkSnapshot> {
 }
 
 async function handleOperation(request: OperationRequest, user: Usuario): Promise<unknown> {
+  if (
+    user.role === 'auditor' &&
+    (mutationOperations.has(request.operation) || request.operation === 'registerCashWithdrawal')
+  )
+    throw new Error('El auditor solo puede consultar.');
   let command: DB.MutationCommand | undefined;
   if (mutationOperations.has(request.operation)) {
     if (
@@ -97,6 +102,8 @@ async function handleOperation(request: OperationRequest, user: Usuario): Promis
     };
   }
   switch (request.operation) {
+    case 'getAuditSnapshot':
+      return DB.getAuditSnapshot();
     case 'getDemoUsage':
       return DB.getDemoUsage();
     case 'listProducts':
@@ -164,6 +171,10 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
     throw new Error('El carrito está vacío.');
   const previous = await DB.findNetworkSale(command.commandId, command.clientId, user.username);
   if (previous !== null) return previous;
+  if (!command.settlement)
+    throw new Error(
+      'Actualiza la terminal: introduce el efectivo recibido o el comprobante de transferencia.',
+    );
   if (!Number.isInteger(command.sessionId)) throw new Error('Actualiza la caja antes de vender.');
   const byId = new Map((await DB.listProducts()).map((product) => [product.id, product]));
   const items: CartItem[] = command.items.map((input) => {
@@ -186,6 +197,7 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
       clientId: command.clientId,
     },
     command.sessionId,
+    command.settlement,
   );
 }
 
@@ -298,7 +310,21 @@ export async function startLanHost(): Promise<string> {
         input.operation === 'getExportRows' && input.args[0] === 'inventory'
           ? 'products'
           : operationPermissions[input.operation];
-      const user = await authorized(input.token, module);
+      const auditReads = new Set([
+        'listProducts',
+        'listAreas',
+        'listAreaStock',
+        'listMovements',
+        'getCashClosurePreview',
+        'listCashClosures',
+        'getDailyReport',
+        'getHomeSummary',
+        'getExportRows',
+        'getSale',
+        'getDemoUsage',
+        'getAuditSnapshot',
+      ]);
+      const user = await authorized(input.token, module, auditReads.has(input.operation));
       return success((await handleOperation(input, user)) ?? null);
     } catch (error) {
       return failure(error);

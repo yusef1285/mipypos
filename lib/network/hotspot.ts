@@ -1,3 +1,4 @@
+import { getDirectInfo } from '@/lib/network/direct';
 import { Linking, NativeModules, PermissionsAndroid, Platform } from 'react-native';
 
 export interface HotspotCredentials {
@@ -70,6 +71,8 @@ export async function getLocalHotspot(): Promise<HotspotCredentials | null> {
   return bridge().getHotspot();
 }
 export async function getLanHostIp(): Promise<string | null> {
+  const direct = await getDirectInfo();
+  if (direct?.isOwner) return direct.hostIp;
   if (Platform.OS !== 'android' || !NativeModules.MipyLan) return null;
   return bridge().getHostIp();
 }

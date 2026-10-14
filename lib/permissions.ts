@@ -10,7 +10,8 @@ export type ModuleKey =
   | 'reports'
   | 'users'
   | 'exports'
-  | 'settings';
+  | 'settings'
+  | 'audit';
 
 const ROLE_MODULES: Record<UserRole, readonly ModuleKey[]> = {
   admin: [
@@ -24,7 +25,9 @@ const ROLE_MODULES: Record<UserRole, readonly ModuleKey[]> = {
     'users',
     'exports',
     'settings',
+    'audit',
   ],
+  auditor: ['home', 'reports', 'exports', 'settings', 'audit'],
   supervisor: ['home', 'cash', 'sales', 'reports', 'settings'],
   seller: ['home', 'sales', 'settings'],
   storekeeper: ['home', 'inventory', 'movements', 'products', 'settings'],

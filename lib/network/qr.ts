@@ -33,12 +33,18 @@ export function validateHostPin(pin: string): string {
     throw new Error('El QR no contiene una identidad segura válida. Genera uno nuevo.');
   return pin;
 }
-export function createLanQr(hostUrl: string, wifi?: HotspotCredentials, hostPin = '') {
+export function createLanQr(
+  hostUrl: string,
+  wifi?: HotspotCredentials,
+  hostPin = '',
+  directAddress?: string,
+) {
   return JSON.stringify({
     app: 'MipyPOS',
     version: 4,
     hostUrl: validateLanUrl(hostUrl),
     hostPin: validateHostPin(hostPin),
+    ...(directAddress ? { directAddress } : {}),
     ...(wifi ? { wifi } : {}),
   });
 }
@@ -49,6 +55,7 @@ export function parseLanConnection(data: string): {
   hostUrl: string;
   hostPin: string;
   wifi?: HotspotCredentials;
+  directAddress?: string;
 } {
   let value: unknown;
   try {
@@ -71,6 +78,16 @@ export function parseLanConnection(data: string): {
     throw new Error('Este QR no es compatible. Genera uno nuevo en el administrador.');
   const hostUrl = validateLanUrl(value.hostUrl);
   const hostPin = validateHostPin(value.hostPin);
+  if ('directAddress' in value) {
+    if (
+      typeof value.directAddress !== 'string' ||
+      !/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(value.directAddress) ||
+      value.directAddress === '02:00:00:00:00:00' ||
+      'wifi' in value
+    )
+      throw new Error('El QR Wi-Fi Direct no es válido. Genera uno nuevo.');
+    return { hostUrl, hostPin, directAddress: value.directAddress };
+  }
   if (!('wifi' in value)) return { hostUrl, hostPin };
   if (
     !('wifi' in value) ||
