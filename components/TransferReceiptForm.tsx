@@ -45,8 +45,9 @@ export function TransferReceiptForm({
       const amount = result.amount ?? 0;
       setAmountDraft(result.amount === null ? '' : String(result.amount));
       onChange({ ...value, ...result, amount, reviewed: false });
-      if (result.amount !== null) onAmount(result.amount);
-      else setError('No se identificó un importe único. Revisa el texto y escribe el importe.');
+      onAmount(amount);
+      if (result.amount === null)
+        setError('No se identificó un importe único. Revisa el texto y escribe el importe.');
       void Haptics.notificationAsync(
         result.amount === null
           ? Haptics.NotificationFeedbackType.Error
@@ -137,6 +138,25 @@ export function TransferReceiptForm({
               onChangeText={(receiptDate) => patch({ receiptDate })}
             />
           </TextField>
+          {(
+            [
+              { key: 'bank', label: 'Banco' },
+              { key: 'beneficiary', label: 'Beneficiario (cuenta)' },
+              { key: 'orderer', label: 'Ordenante (texto del mensaje)' },
+              { key: 'currency', label: 'Moneda' },
+              { key: 'remainingBalance', label: 'Saldo restante del mensaje' },
+              { key: 'status', label: 'Estado indicado en el mensaje' },
+            ] as const
+          ).map(({ key, label }) => (
+            <TextField key={key} isDisabled={disabled}>
+              <Label>{label}</Label>
+              <Input
+                value={value[key] ?? ''}
+                maxLength={240}
+                onChangeText={(text) => patch({ [key]: text })}
+              />
+            </TextField>
+          ))}
           <TextField isDisabled={disabled}>
             <Label>Texto reconocido</Label>
             <TextArea value={value.rawText} onChangeText={(rawText) => patch({ rawText })} />

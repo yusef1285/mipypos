@@ -2,7 +2,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as MediaLibrary from 'expo-media-library';
 import { NativeModules, Platform } from 'react-native';
-import { receiptAmount } from '@/lib/settlement';
+import { receiptDetails } from '@/lib/settlement';
 
 interface ReceiptBridge {
   recognize(uri: string): Promise<string>;
@@ -45,16 +45,9 @@ export async function captureReceipt(fromLibrary = false) {
   if (!compressed.base64 || compressed.base64.length > 600000)
     throw new Error('El comprobante es demasiado grande. Recorta la imagen y vuelve a captarlo.');
   await MediaLibrary.Asset.create(compressed.uri);
-  const reference =
-    rawText.match(/(?:referencia|operaci[oó]n|transacci[oó]n)\s*[:#]?\s*([A-Z0-9-]{4,})/i)?.[1] ??
-    '';
-  const receiptDate =
-    rawText.match(/\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}(?:\s+\d{1,2}:\d{2})?\b/)?.[0] ?? '';
   return {
     imageBase64: compressed.base64,
     rawText: rawText.slice(0, 20000),
-    amount: receiptAmount(rawText),
-    reference,
-    receiptDate,
+    ...receiptDetails(rawText),
   };
 }

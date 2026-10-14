@@ -31,7 +31,12 @@ after(() => {
 import { createHarness, prepareHarness } from './pos-test-harness';
 before(prepareHarness);
 import type { CartItem, CashClosureInput, Producto, TransferReceipt } from '../lib/models';
-import { receiptAmount, validateSettlement } from '../lib/settlement';
+import {
+  receiptAmount,
+  receiptDetails,
+  receiptPaymentAmounts,
+  validateSettlement,
+} from '../lib/settlement';
 
 const pay = (amount: number) => [{ type: 'transfer' as const, amount }];
 
@@ -858,6 +863,121 @@ void regression(
     assert.equal(receiptAmount('Saldo: 1000\nTarjeta: 1234567890'), null);
   },
 );
+// Text transcribed from the supplied photos; these tests do not run native OCR.
+const metropolitanReceipt = (second = false) => `Banco Metropolitano: La
+Transferencia fue
+completada.
+Fecha: 13/10/2026
+Beneficiario:
+${second ? '9238XXXXXXXX2816' : '9227XXXXXXXX2365'}
+Ordenante: CUP
+Monto: ${second ? '3230.00' : '1500.00'} CUP
+Nro. Transacción:
+${second ? 'MM6058MEY3987' : 'MM6058OQ6W987'}${second ? '' : '\nSaldo restante: CR 2184.19\nCUP'}`;
+
+void regression('comprobante de fotos 1 y 3 extrae monto, cuenta, fecha y saldo separado', () => {
+  assert.deepEqual(receiptDetails(metropolitanReceipt()), {
+    amount: 1500,
+    reference: 'MM6058OQ6W987',
+    receiptDate: '13/10/2026',
+    bank: 'Banco Metropolitano',
+    beneficiary: '9227XXXXXXXX2365',
+    orderer: 'CUP',
+    currency: 'CUP',
+    remainingBalance: 'CR 2184.19 CUP',
+    status: 'completada',
+  });
+});
+void regression('comprobante de foto 2 extrae 3230 y no inventa saldo ni identidad', () => {
+  const details = receiptDetails(metropolitanReceipt(true));
+  assert.equal(details.amount, 3230);
+  assert.equal(details.reference, 'MM6058MEY3987');
+  assert.equal(details.beneficiary, '9238XXXXXXXX2816');
+  assert.equal(details.remainingBalance, '');
+  assert.equal(details.orderer, 'CUP');
+});
+void regression('comprobante sin monto o ambiguo no reutiliza saldo como importe', () => {
+  assert.equal(receiptDetails('Saldo restante: CR 2184.19 CUP').amount, null);
+  assert.equal(receiptDetails(`${metropolitanReceipt()}\nImporte: 3230 CUP`).amount, null);
+  assert.deepEqual(receiptPaymentAmounts(4000, 0), { cash: '4000', transfer: '0' });
+  assert.deepEqual(receiptPaymentAmounts(4000, 1500), { cash: '2500', transfer: '1500' });
+});
+void regression(
+  'datos del comprobante persisten tanto en transferencia como en mixto y exportación',
+  async () => {
+    for (const method of ['transfer', 'mixed'] as const) {
+      const f = await fixture();
+      const total = method === 'mixed' ? 4000 : 1500;
+      await f.db.saveProduct({ ...f.product, price_cash: total, price_transfer: total }, 'admin');
+      const product = await f.db.getProduct(f.product.id);
+      assert.ok(product);
+      const rawText = metropolitanReceipt();
+      const details = receiptDetails(rawText);
+      const receipt: TransferReceipt = {
+        ...sampleReceipt(1500),
+        ...details,
+        amount: 1500,
+        rawText,
+      };
+      const amounts = receiptPaymentAmounts(total, receipt.amount);
+      const payments =
+        method === 'mixed'
+          ? [
+              { type: 'cash' as const, amount: Number(amounts.cash) },
+              { type: 'transfer' as const, amount: Number(amounts.transfer) },
+            ]
+          : pay(receipt.amount);
+      const id = await f.db.registerSale(
+        f.cart(1, undefined, product),
+        method,
+        payments,
+        'admin',
+        undefined,
+        f.sessionId,
+        {
+          cashReceived: method === 'mixed' ? 3000 : null,
+          transferReceipt: receipt,
+        },
+      );
+      const sale = await f.db.getSale(id);
+      assert.deepEqual(sale?.sale.settlement?.transferReceipt, receipt);
+      assert.equal(sale?.sale.settlement?.changeDue, method === 'mixed' ? 500 : 0);
+      const rows = await f.db.getExportRows('sales');
+      assert.equal(rows[0].receipt_bank, 'Banco Metropolitano');
+      assert.equal(rows[0].receipt_beneficiary, receipt.beneficiary);
+      assert.equal(rows[0].transfer_amount, 1500);
+      assert.equal(rows[0].receipt_remaining_balance, 'CR 2184.19 CUP');
+      await assert.rejects(
+        f.db.registerSale(
+          f.cart(1, undefined, product),
+          method,
+          payments,
+          'admin',
+          undefined,
+          f.sessionId,
+          {
+            cashReceived: method === 'mixed' ? 3000 : null,
+            transferReceipt: { ...receipt, imageBase64: 'ZG90' },
+          },
+        ),
+        /ya se usó/,
+      );
+    }
+  },
+);
+void regression(
+  'moneda ajena a CUP y campos bancarios demasiado largos requieren corrección',
+  () => {
+    for (const change of [{ currency: 'USD' }, { beneficiary: 'X'.repeat(241) }])
+      assert.throws(() =>
+        validateSettlement(pay(100), {
+          cashReceived: null,
+          transferReceipt: { ...sampleReceipt(), ...change },
+        }),
+      );
+  },
+);
+
 void regression(
   'comprobante repetido se bloquea; reintento de venta confirmada conserva UUID',
   async () => {

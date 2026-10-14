@@ -17,7 +17,7 @@ import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { AccessDenied } from '@/components/AccessDenied';
 import { DemoQuota } from '@/components/DemoQuota';
 import { TransferReceiptForm, emptyTransferReceipt } from '@/components/TransferReceiptForm';
-import { validateSettlement } from '@/lib/settlement';
+import { receiptPaymentAmounts, validateSettlement } from '@/lib/settlement';
 import { EmptyState, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
@@ -367,9 +367,9 @@ export default function Sales() {
           onAmount={(amount) =>
             setAmounts((current) => ({
               ...current,
-              transfer: String(amount),
-              cash:
-                method === 'mixed' ? String(roundMoney(Math.max(0, total - amount))) : current.cash,
+              ...(method === 'mixed'
+                ? receiptPaymentAmounts(total, amount)
+                : { transfer: String(amount) }),
             }))
           }
         />

@@ -37,6 +37,12 @@ export interface TransferReceipt {
   rawText: string;
   reference: string;
   receiptDate: string;
+  bank?: string;
+  beneficiary?: string;
+  orderer?: string;
+  currency?: string;
+  remainingBalance?: string;
+  status?: string;
   imageBase64: string;
   reviewed: boolean;
 }
