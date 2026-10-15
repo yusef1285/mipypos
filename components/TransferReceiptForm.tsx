@@ -1,9 +1,19 @@
 import * as Haptics from 'expo-haptics';
-import { Button, Checkbox, Input, Label, TextArea, TextField, Typography } from 'heroui-native';
-import { useState } from 'react';
+import {
+  Accordion,
+  Button,
+  Checkbox,
+  Input,
+  Label,
+  TextArea,
+  TextField,
+  Typography,
+} from 'heroui-native';
+import { useEffect, useState } from 'react';
 import { View, Image } from 'react-native';
 import type { TransferReceipt } from '@/lib/models';
 import { captureReceipt } from '@/lib/receipt-camera';
+import { usePosRepository } from '@/lib/use-pos-repository';
 
 export const emptyTransferReceipt = (): TransferReceipt => ({
   ci: '',
@@ -32,6 +42,43 @@ export function TransferReceiptForm({
   const [amountDraft, setAmountDraft] = useState(String(value.amount || ''));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const { findTransferTransaction } = usePosRepository();
+  const [check, setCheck] = useState<{
+    reference: string;
+    retry: number;
+    saleId: number | null;
+    error: string;
+  } | null>(null);
+  const [retry, setRetry] = useState(0);
+  const reference = value.reference.trim().toUpperCase();
+  const currentCheck = check?.reference === reference && check.retry === retry ? check : null;
+  const checking = Boolean(reference) && currentCheck === null;
+  useEffect(() => {
+    let active = true;
+    if (!reference) return undefined;
+    const timer = setTimeout(() => {
+      void findTransferTransaction(reference)
+        .then((duplicate) => {
+          if (!active) return;
+          setCheck({ reference, retry, saleId: duplicate?.id ?? null, error: '' });
+          if (duplicate) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        })
+        .catch(() => {
+          if (!active) return;
+          setCheck({
+            reference,
+            retry,
+            saleId: null,
+            error: 'No se pudo comprobar el número de transacción.',
+          });
+          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        });
+    }, 300);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [reference, findTransferTransaction, retry]);
   const patch = (next: Partial<TransferReceipt>) =>
     onChange({ ...value, ...next, reviewed: false });
   const capture = async (library: boolean) => {
@@ -64,46 +111,45 @@ export function TransferReceiptForm({
   return (
     <View className="gap-4">
       <Typography.Heading type="h4">Datos de la transferencia</Typography.Heading>
-      {(
-        [
-          { key: 'ci', label: 'CI (carnet de identidad)' },
-          { key: 'fullName', label: 'Nombre completo' },
-          { key: 'address', label: 'Dirección particular' },
-        ] as const
-      ).map(({ key, label }) => (
-        <TextField key={key} isDisabled={disabled || busy}>
-          <Label>{label}</Label>
-          <Input
-            keyboardType={key === 'ci' ? 'number-pad' : 'default'}
-            maxLength={key === 'ci' ? 11 : 240}
-            value={value[key]}
-            onChangeText={(text) => patch({ [key]: text })}
-          />
-        </TextField>
-      ))}
-      <Button
-        isDisabled={
-          disabled ||
-          busy ||
-          !/^\d{11}$/.test(value.ci) ||
-          !value.fullName.trim() ||
-          !value.address.trim()
-        }
-        onPress={() => void capture(false)}
+      <Accordion
+        selectionMode="single"
+        isCollapsible
+        onValueChange={() => void Haptics.selectionAsync()}
       >
+        <Accordion.Item value="personal">
+          <Accordion.Trigger>
+            <Typography.Paragraph className="flex-1">
+              Datos personales (opcionales)
+            </Typography.Paragraph>
+            <Accordion.Indicator />
+          </Accordion.Trigger>
+          <Accordion.Content>
+            <View className="gap-4 pb-3">
+              {(
+                [
+                  { key: 'ci', label: 'CI (carnet de identidad)' },
+                  { key: 'fullName', label: 'Nombre completo' },
+                  { key: 'address', label: 'Dirección particular' },
+                ] as const
+              ).map(({ key, label }) => (
+                <TextField key={key} isDisabled={disabled || busy}>
+                  <Label>{label}</Label>
+                  <Input
+                    keyboardType={key === 'ci' ? 'number-pad' : 'default'}
+                    maxLength={key === 'ci' ? 11 : 240}
+                    value={value[key]}
+                    onChangeText={(text) => patch({ [key]: text })}
+                  />
+                </TextField>
+              ))}
+            </View>
+          </Accordion.Content>
+        </Accordion.Item>
+      </Accordion>
+      <Button isDisabled={disabled || busy} onPress={() => void capture(false)}>
         <Button.Label>{busy ? 'Leyendo…' : 'Fotografiar comprobante'}</Button.Label>
       </Button>
-      <Button
-        variant="secondary"
-        isDisabled={
-          disabled ||
-          busy ||
-          !/^\d{11}$/.test(value.ci) ||
-          !value.fullName.trim() ||
-          !value.address.trim()
-        }
-        onPress={() => void capture(true)}
-      >
+      <Button variant="secondary" isDisabled={disabled || busy} onPress={() => void capture(true)}>
         <Button.Label>Leer imagen de galería</Button.Label>
       </Button>
       {error ? <Typography.Paragraph className="text-danger">{error}</Typography.Paragraph> : null}
@@ -128,9 +174,36 @@ export function TransferReceiptForm({
             />
           </TextField>
           <TextField isDisabled={disabled}>
-            <Label>Referencia de operación</Label>
-            <Input value={value.reference} onChangeText={(reference) => patch({ reference })} />
+            <Label>Número de transacción</Label>
+            <Input
+              maxLength={200}
+              value={value.reference}
+              onChangeText={(text) => patch({ reference: text })}
+            />
           </TextField>
+          {checking ? (
+            <Typography.Paragraph color="muted">Comprobando transacción…</Typography.Paragraph>
+          ) : null}
+          {currentCheck?.saleId ? (
+            <Typography.Paragraph className="text-danger" accessibilityRole="alert">
+              Este número de transacción ya se usó en la venta #{currentCheck.saleId}. No puedes
+              reutilizarlo; revisa el número o captura otro comprobante.
+            </Typography.Paragraph>
+          ) : null}
+          {currentCheck?.error ? (
+            <View className="gap-2">
+              <Typography.Paragraph className="text-danger" accessibilityRole="alert">
+                {currentCheck.error}
+              </Typography.Paragraph>
+              <Button
+                variant="secondary"
+                isDisabled={disabled || busy}
+                onPress={() => setRetry((n) => n + 1)}
+              >
+                <Button.Label>Reintentar comprobación</Button.Label>
+              </Button>
+            </View>
+          ) : null}
           <TextField isDisabled={disabled}>
             <Label>Fecha del comprobante</Label>
             <Input
@@ -165,7 +238,9 @@ export function TransferReceiptForm({
             <Checkbox
               accessibilityLabel="Revisé los datos y comprobé la recepción del dinero"
               isSelected={value.reviewed}
-              isDisabled={disabled}
+              isDisabled={
+                disabled || busy || checking || Boolean(currentCheck?.saleId || currentCheck?.error)
+              }
               onSelectedChange={(reviewed) => {
                 onChange({ ...value, reviewed });
                 void Haptics.selectionAsync();

@@ -26,6 +26,7 @@ export const operationPermissions = {
   getHomeSummary: 'home',
   getExportRows: 'exports',
   getSale: 'sales',
+  findTransferTransaction: 'sales',
 } as const satisfies Partial<Record<keyof typeof Database, ModuleKey>>;
 export type PosOperation = keyof typeof operationPermissions;
 export type PosArgs<K extends PosOperation> = Parameters<(typeof Database)[K]>;

@@ -833,27 +833,30 @@ void regression('mixto calcula vuelto solo sobre efectivo y conserva comprobante
   assert.equal(sale?.sale.settlement?.changeDue, 10);
   assert.deepEqual(sale?.sale.settlement?.transferReceipt, receipt);
 });
-void regression('transferencia exige datos personales, revisión, foto e importe exacto', () => {
-  for (const change of [
-    { ci: '' },
-    { fullName: '' },
-    { address: '' },
-    { reviewed: false },
-    { imageBase64: '' },
-    { amount: 101 },
-  ])
-    assert.throws(() =>
-      validateSettlement(pay(100), {
-        cashReceived: null,
-        transferReceipt: { ...sampleReceipt(), ...change },
-      }),
+void regression(
+  'transferencia permite datos personales vacíos y exige revisión, foto e importe exacto',
+  () => {
+    for (const change of [
+      { ci: '123' },
+      { fullName: 'X'.repeat(241) },
+      { address: 'X'.repeat(241) },
+      { reviewed: false },
+      { imageBase64: '' },
+      { amount: 101 },
+    ])
+      assert.throws(() =>
+        validateSettlement(pay(100), {
+          cashReceived: null,
+          transferReceipt: { ...sampleReceipt(), ...change },
+        }),
+      );
+    assert.equal(
+      validateSettlement(pay(100), { cashReceived: null, transferReceipt: sampleReceipt() })
+        ?.changeDue,
+      0,
     );
-  assert.equal(
-    validateSettlement(pay(100), { cashReceived: null, transferReceipt: sampleReceipt() })
-      ?.changeDue,
-    0,
-  );
-});
+  },
+);
 void regression(
   'lectura del importe ignora saldo y teléfonos, soporta separadores y exige monto único',
   () => {
@@ -1012,6 +1015,70 @@ void regression(
     assert.equal((await f.db.getDemoUsage()).sales, 1);
   },
 );
+void regression(
+  'consulta anticipada identifica transacciones únicas y conserva protección al cobrar',
+  async () => {
+    for (const method of ['transfer', 'mixed'] as const) {
+      const f = await fixture();
+      const amount = method === 'mixed' ? 60 : 100;
+      const receipt = {
+        ...sampleReceipt(amount, '  Operacion-123  '),
+        ci: '',
+        fullName: '',
+        address: '',
+      };
+      const payments =
+        method === 'mixed'
+          ? [
+              { type: 'cash' as const, amount: 40 },
+              { type: 'transfer' as const, amount: 60 },
+            ]
+          : pay(100);
+      const settlement = { cashReceived: method === 'mixed' ? 50 : null, transferReceipt: receipt };
+      assert.equal(await f.db.findTransferTransaction('OPERACION-123'), null);
+      const id = await f.db.registerSale(
+        f.cart(1),
+        method,
+        payments,
+        'admin',
+        undefined,
+        f.sessionId,
+        settlement,
+      );
+      assert.deepEqual(await f.db.findTransferTransaction('operacion-123'), { id });
+      assert.deepEqual(await f.db.findTransferTransaction('  OPERACION-123 '), { id });
+      assert.equal(await f.db.findTransferTransaction(''), null);
+      assert.equal(await f.db.findTransferTransaction('  '), null);
+      assert.equal(await f.db.findTransferTransaction('OPERACION-124'), null);
+      assert.equal((await f.db.getSale(id))?.sale.settlement?.transferReceipt?.ci, '');
+      await assert.rejects(
+        f.db.registerSale(f.cart(1), method, payments, 'admin', undefined, f.sessionId, {
+          ...settlement,
+          transferReceipt: { ...receipt, reference: 'operacion-123', imageBase64: 'ZG90' },
+        }),
+        /ya se usó/,
+      );
+      assert.equal((await f.db.getDemoUsage()).sales, 1);
+      assert.equal((await f.db.getProduct(f.product.id))?.stock, 9);
+    }
+  },
+);
+void regression('cada dato personal puede omitirse independientemente', () => {
+  for (const change of [
+    { ci: '' },
+    { fullName: '' },
+    { address: '' },
+    { ci: '', fullName: '', address: '' },
+  ]) {
+    assert.doesNotThrow(() =>
+      validateSettlement(pay(100), {
+        cashReceived: null,
+        transferReceipt: { ...sampleReceipt(), ...change },
+      }),
+    );
+  }
+});
+
 void regression('archivo exige cierre previo y permisos de administrador', async () => {
   const f = await fixture();
   await assert.rejects(f.db.createBusinessArchive('admin'), /Cierra la caja/);

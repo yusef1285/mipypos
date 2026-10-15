@@ -59,6 +59,7 @@ export function usePosRepository(): Repository {
       getHomeSummary: bind('getHomeSummary', Database.getHomeSummary),
       getExportRows: bind('getExportRows', Database.getExportRows),
       getSale: bind('getSale', Database.getSale),
+      findTransferTransaction: bind('findTransferTransaction', Database.findTransferTransaction),
     } satisfies Repository;
   }, [networkConfig, user?.username, user?.role]);
 }

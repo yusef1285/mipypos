@@ -770,6 +770,90 @@ void test('auditor LAN consulta sin cerrar caja ni impedir ventas y rechaza toda
     100,
   );
 });
+void test('consulta LAN de transacción devuelve solo la venta y permite datos personales vacíos', async () => {
+  for (const method of ['transfer', 'mixed'] as const) {
+    const f = await lanFixture();
+    const id = await f.db.saveProduct(base, 'admin');
+    const sid = await f.db.openCashSession(0, 'admin');
+    const amount = method === 'mixed' ? 60 : 100;
+    const input = {
+      commandId: `receipt-${method}`,
+      clientId: 'terminal-a',
+      sessionId: sid,
+      method,
+      payments:
+        method === 'mixed'
+          ? [
+              { type: 'cash' as const, amount: 40 },
+              { type: 'transfer' as const, amount: 60 },
+            ]
+          : [{ type: 'transfer' as const, amount: 100 }],
+      items: [{ productId: id, areaId: 1, quantity: 1 }],
+      settlement: {
+        cashReceived: method === 'mixed' ? 50 : null,
+        transferReceipt: {
+          ci: '',
+          fullName: '',
+          address: '',
+          amount,
+          rawText: `Monto: ${amount} CUP`,
+          reference: 'UNICA-123',
+          receiptDate: '',
+          imageBase64: '/9j/AA==',
+          reviewed: true,
+        },
+      },
+    };
+    assert.equal(
+      await f.client.requestHostOperation(
+        url,
+        'findTransferTransaction',
+        ['unica-123'],
+        'admin',
+        'terminal-a',
+      ),
+      null,
+    );
+    const saleId = await f.client.registerHostSale(url, input);
+    assert.deepEqual(
+      await f.client.requestHostOperation(
+        url,
+        'findTransferTransaction',
+        [' unica-123 '],
+        'admin',
+        'terminal-a',
+      ),
+      { id: saleId },
+    );
+    await assert.rejects(
+      f.client.registerHostSale(url, {
+        ...input,
+        commandId: `receipt-duplicate-${method}`,
+        settlement: {
+          ...input.settlement,
+          transferReceipt: {
+            ...input.settlement.transferReceipt,
+            reference: 'unica-123',
+            imageBase64: 'ZG90',
+          },
+        },
+      }),
+      /ya se usó/,
+    );
+    assert.equal((await f.db.getDemoUsage()).sales, 1);
+    f.setOffline(true);
+    await assert.rejects(
+      f.client.requestHostOperation(
+        url,
+        'findTransferTransaction',
+        ['UNICA-123'],
+        'admin',
+        'terminal-a',
+      ),
+    );
+  }
+});
+
 void test('venta LAN exige cobro nuevo, calcula vuelto y conserva resultado al reintentar', async () => {
   const f = await lanFixture();
   const id = await f.db.saveProduct(base, 'admin');

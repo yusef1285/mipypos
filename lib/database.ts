@@ -1503,10 +1503,10 @@ export async function registerSale(
     if (validSettlement?.transferReceipt) {
       const receipt = validSettlement.transferReceipt;
       const duplicate = await db.getFirstAsync<{ id: number }>(
-        `SELECT id FROM sales WHERE json_extract(settlement,'$.transferReceipt.imageBase64')=? OR (?<>'' AND json_extract(settlement,'$.transferReceipt.reference')=?) LIMIT 1`,
+        `SELECT id FROM sales WHERE json_extract(settlement,'$.transferReceipt.imageBase64')=? OR (?<>'' AND upper(trim(json_extract(settlement,'$.transferReceipt.reference')))=?) LIMIT 1`,
         receipt.imageBase64,
-        receipt.reference.trim(),
-        receipt.reference.trim(),
+        receipt.reference.trim().toUpperCase(),
+        receipt.reference.trim().toUpperCase(),
       );
       if (duplicate) throw new Error(`Este comprobante ya se usó en la venta #${duplicate.id}.`);
     }
@@ -1604,6 +1604,17 @@ export async function registerSale(
   });
   return saleId;
 }
+export async function findTransferTransaction(reference: string): Promise<{ id: number } | null> {
+  if (typeof reference !== 'string' || reference.length > 200)
+    throw new Error('Revisa el número de transacción.');
+  const normalized = reference.trim().toUpperCase();
+  if (!normalized) return null;
+  return (await getDatabase()).getFirstAsync<{ id: number }>(
+    `SELECT id FROM sales WHERE upper(trim(json_extract(settlement,'$.transferReceipt.reference')))=? ORDER BY id LIMIT 1`,
+    normalized,
+  );
+}
+
 export async function getSale(id: number) {
   const db = await getDatabase();
   const row = await db.getFirstAsync<

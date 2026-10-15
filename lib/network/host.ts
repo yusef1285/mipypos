@@ -160,6 +160,8 @@ async function handleOperation(request: OperationRequest, user: Usuario): Promis
       return DB.getExportRows(...request.args);
     case 'getSale':
       return DB.getSale(request.args[0]);
+    case 'findTransferTransaction':
+      return DB.findTransferTransaction(request.args[0]);
   }
   return undefined;
 }

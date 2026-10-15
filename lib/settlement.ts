@@ -86,15 +86,16 @@ export function validateSettlement(payments: Payment[], settlement?: SaleSettlem
     if (
       !receipt ||
       typeof receipt.ci !== 'string' ||
-      !/^\d{11}$/.test(receipt.ci) ||
+      (receipt.ci.trim() !== '' && !/^\d{11}$/.test(receipt.ci.trim())) ||
+      receipt.ci.length > 240 ||
       typeof receipt.fullName !== 'string' ||
-      !receipt.fullName.trim() ||
       receipt.fullName.length > 240 ||
       typeof receipt.address !== 'string' ||
-      !receipt.address.trim() ||
       receipt.address.length > 240
     )
-      throw new Error('Completa CI de 11 dígitos, nombre completo y dirección particular.');
+      throw new Error(
+        'Los datos personales son opcionales. Si indicas un CI, debe tener 11 dígitos; nombre y dirección admiten hasta 240 caracteres.',
+      );
     if (
       !receipt.reviewed ||
       !Number.isFinite(receipt.amount) ||
