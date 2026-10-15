@@ -1,5 +1,16 @@
 import * as Crypto from 'expo-crypto';
 import * as SQLite from 'expo-sqlite';
+import * as Finance from '@/lib/finance';
+import { assertProductNotInDraft } from '@/lib/sale-draft';
+import type {
+  ConsumptionInput,
+  ConsumptionRecord,
+  ConsumptionVoidInput,
+  CostInput,
+  PurchaseInput,
+  SaleAdjustmentInput,
+  FinanceFilter,
+} from '@/lib/finance-models';
 
 import { dayRange } from '@/lib/format';
 import { fractionalUnit, validateQuantity, roundMoney, roundQuantity } from '@/lib/units';
@@ -225,7 +236,7 @@ export async function createBusinessArchive(username: string): Promise<BusinessA
       app: 'MipyPOS',
       format: 'business-close',
       version: 1,
-      schemaVersion: 5,
+      schemaVersion: 6,
       archiveId: Crypto.randomUUID(),
       createdAt: now(),
       sourceUser: username,
@@ -257,12 +268,22 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
         'Este teléfono ya recibió un negocio. No vuelvas a importar el mismo cierre.',
       );
     const usage = await getDemoUsage();
+    const tables = Object.fromEntries(
+      BUSINESS_TABLES.map((table) => [table, archive.tables[table] ?? []]),
+    ) as Record<(typeof BUSINESS_TABLES)[number], ArchiveRow[]>;
     for (let index = BUSINESS_TABLES.length - 1; index >= 0; index -= 1)
       await db.execAsync(`DELETE FROM ${BUSINESS_TABLES[index]}`);
     for (const table of BUSINESS_TABLES) {
       const columns = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`);
       const allowed = new Set(columns.map((column) => column.name));
-      for (const row of archive.tables[table]) {
+      for (const row of tables[table]) {
+        const legacyExtra: Record<string, ArchiveRow> = {
+          users: { can_authorize_consumption: 0 },
+          products: { unit_cost: null },
+          sales: { seller_id: null },
+          sale_lines: { unit_cost: null, category: '' },
+        };
+        if (archive.schemaVersion === 5) Object.assign(row, legacyExtra[table] ?? {});
         const keys = Object.keys(row);
         if (keys.length !== columns.length || keys.some((key) => !allowed.has(key)))
           throw new Error('El archivo contiene columnas incompatibles.');
@@ -282,7 +303,7 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
       `SELECT s.id FROM sales s WHERE ABS(s.total-COALESCE((SELECT SUM(subtotal) FROM sale_lines WHERE sale_id=s.id),0))>0.005 LIMIT 1`,
     );
     if (saleError) throw new Error('Los totales de ventas no coinciden con sus líneas.');
-    for (const sale of archive.tables.sales) {
+    for (const sale of tables.sales) {
       if (typeof sale.payments !== 'string') throw new Error('Una venta no tiene pagos válidos.');
       const payments = parsePayments(sale.payments);
       if (
@@ -477,7 +498,7 @@ export async function initializeDatabase() {
   `);
   // Keep upgrades atomic and never downgrade a newer installation.
   const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
-  if ((version?.user_version ?? 0) > 5)
+  if ((version?.user_version ?? 0) > 6)
     throw new Error('Esta base de datos necesita una versión más reciente de MipyPOS.');
   await transaction(db, async () => {
     const userSchema = await db.getFirstAsync<{ sql: string }>(
@@ -517,10 +538,11 @@ export async function initializeDatabase() {
     );
     if (!sessionColumns.some((column) => column.name === 'movement_start_id'))
       await db.execAsync('ALTER TABLE cash_sessions ADD COLUMN movement_start_id INTEGER');
+    await Finance.migrateFinance(db);
     await db.execAsync(`
       INSERT OR IGNORE INTO settings(key,value) SELECT 'usage_products',CAST(MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='products'),0),(SELECT COUNT(*) FROM products)) AS TEXT);
       INSERT OR IGNORE INTO settings(key,value) SELECT 'usage_sales',CAST(MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='sales'),0),(SELECT COUNT(*) FROM sales)) AS TEXT);
-      PRAGMA user_version = 5;
+      PRAGMA user_version = 6;
     `);
   });
   const count = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM users');
@@ -1021,6 +1043,15 @@ export async function getCashSummary(sessionId: number): Promise<CashSummary> {
     sessionId,
   );
   const amount = (type: string) => rows.find((row) => row.type === type)?.amount ?? 0;
+  const refunds = await db.getAllAsync<{ type: string; amount: number }>(
+    "SELECT json_extract(value,'$.type') AS type, SUM(json_extract(value,'$.amount')) AS amount FROM sale_adjustments,json_each(sale_adjustments.payments) WHERE session_id=? GROUP BY json_extract(value,'$.type')",
+    sessionId,
+  );
+  for (const refund of refunds) {
+    const row = rows.find((r) => r.type === refund.type);
+    if (row) row.amount = roundMoney(row.amount - refund.amount);
+    else rows.push({ type: refund.type, amount: -refund.amount });
+  }
   const cashSales = amount('cash');
   const withdrawalTotal =
     (
@@ -1057,10 +1088,11 @@ export async function getCashClosurePreview(sessionId: number): Promise<CashClos
     db.getAllAsync<{ id: number; name: string; unit: string }>(
       'SELECT id,name,unit FROM products ORDER BY name',
     ),
-    db.getAllAsync<{ product_id: number; entries: number; exits: number }>(
+    db.getAllAsync<{ product_id: number; entries: number; exits: number; finance_events: number }>(
       `SELECT product_id,
-        SUM(CASE WHEN type='entrada' THEN quantity ELSE 0 END) AS entries,
-        SUM(CASE WHEN type='salida' THEN quantity ELSE 0 END) AS exits
+        SUM(CASE WHEN type IN ('CONSUMO_INTERNO','ANULACION_CONSUMO','DEVOLUCION') THEN 1 ELSE 0 END) AS finance_events,
+        SUM(CASE WHEN type IN ('entrada','ANULACION_CONSUMO','DEVOLUCION') THEN quantity ELSE 0 END) AS entries,
+        SUM(CASE WHEN type IN ('salida','CONSUMO_INTERNO') THEN quantity ELSE 0 END) AS exits
        FROM movements WHERE ${session.movement_start_id === null ? 'date>?' : 'id>?'} GROUP BY product_id`,
       session.movement_start_id ?? session.open_date,
     ),
@@ -1088,7 +1120,11 @@ export async function getCashClosurePreview(sessionId: number): Promise<CashClos
       sessionId,
     ),
     products: products
-      .filter((product) => (soldByProduct.get(product.id) ?? 0) > 0)
+      .filter(
+        (product) =>
+          (soldByProduct.get(product.id) ?? 0) > 0 ||
+          (movementByProduct.get(product.id)?.finance_events ?? 0) > 0,
+      )
       .map((product) => {
         const movement = movementByProduct.get(product.id);
         const openingStock = opening[String(product.id)] ?? 0;
@@ -1546,8 +1582,12 @@ export async function registerSale(
       if (!available || available.quantity + 0.000001 < item.quantity)
         throw new Error(`Stock insuficiente de ${current.name} en el área seleccionada.`);
     }
+    const seller = await db.getFirstAsync<{ id: number }>(
+      'SELECT id FROM users WHERE username=? COLLATE NOCASE',
+      username,
+    );
     const sale = await db.runAsync(
-      'INSERT INTO sales(session_id,user,date,total,method,payments,settlement) VALUES(?,?,?,?,?,?,?)',
+      'INSERT INTO sales(session_id,user,date,total,method,payments,settlement,seller_id) VALUES(?,?,?,?,?,?,?,?)',
       session.id,
       username,
       now(),
@@ -1555,12 +1595,13 @@ export async function registerSale(
       method,
       json(validPayments),
       validSettlement ? json(validSettlement) : null,
+      seller?.id ?? null,
     );
     saleId = sale.lastInsertRowId;
     for (const item of items) {
       const subtotal = roundMoney(item.price * item.quantity);
       await db.runAsync(
-        'INSERT INTO sale_lines(sale_id,product_id,name,quantity,price,subtotal,area_id,unit) VALUES(?,?,?,?,?,?,?,?)',
+        'INSERT INTO sale_lines(sale_id,product_id,name,quantity,price,subtotal,area_id,unit,unit_cost,category) VALUES(?,?,?,?,?,?,?,?,?,?)',
         saleId,
         item.product.id,
         currentProducts.get(item.product.id)!.name,
@@ -1569,6 +1610,8 @@ export async function registerSale(
         subtotal,
         item.areaId,
         currentProducts.get(item.product.id)!.unit,
+        currentProducts.get(item.product.id)!.unit_cost ?? null,
+        currentProducts.get(item.product.id)!.category,
       );
       const update = await db.runAsync(
         'UPDATE products SET stock=ROUND(stock-?,3) WHERE id=? AND stock+0.000001>=?',
@@ -1805,50 +1848,66 @@ export async function listMovements(
   );
 }
 
+async function periodSalesTotals(start: string, end: string) {
+  const db = await getDatabase();
+  return (
+    (await db.getFirstAsync<{ totalSales: number; salesCount: number }>(
+      `SELECT ROUND(COALESCE(SUM(total),0)-(SELECT COALESCE(SUM(amount),0) FROM sale_adjustments WHERE date BETWEEN ? AND ?),2) AS totalSales,
+      COUNT(*) AS salesCount FROM sales WHERE date BETWEEN ? AND ?`,
+      start,
+      end,
+      start,
+      end,
+    )) ?? { totalSales: 0, salesCount: 0 }
+  );
+}
+const PRODUCT_PERIOD_EVENTS = `WITH events AS (
+  SELECT l.product_id,l.name,l.unit,l.quantity,l.subtotal AS total FROM sale_lines l JOIN sales s ON s.id=l.sale_id WHERE s.date BETWEEN ? AND ?
+  UNION ALL
+  SELECT l.product_id,l.name,l.unit,-a.quantity,-a.amount FROM sale_adjustments a JOIN sale_lines l ON l.id=a.line_id WHERE a.date BETWEEN ? AND ?
+) SELECT product_id,name,unit,ROUND(SUM(quantity),3) AS quantity,ROUND(SUM(total),2) AS total FROM events GROUP BY product_id,name,unit ORDER BY quantity DESC`;
 export async function getHomeSummary() {
   const { start, end } = dayRange();
-  const totals = await (
-    await getDatabase()
-  ).getFirstAsync<{ totalSales: number; salesCount: number }>(
-    'SELECT COALESCE(SUM(total),0) AS totalSales,COUNT(*) AS salesCount FROM sales WHERE date BETWEEN ? AND ?',
-    start,
-    end,
-  );
-  return totals ?? { totalSales: 0, salesCount: 0 };
+  return periodSalesTotals(start, end);
 }
 
 export async function getDailyReport(date = new Date()): Promise<DailyReport> {
   const db = await getDatabase();
   const { start, end } = dayRange(date);
-  const totals = await db.getFirstAsync<{ total: number; count: number }>(
-    'SELECT COALESCE(SUM(total),0) AS total,COUNT(*) AS count FROM sales WHERE date BETWEEN ? AND ?',
+  const totals = await periodSalesTotals(start, end);
+  const paymentRows = await db.getAllAsync<{ type: string; amount: number }>(
+    `WITH events AS (
+      SELECT json_extract(value,'$.type') AS type,json_extract(value,'$.amount') AS amount FROM sales,json_each(sales.payments) WHERE date BETWEEN ? AND ?
+      UNION ALL
+      SELECT json_extract(value,'$.type'),-json_extract(value,'$.amount') FROM sale_adjustments,json_each(sale_adjustments.payments) WHERE date BETWEEN ? AND ?
+    ) SELECT type,ROUND(SUM(amount),2) AS amount FROM events GROUP BY type`,
     start,
     end,
-  );
-  const paymentRows = await db.getAllAsync<{ type: string; amount: number }>(
-    "SELECT json_extract(value,'$.type') AS type,SUM(json_extract(value,'$.amount')) AS amount FROM sales,json_each(sales.payments) WHERE date BETWEEN ? AND ? GROUP BY json_extract(value,'$.type')",
     start,
     end,
   );
   const byUser = await db.getAllAsync<{ user: string; total: number; count: number }>(
-    'SELECT user,SUM(total) AS total,COUNT(*) AS count FROM sales WHERE date BETWEEN ? AND ? GROUP BY user ORDER BY total DESC',
+    `WITH events AS (
+      SELECT seller_id,user,total,1 AS count FROM sales WHERE date BETWEEN ? AND ?
+      UNION ALL
+      SELECT s.seller_id,s.user,-a.amount,0 FROM sale_adjustments a JOIN sales s ON s.id=a.sale_id WHERE a.date BETWEEN ? AND ?
+    ) SELECT COALESCE(u.username,e.user) AS user,ROUND(SUM(e.total),2) AS total,SUM(e.count) AS count FROM events e LEFT JOIN users u ON u.id=e.seller_id GROUP BY COALESCE('id:'||e.seller_id,'legacy:'||e.user) ORDER BY total DESC`,
+    start,
+    end,
     start,
     end,
   );
-  const byProduct = await db.getAllAsync<{
-    product: string;
+  const productRows = await db.getAllAsync<{
+    name: string;
     unit: string;
     quantity: number;
     total: number;
-  }>(
-    'SELECT l.name AS product,l.unit,ROUND(SUM(l.quantity),3) AS quantity,SUM(l.subtotal) AS total FROM sale_lines l JOIN sales s ON s.id=l.sale_id WHERE s.date BETWEEN ? AND ? GROUP BY l.product_id,l.name,l.unit ORDER BY quantity DESC',
-    start,
-    end,
-  );
+  }>(PRODUCT_PERIOD_EVENTS, start, end, start, end);
+  const byProduct = productRows.map(({ name, ...row }) => ({ product: name, ...row }));
   const amount = (type: string) => paymentRows.find((row) => row.type === type)?.amount ?? 0;
   return {
-    totalSales: totals?.total ?? 0,
-    salesCount: totals?.count ?? 0,
+    totalSales: totals.totalSales,
+    salesCount: totals.salesCount,
     cash: amount('cash'),
     transfer: amount('transfer'),
     card: amount('card'),
@@ -1864,12 +1923,27 @@ export async function getExportRows(
 ): Promise<Array<Record<string, SQLite.SQLiteBindValue>>> {
   const db = await getDatabase();
   const { start, end } = dayRange();
-  if (type === 'sales')
-    return db.getAllAsync<Record<string, SQLite.SQLiteBindValue>>(
+  if (type === 'sales') {
+    type SalesExportRow = Record<string, SQLite.SQLiteBindValue> & { date: string };
+    const sales = await db.getAllAsync<SalesExportRow>(
       "SELECT id,session_id,user,date,total,method,json_extract(settlement,'$.cashReceived') AS cash_received,json_extract(settlement,'$.changeDue') AS change_due,json_extract(settlement,'$.transferReceipt.ci') AS customer_ci,json_extract(settlement,'$.transferReceipt.fullName') AS customer_name,json_extract(settlement,'$.transferReceipt.address') AS customer_address,json_extract(settlement,'$.transferReceipt.amount') AS transfer_amount,json_extract(settlement,'$.transferReceipt.reference') AS transfer_reference,json_extract(settlement,'$.transferReceipt.receiptDate') AS receipt_date,json_extract(settlement,'$.transferReceipt.bank') AS receipt_bank,json_extract(settlement,'$.transferReceipt.beneficiary') AS receipt_beneficiary,json_extract(settlement,'$.transferReceipt.orderer') AS receipt_orderer,json_extract(settlement,'$.transferReceipt.currency') AS receipt_currency,json_extract(settlement,'$.transferReceipt.remainingBalance') AS receipt_remaining_balance,json_extract(settlement,'$.transferReceipt.status') AS receipt_status,json_extract(settlement,'$.transferReceipt.rawText') AS receipt_text FROM sales WHERE date BETWEEN ? AND ? ORDER BY date",
       start,
       end,
     );
+    const adjustments = await db.getAllAsync<SalesExportRow>(
+      `SELECT a.id AS adjustment_id,a.sale_id,a.session_id,s.user,a.date,-a.amount AS total,a.kind AS event,s.method,a.reason,a.actor_name AS registered_by,a.authorizer_name AS authorized_by FROM sale_adjustments a JOIN sales s ON s.id=a.sale_id WHERE a.date BETWEEN ? AND ? ORDER BY a.date`,
+      start,
+      end,
+    );
+    return [
+      ...sales.map<SalesExportRow>((row) => ({
+        ...row,
+        sale_id: row.id,
+        event: 'venta',
+      })),
+      ...adjustments,
+    ].sort((a, b) => a.date.localeCompare(b.date));
+  }
   if (type === 'movements')
     return db.getAllAsync<Record<string, SQLite.SQLiteBindValue>>(
       'SELECT * FROM movements WHERE date BETWEEN ? AND ? ORDER BY date',
@@ -1882,7 +1956,9 @@ export async function getExportRows(
     );
   if (type === 'sold')
     return db.getAllAsync<Record<string, SQLite.SQLiteBindValue>>(
-      'SELECT l.product_id,l.name,l.unit,ROUND(SUM(l.quantity),3) AS quantity,SUM(l.subtotal) AS total FROM sale_lines l JOIN sales s ON s.id=l.sale_id WHERE s.date BETWEEN ? AND ? GROUP BY l.product_id,l.name,l.unit',
+      PRODUCT_PERIOD_EVENTS,
+      start,
+      end,
       start,
       end,
     );
@@ -1988,4 +2064,180 @@ export async function importProducts(
     },
     command,
   );
+}
+
+async function runFinanceMutation<T>(
+  input: { commandId: string },
+  username: string,
+  adminOnly: boolean,
+  action: (db: SQLite.SQLiteDatabase, actor: Usuario) => Promise<T>,
+  command?: MutationCommand,
+): Promise<T> {
+  const db = await getDatabase();
+  const fingerprint = await Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    json([username, input]),
+  );
+  return transaction(
+    db,
+    async () => {
+      const actor = await Finance.financeActor(db, username, adminOnly);
+      return Finance.financeCommand(db, input.commandId, fingerprint, () => action(db, actor));
+    },
+    command,
+  );
+}
+export function setProductCost(input: CostInput, username: string, command?: MutationCommand) {
+  return runFinanceMutation(
+    input,
+    username,
+    true,
+    (db, actor) => Finance.setCost(db, input, actor),
+    command,
+  );
+}
+export function receiveCostedStock(
+  input: PurchaseInput,
+  username: string,
+  command?: MutationCommand,
+) {
+  return runFinanceMutation(
+    input,
+    username,
+    true,
+    (db, actor) => Finance.receivePurchase(db, input, actor),
+    command,
+  );
+}
+export function registerConsumption(
+  input: ConsumptionInput,
+  username: string,
+  command?: MutationCommand,
+) {
+  return runFinanceMutation(
+    input,
+    username,
+    false,
+    (db, actor) => {
+      assertProductNotInDraft(input.productId);
+      return Finance.consume(db, input, actor);
+    },
+    command,
+  );
+}
+export function cancelConsumption(
+  input: ConsumptionVoidInput,
+  username: string,
+  command?: MutationCommand,
+) {
+  return runFinanceMutation(
+    input,
+    username,
+    false,
+    (db, actor) => Finance.voidConsumption(db, input, actor),
+    command,
+  );
+}
+export function registerSaleAdjustment(
+  input: SaleAdjustmentInput,
+  username: string,
+  command?: MutationCommand,
+) {
+  return runFinanceMutation(
+    input,
+    username,
+    true,
+    (db, actor) => Finance.adjustSale(db, input, actor),
+    command,
+  );
+}
+export function getFinanceReport(filter: FinanceFilter, username: string) {
+  return consistentRead(async () => {
+    const db = await getDatabase();
+    await Finance.financeActor(db, username);
+    return Finance.reportFinance(db, filter);
+  });
+}
+export function getInvestmentData(username: string) {
+  return consistentRead(async () => {
+    const db = await getDatabase();
+    await Finance.financeActor(db, username);
+    return {
+      products: await listProducts(),
+      history: await db.getAllAsync<{
+        id: number;
+        product_id: number;
+        date: string;
+        old_cost: number | null;
+        new_cost: number | null;
+        method: string;
+        reason: string;
+        actor_name: string;
+        quantity: number;
+        purchase_cost: number | null;
+      }>('SELECT * FROM cost_history ORDER BY id DESC'),
+    };
+  });
+}
+export function getConsumptionData(username: string) {
+  return consistentRead(async () => {
+    const db = await getDatabase();
+    const actor = await Finance.financeActor(db, username, false);
+    const rows = await db.getAllAsync<ConsumptionRecord>(
+      'SELECT * FROM internal_consumptions WHERE (?=1 OR actor_id=?) ORDER BY date DESC',
+      actor.role === 'admin' || actor.role === 'supervisor' ? 1 : 0,
+      actor.id,
+    );
+    const events = await db.getAllAsync<{
+      consumption_id: string;
+      date: string;
+      action: string;
+      reason: string;
+      actor_name: string;
+      authorizer_name: string;
+    }>(
+      'SELECT consumption_id,date,action,reason,actor_name,authorizer_name FROM consumption_events ORDER BY id DESC',
+    );
+    return {
+      rows:
+        actor.role === 'admin'
+          ? rows
+          : rows.map((row) => ({ ...row, unit_cost: null, cost: null })),
+      events: events.filter((e) => rows.some((r) => r.id === e.consumption_id)),
+    };
+  });
+}
+export function setConsumptionPermission(
+  userId: number,
+  allowed: boolean,
+  username: string,
+  command?: MutationCommand,
+) {
+  return (async () => {
+    const db = await getDatabase();
+    return transaction(
+      db,
+      async () => {
+        await Finance.financeActor(db, username);
+        const target = await db.getFirstAsync<Usuario>('SELECT * FROM users WHERE id=?', userId);
+        if (target?.role !== 'supervisor')
+          throw new Error('El permiso se aplica únicamente a supervisores.');
+        await db.runAsync(
+          'UPDATE users SET can_authorize_consumption=? WHERE id=?',
+          allowed ? 1 : 0,
+          userId,
+        );
+        await db.runAsync(
+          'INSERT INTO audit_log(action,username,entity_id,date,detail) VALUES(?,?,?,?,?)',
+          'consumption.permission',
+          username,
+          userId,
+          now(),
+          json({ allowed }),
+        );
+        return userId;
+      },
+      command,
+    );
+  })();
 }

@@ -1,7 +1,13 @@
 export type UserRole = 'admin' | 'supervisor' | 'seller' | 'storekeeper' | 'auditor';
 export type SaleMethod = 'cash' | 'transfer' | 'card' | 'mixed';
 export type PaymentType = Exclude<SaleMethod, 'mixed'>;
-export type MovementType = 'entrada' | 'salida' | 'traslado';
+export type MovementType =
+  | 'entrada'
+  | 'salida'
+  | 'traslado'
+  | 'CONSUMO_INTERNO'
+  | 'ANULACION_CONSUMO'
+  | 'DEVOLUCION';
 export type LicenseMode = 'demo' | 'pro';
 
 export interface Usuario {
@@ -9,6 +15,7 @@ export interface Usuario {
   username: string;
   password_hash: string;
   role: UserRole;
+  can_authorize_consumption?: number;
 }
 
 export interface Producto {
@@ -22,6 +29,7 @@ export interface Producto {
   price_cash: number;
   price_transfer: number;
   image_path: string | null;
+  unit_cost?: number | null;
 }
 
 export interface Payment {
@@ -55,6 +63,7 @@ export interface Venta {
   id: number;
   session_id: number;
   user: string;
+  seller_id?: number | null;
   date: string;
   total: number;
   method: SaleMethod;
@@ -72,6 +81,8 @@ export interface LineaVenta {
   quantity: number;
   price: number;
   subtotal: number;
+  unit_cost?: number | null;
+  category?: string;
 }
 
 export interface SesionCaja {

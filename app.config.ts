@@ -65,6 +65,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       'expo-font',
       'expo-splash-screen',
       'expo-sqlite',
+      '@react-native-community/datetimepicker',
       'expo-sharing',
       'expo-secure-store',
       [

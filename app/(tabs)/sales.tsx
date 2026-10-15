@@ -30,6 +30,7 @@ import { getHostSnapshot } from '@/lib/network/client';
 import { usePosRepository } from '@/lib/use-pos-repository';
 import { createThermalTicket } from '@/lib/ticket';
 import { roundMoney, roundQuantity, validateQuantity } from '@/lib/units';
+import { trackSaleDraft, clearSaleDraft } from '@/lib/sale-draft';
 
 const methods: Array<{ key: Exclude<PaymentType, 'card'>; label: string }> = [
   { key: 'cash', label: 'Efectivo' },
@@ -44,6 +45,15 @@ export default function Sales() {
   const [areaId, setAreaId] = useState<number>();
   const [search, setSearch] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
+  useEffect(() => {
+    if (!user) return undefined;
+    const owner = `${networkConfig.clientId}:${user.id}`;
+    trackSaleDraft(
+      owner,
+      cart.map((item) => ({ productId: item.product.id })),
+    );
+    return () => clearSaleDraft(owner);
+  }, [cart, user, networkConfig.clientId]);
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const [method, setMethod] = useState<Exclude<SaleMethod, 'card'>>('cash');
   const [amounts, setAmounts] = useState<Record<Exclude<PaymentType, 'card'>, string>>({

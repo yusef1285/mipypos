@@ -121,7 +121,7 @@ export default function Inventory() {
         />
       ) : null}
       <View className="flex-row flex-wrap gap-2">
-        {(['entrada', 'salida', 'traslado'] as MovementType[]).map((value) => {
+        {(['entrada', 'salida', 'traslado'] as const).map((value) => {
           const Icon = icons[value];
           return (
             <Chip

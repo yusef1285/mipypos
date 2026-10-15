@@ -12,11 +12,45 @@ import { canAccess, type ModuleKey } from '@/lib/permissions';
 const items: Array<{
   module: ModuleKey;
   label: string;
-  href: '/products' | '/movements' | '/users' | '/exports' | '/settings' | '/audit';
+  href:
+    | '/products'
+    | '/movements'
+    | '/users'
+    | '/exports'
+    | '/settings'
+    | '/audit'
+    | '/consumption'
+    | '/investment'
+    | '/profitability'
+    | '/seller-performance';
   icon: (typeof appIcons)[keyof typeof appIcons];
 }> = [
   { module: 'audit', label: 'Auditoría', href: '/audit', icon: appIcons.reports },
   { module: 'products', label: 'Productos', href: '/products', icon: appIcons.products },
+  {
+    module: 'consumption',
+    label: 'Consumo interno',
+    href: '/consumption',
+    icon: appIcons.movements,
+  },
+  {
+    module: 'investment',
+    label: 'Inversión y costos',
+    href: '/investment',
+    icon: appIcons.products,
+  },
+  {
+    module: 'profitability',
+    label: 'Rentabilidad del negocio',
+    href: '/profitability',
+    icon: appIcons.reports,
+  },
+  {
+    module: 'seller-performance',
+    label: 'Rendimiento de vendedores',
+    href: '/seller-performance',
+    icon: appIcons.users,
+  },
   { module: 'movements', label: 'Movimientos', href: '/movements', icon: appIcons.movements },
   { module: 'users', label: 'Usuarios', href: '/users', icon: appIcons.users },
   { module: 'exports', label: 'Exportaciones', href: '/exports', icon: appIcons.exports },

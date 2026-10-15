@@ -209,3 +209,65 @@ No declarar la LAN/hotspot resueltos en dispositivos ni toda la app libre de err
 5. Cerrar A con extracción real y diferencias autorizadas; desconectar terminales, modo independiente, enviar JSON. En B independiente y vacío importar, entrar con usuarios recibidos, revisar historia, autorizadores, importes, cuotas, stock por área e imágenes. Licencia B no cambia. Fondo siguiente coincide con efectivo físico de A. Archivo incompleto, versión ajena, segundo import o destino con datos → rechazo sin cambios. No continuar operaciones en A.
 
 Las pruebas automatizadas de Java son guardas estáticas; no prueban compilación, OCR, guardado MediaStore, discovery P2P, handshake ni radio Wi-Fi. Registrar modelos/Android, versión APK, esperado/observado y evidencias antes de declarar aprobado cada caso.
+
+## Ampliación financiera: consumo, inversión y rendimiento
+
+Se conserva SQLite local, el inventario por áreas, CUP, la navegación y la identidad visual. No se añadió un backend ni se modificaron la activación o los hashes existentes.
+
+### Secciones y permisos
+
+- Más → Consumo interno: registrar, anular o rectificar retiros con motivo, observaciones y autenticación del autorizador. Administrador o supervisor con permiso explícito; un vendedor necesita autorización. Las rectificaciones conservan el registro original, su reversión y el reemplazo.
+- Más → Inversión y costos, también accesible desde Productos: costo actual e historial, entradas con costo promedio ponderado, búsquedas, categoría, ordenamiento y Excel.
+- Más → Rentabilidad y Rendimiento de vendedores: exclusivos del administrador tanto en pantalla como en la API local/LAN. Los costos se eliminan de las respuestas destinadas a otros roles.
+- Más → Ajustes de ventas: administrador autenticado, descuentos, devoluciones y anulaciones auditables. Las devoluciones restituyen existencias al área original y asignan el reembolso a los medios de pago originales. El efectivo solo se devuelve con una caja abierta y saldo suficiente.
+- Usuarios: el administrador puede habilitar o retirar la autorización de consumo a supervisores.
+- Excel conserva la regla existente de licencia Pro; esta ampliación no cambia la licencia.
+
+Un consumo descuenta stock pero no crea una venta, pago ni cuenta por cobrar. No cambia el efectivo esperado. Si el producto está en el carrito sin cobrar de ese dispositivo, se bloquea el consumo hasta quitarlo y reclasificarlo correctamente; también se bloquea cuando hay una venta LAN pendiente que contiene ese producto. El carrito de otro terminal no se sincroniza: su cobro vuelve a validar existencias en el host.
+
+### Base de datos y conservación histórica
+
+Esquema/archivo de negocio v6, compatible con importaciones v5:
+
+- `products.unit_cost`: costo actual nullable; `users.can_authorize_consumption`: permiso explícito de supervisor.
+- `sales.seller_id`: identificador estable del vendedor; `sale_lines.unit_cost` y `sale_lines.category`: copia histórica al confirmar la venta.
+- Tablas `cost_history`, `internal_consumptions`, `consumption_events`, `sale_adjustments` y `finance_commands`.
+- Movimientos ampliados con `CONSUMO_INTERNO`, `ANULACION_CONSUMO` y `DEVOLUCION`, manteniendo los movimientos existentes y sus identificadores.
+
+Las operaciones financieras guardan cambios y recibo del UUID en una transacción. Un reintento con el mismo contenido devuelve el resultado previo sin repetir stock o importes. Los archivos de traslado incluyen el historial financiero y sus recibos; no son un sistema de sincronización entre dos hosts independientes. Las ventas antiguas no reciben costos ni identidades inventadas: costo desconocido y agrupación heredada por nombre cuando falta el identificador.
+
+### Cálculos y límites
+
+- Ventas netas = ventas brutas − descuentos − devoluciones/anulaciones.
+- Costo vendido = suma de cantidad × costo histórico de cada línea, menos el costo histórico de las unidades devueltas/anuladas. Un descuento monetario no devuelve inventario ni elimina su costo.
+- Ganancia bruta = ventas netas − costo vendido. Margen = ganancia bruta / ventas netas × 100 solo cuando las ventas netas son positivas. No equivale a ganancia neta: no resta gastos operativos.
+- Costo promedio ponderado = (stock anterior × costo anterior + cantidad recibida × costo de entrada) / stock resultante. Si hay stock previo sin costo conocido, debe registrarse su costo antes de mezclar entradas.
+- Inventario disponible = stock actual × costo actual. Es una valoración actual, con fecha de consulta, no una reconstrucción del inventario al cierre del período. Tanto el total como cada categoría señalan valores parciales si hay existencias sin costo.
+- Los costos desconocidos nunca se convierten en cero para presentar una ganancia definitiva: se muestra `Pendiente de costo`; las sumas conocidas se identifican como parciales.
+- Los períodos incluyen el inicio y final de cada día. Las ventas se atribuyen a su fecha y los descuentos/devoluciones/anulaciones a la fecha del ajuste. Los gráficos y agrupaciones usan los mismos filtros; la semana empieza el lunes.
+- Las ventas mixtas suman una sola venta. La modalidad de pago afecta caja, no el costo histórico. El consumo y sus reversiones permanecen separados de las ventas y del rendimiento de empleados.
+- Todo se expresa en CUP; no se introdujo conversión ni mezcla de monedas.
+
+### Archivos de implementación
+
+- Datos e integración: `lib/database.ts`, `lib/models.ts`, `lib/finance.ts`, `lib/finance-models.ts`, `lib/finance-calculations.ts`, `lib/finance-privacy.ts`, `lib/permissions.ts`, `lib/pos-repository.ts`, `lib/use-pos-repository.ts`, `lib/business-archive.ts`, `lib/network/operations.ts`, `lib/network/host.ts`, `lib/sale-draft.ts`, `lib/use-finance-command.ts`.
+- Pantallas y navegación: `app/consumption.tsx`, `app/investment.tsx`, `app/profitability.tsx`, `app/seller-performance.tsx`, `app/sale-adjustments.tsx`, `app/users.tsx`, `app/products.tsx`, `app/(tabs)/sales.tsx`, `app/(tabs)/more.tsx`, `app/_layout.tsx`.
+- Controles compartidos: `components/FinanceDashboard.tsx`, `components/FinanceSummary.tsx`, `components/FinanceControls.tsx`, `components/FinanceChart.tsx`, `components/FinanceSelect.tsx`, `components/DateInput.tsx`, `components/DateInput.web.tsx`, `lib/finance-periods.ts`. La variante `lib/receipt-camera.web.ts` evita importar el puente OCR Android en web.
+- Dependencias y comprobación: `package.json`, `package-lock.json`, `scripts/finance-regression.test.ts`; se incorpora el selector de fecha nativo y se alinean versiones Expo.
+
+### Verificaciones ejecutadas y aceptación pendiente
+
+`npm run validate:pos` ejecutó 104 pruebas: 55 POS, 27 LAN/seguridad y 22 financieras; todas aprobadas. Estas últimas cubren consumo/caja, reversión y rectificación, costo histórico, promedio ponderado, costos pendientes, filtros, vendedor estable, pagos mixtos, ajustes, permisos, exportaciones de datos, repetición idempotente y archivos v5/v6. TypeScript y CSS sin errores; lint sin errores con 17 advertencias. Expo Doctor: 21/21 comprobaciones aprobadas en la validación de dependencias.
+
+Las regresiones utilizan SQLite mediante el harness y transporte LAN simulado: no certifican el APK, la radio Wi-Fi ni la reapertura de la base nativa tras matar el proceso. El preview redirige al login; no se inspeccionaron visualmente los paneles autenticados. No se verificó en un teléfono la apertura y compartición del archivo Excel.
+
+Checklist adicional **pendiente**, sin datos de producción:
+
+1. En APK Android sin internet, introducir costos, vender en efectivo/transferencia/mixto y comparar caja, líneas históricas, paneles y Excel; modificar el costo actual y comprobar que la venta pasada no cambia.
+2. Intentar consumo sin autorización y con supervisor sin permiso: rechazo. Autorizar consumo, anular y rectificar: comprobar stock por área, historial y efectivo inalterado.
+3. Añadir producto al carrito, intentar consumirlo: bloqueo hasta quitarlo. Repetir con venta LAN pendiente. En dos terminales competir por últimas unidades: ninguna operación debe dejar stock negativo.
+4. Probar cada período y fechas personalizadas, vendedor renombrado, producto/categoría sin costo y márgenes negativos; contrastar con los registros almacenados.
+5. Descontar, devolver parcialmente y anular una venta mixta; contrastar devoluciones monetarias, stock, caja, informes diarios y ganancias, sin repetir cantidades ya devueltas.
+6. Reiniciar ambos dispositivos antes/después de confirmar, simular respuesta perdida y recuperar UUID: una sola operación. Exportar/importar negocio v6 y revisar costos, consumos, ajustes y permisos; probar un archivo v5 real.
+7. Entrar como vendedor, supervisor y auditor, intentar abrir paneles o solicitar costos por LAN: denegación y ausencia de costos. Abrir los informes Excel en un lector y comparar cifras y filtros.
+

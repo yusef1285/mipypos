@@ -19,6 +19,7 @@ import {
   type OperationRequest,
 } from '@/lib/network/operations';
 import { operationFingerprint } from '@/lib/network/pending-operation';
+import { redactCosts } from '@/lib/finance-privacy';
 import { canAccess, type ModuleKey } from '@/lib/permissions';
 
 interface SessionEntry {
@@ -102,6 +103,24 @@ async function handleOperation(request: OperationRequest, user: Usuario): Promis
     };
   }
   switch (request.operation) {
+    case 'getInvestmentData':
+      return DB.getInvestmentData(user.username);
+    case 'setProductCost':
+      return DB.setProductCost(request.args[0], user.username, command);
+    case 'receiveCostedStock':
+      return DB.receiveCostedStock(request.args[0], user.username, command);
+    case 'getFinanceReport':
+      return DB.getFinanceReport(request.args[0], user.username);
+    case 'getConsumptionData':
+      return DB.getConsumptionData(user.username);
+    case 'registerConsumption':
+      return DB.registerConsumption(request.args[0], user.username, command);
+    case 'cancelConsumption':
+      return DB.cancelConsumption(request.args[0], user.username, command);
+    case 'registerSaleAdjustment':
+      return DB.registerSaleAdjustment(request.args[0], user.username, command);
+    case 'setConsumptionPermission':
+      return DB.setConsumptionPermission(request.args[0], request.args[1], user.username, command);
     case 'getAuditSnapshot':
       return DB.getAuditSnapshot();
     case 'getDemoUsage':
@@ -261,16 +280,18 @@ export async function startLanHost(): Promise<string> {
   });
   nextServer.post<{ token?: string }>('/v1/snapshot', async (request) => {
     try {
-      await authorized(request.data.token ?? '', 'home');
-      return success(await buildSnapshot());
+      const user = await authorized(request.data.token ?? '', 'home');
+      const snapshot = await buildSnapshot();
+      return success(user.role === 'admin' ? snapshot : redactCosts(snapshot));
     } catch (error) {
       return failure(error);
     }
   });
   nextServer.post<{ token?: string }>('/v1/report', async (request) => {
     try {
-      await authorized(request.data.token ?? '', 'reports');
-      return success(await DB.getDailyReport());
+      const user = await authorized(request.data.token ?? '', 'reports');
+      const report = await DB.getDailyReport();
+      return success(user.role === 'admin' ? report : redactCosts(report));
     } catch (error) {
       return failure(error);
     }
@@ -327,7 +348,8 @@ export async function startLanHost(): Promise<string> {
         'getAuditSnapshot',
       ]);
       const user = await authorized(input.token, module, auditReads.has(input.operation));
-      return success((await handleOperation(input, user)) ?? null);
+      const result = (await handleOperation(input, user)) ?? null;
+      return success(user.role === 'admin' ? result : redactCosts(result));
     } catch (error) {
       return failure(error);
     }

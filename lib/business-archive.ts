@@ -15,6 +15,11 @@ export const BUSINESS_TABLES = [
   'audit_log',
   'network_commands',
   'network_events',
+  'cost_history',
+  'internal_consumptions',
+  'consumption_events',
+  'sale_adjustments',
+  'finance_commands',
 ] as const;
 export type BusinessTable = (typeof BUSINESS_TABLES)[number];
 export type ArchiveRow = Record<string, string | number | null>;
@@ -24,7 +29,7 @@ export const archiveSchema = z
     app: z.literal('MipyPOS'),
     format: z.literal('business-close'),
     version: z.literal(1),
-    schemaVersion: z.literal(5),
+    schemaVersion: z.union([z.literal(5), z.literal(6)]),
     archiveId: z.string().uuid(),
     createdAt: z.string().datetime(),
     sourceUser: z.string().min(1),
@@ -40,7 +45,29 @@ export const archiveSchema = z
   .strict();
 export type BusinessArchive = z.infer<typeof archiveSchema>;
 export function parseBusinessArchive(value: unknown): BusinessArchive {
-  const parsed = archiveSchema.safeParse(value);
+  let normalized = value;
+  if (
+    value &&
+    typeof value === 'object' &&
+    'schemaVersion' in value &&
+    value.schemaVersion === 5 &&
+    'tables' in value &&
+    value.tables &&
+    typeof value.tables === 'object'
+  ) {
+    normalized = {
+      ...value,
+      tables: {
+        cost_history: [],
+        internal_consumptions: [],
+        consumption_events: [],
+        sale_adjustments: [],
+        finance_commands: [],
+        ...value.tables,
+      },
+    };
+  }
+  const parsed = archiveSchema.safeParse(normalized);
   if (!parsed.success)
     throw new Error('El archivo no es un cierre completo compatible con esta versión de MipyPOS.');
   const archive = parsed.data;

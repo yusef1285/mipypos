@@ -1,3 +1,4 @@
+import { Link } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 import { Directory, File, Paths } from 'expo-file-system';
@@ -206,6 +207,7 @@ export default function Products() {
           <Button.Label>Exportar</Button.Label>
         </Button>
       </View>
+      {user.role === 'admin' ? <Link href="/investment">Inversión y costos</Link> : null}
       {showForm ? (
         <Card className="gap-4 p-4">
           <Typography.Heading type="h4">

@@ -2,6 +2,9 @@ import { useMemo } from 'react';
 import { useApp } from '@/lib/app-context';
 import * as Database from '@/lib/database';
 import { requestHostOperation } from '@/lib/network/client';
+import { redactCosts } from '@/lib/finance-privacy';
+import { operationPermissions } from '@/lib/network/operations';
+import { canAccess } from '@/lib/permissions';
 import { mutationOperations } from '@/lib/network/operations';
 import type { PosOperation, PosArgs, PosResult } from '@/lib/network/operations';
 
@@ -16,6 +19,11 @@ export function usePosRepository(): Repository {
         handler: (...args: PosArgs<K>) => Promise<PosResult<K>>,
       ): ((...args: PosArgs<K>) => Promise<PosResult<K>>) =>
       (...args: PosArgs<K>): Promise<PosResult<K>> => {
+        const restricted = ['investment', 'profitability', 'users', 'consumption'].includes(
+          operationPermissions[operation],
+        );
+        if (restricted && !canAccess(user?.role, operationPermissions[operation]))
+          return Promise.reject(new Error('Acceso restringido.'));
         if (
           user?.role === 'auditor' &&
           (mutationOperations.has(operation) || operation === 'registerCashWithdrawal')
@@ -32,9 +40,40 @@ export function usePosRepository(): Repository {
             networkConfig.clientId,
           );
         }
-        return handler(...args);
+        return handler(...args).then((result) =>
+          user?.role === 'admin' || result == null ? result : redactCosts(result),
+        );
       };
     return {
+      getInvestmentData: bind('getInvestmentData', () =>
+        Database.getInvestmentData(user?.username ?? ''),
+      ),
+      setProductCost: bind('setProductCost', (input, _username, command) =>
+        Database.setProductCost(input, user?.username ?? '', command),
+      ),
+      receiveCostedStock: bind('receiveCostedStock', (input, _username, command) =>
+        Database.receiveCostedStock(input, user?.username ?? '', command),
+      ),
+      getFinanceReport: bind('getFinanceReport', (filter) =>
+        Database.getFinanceReport(filter, user?.username ?? ''),
+      ),
+      getConsumptionData: bind('getConsumptionData', () =>
+        Database.getConsumptionData(user?.username ?? ''),
+      ),
+      registerConsumption: bind('registerConsumption', (input, _username, command) =>
+        Database.registerConsumption(input, user?.username ?? '', command),
+      ),
+      cancelConsumption: bind('cancelConsumption', (input, _username, command) =>
+        Database.cancelConsumption(input, user?.username ?? '', command),
+      ),
+      registerSaleAdjustment: bind('registerSaleAdjustment', (input, _username, command) =>
+        Database.registerSaleAdjustment(input, user?.username ?? '', command),
+      ),
+      setConsumptionPermission: bind(
+        'setConsumptionPermission',
+        (id, allowed, _username, command) =>
+          Database.setConsumptionPermission(id, allowed, user?.username ?? '', command),
+      ),
       getAuditSnapshot: bind('getAuditSnapshot', Database.getAuditSnapshot),
       getDemoUsage: bind('getDemoUsage', Database.getDemoUsage),
       listProducts: bind('listProducts', Database.listProducts),

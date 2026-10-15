@@ -11,6 +11,7 @@ import {
 import { Pencil, Plus, Trash2 } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, View } from 'react-native';
+import * as Haptics from 'expo-haptics';
 
 import { AccessDenied } from '@/components/AccessDenied';
 import { EmptyState } from '@/components/pos-ui';
@@ -23,7 +24,7 @@ import { canAccess } from '@/lib/permissions';
 const roles: UserRole[] = ['admin', 'supervisor', 'seller', 'storekeeper', 'auditor'];
 export default function Users() {
   const { user } = useApp();
-  const { deleteUser, listUsers, saveUser } = usePosRepository();
+  const { deleteUser, listUsers, saveUser, setConsumptionPermission } = usePosRepository();
   const [rows, setRows] = useState<Usuario[]>([]);
   const [editing, setEditing] = useState<number>();
   const [username, setUsername] = useState('');
@@ -137,6 +138,41 @@ export default function Users() {
               <Chip size="sm" variant="soft">
                 {row.role}
               </Chip>
+              {row.role === 'supervisor' ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  isDisabled={saving}
+                  onPress={() =>
+                    void (async () => {
+                      setSaving(true);
+                      try {
+                        await setConsumptionPermission(
+                          row.id,
+                          row.can_authorize_consumption !== 1,
+                          user.username,
+                        );
+                        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                        await load();
+                      } catch (error) {
+                        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+                        Alert.alert(
+                          'No se pudo cambiar el permiso',
+                          error instanceof Error ? error.message : 'Vuelve a intentarlo.',
+                        );
+                      } finally {
+                        setSaving(false);
+                      }
+                    })()
+                  }
+                >
+                  <Button.Label>
+                    {row.can_authorize_consumption === 1
+                      ? 'Revocar autorización de retiros'
+                      : 'Permitir autorizar retiros'}
+                  </Button.Label>
+                </Button>
+              ) : null}
             </View>
             <Button size="sm" isIconOnly variant="ghost" onPress={() => start(row)}>
               <Pencil color={accent} size={18} />

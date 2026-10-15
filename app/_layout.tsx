@@ -61,6 +61,20 @@ function AppStack() {
       <Stack.Screen name="movements" options={{ headerShown: true, title: 'Movimientos' }} />
       <Stack.Screen name="users" options={{ headerShown: true, title: 'Usuarios' }} />
       <Stack.Screen name="audit" options={{ headerShown: true, title: 'Auditoría' }} />
+      <Stack.Screen name="consumption" options={{ headerShown: true, title: 'Consumo interno' }} />
+      <Stack.Screen
+        name="investment"
+        options={{ headerShown: true, title: 'Inversión y costos' }}
+      />
+      <Stack.Screen name="profitability" options={{ headerShown: true, title: 'Rentabilidad' }} />
+      <Stack.Screen
+        name="seller-performance"
+        options={{ headerShown: true, title: 'Vendedores' }}
+      />
+      <Stack.Screen
+        name="sale-adjustments"
+        options={{ headerShown: true, title: 'Ajustes de venta' }}
+      />
       <Stack.Screen name="exports" options={{ headerShown: true, title: 'Exportaciones' }} />
       <Stack.Screen name="cash-history" options={{ headerShown: true, title: 'Cierres de caja' }} />
       <Stack.Screen name="settings" options={{ headerShown: true, title: 'Configuración' }} />
