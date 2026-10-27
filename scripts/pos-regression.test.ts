@@ -1298,3 +1298,53 @@ void regression('stock inconsistente se bloquea antes de modificar inventario', 
   assert.equal((await f.db.getProduct(f.product.id))?.stock, 10);
   assert.equal((await f.db.listMovements()).length, before);
 });
+void regression(
+  'archivo con formato v6 sin columnas v7 conserva ventas y permisos al importar',
+  async () => {
+    const f = await closedArchive();
+    const archive = structuredClone(f.archive);
+    archive.schemaVersion = 6;
+    for (const sale of archive.tables.sales) {
+      delete sale.legacy_card;
+      delete sale.pricing_basis;
+    }
+    const target = createHarness();
+    const db = target.load('@/lib/database');
+    await db.initializeDatabase();
+    await db.restoreBusinessArchive(archive, 'admin');
+    assert.equal(
+      target.database.exec('SELECT COUNT(*) FROM sales')[0].values[0][0],
+      archive.tables.sales.length,
+    );
+    assert.equal(
+      (await db.getSale(Number(archive.tables.sales[0].id)))?.sale.total,
+      archive.tables.sales[0].total,
+    );
+    assert.equal(target.database.exec('PRAGMA foreign_key_check').length, 0);
+  },
+);
+void regression('versión futura se rechaza antes de crear o modificar tablas', async () => {
+  const h = createHarness();
+  h.database.run('PRAGMA user_version=8');
+  await assert.rejects(h.load('@/lib/database').initializeDatabase(), /más reciente/);
+  assert.equal(h.database.exec('PRAGMA user_version')[0].values[0][0], 8);
+  assert.equal(h.database.exec("SELECT name FROM sqlite_master WHERE type='table'").length, 0);
+});
+void regression(
+  'importación protege usuarios y áreas preexistentes aunque no haya ventas',
+  async () => {
+    const f = await closedArchive();
+    const h = createHarness();
+    const db = h.load('@/lib/database');
+    await db.initializeDatabase();
+    const id = await db.saveUser({
+      username: 'usuario-propio',
+      password: 'secreto123',
+      role: 'seller',
+    });
+    await assert.rejects(db.restoreBusinessArchive(f.archive, 'admin'), /historial propio/);
+    assert.ok((await db.listUsers()).find((user) => user.id === id));
+    assert.ok(await db.authenticate('usuario-propio', 'secreto123'));
+    assert.equal((await db.listProducts()).length, 0);
+  },
+);

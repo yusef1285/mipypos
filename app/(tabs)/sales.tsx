@@ -355,6 +355,11 @@ export default function Sales() {
           </Chip>
         ))}
       </View>
+      {method === 'mixed' ? (
+        <Typography.Paragraph type="body-sm" color="muted">
+          En mixto se aplica el precio de efectivo a toda la venta.
+        </Typography.Paragraph>
+      ) : null}
       {method === 'mixed'
         ? methods.map(({ key, label }) => (
             <TextField key={key}>
