@@ -1,6 +1,7 @@
 import * as Crypto from 'expo-crypto';
 import { getSecret, setSecret, removeSecret } from '@/lib/network/secure-storage';
 import type { OperationRequest, PosOperation } from '@/lib/network/operations';
+import { assertOperationRequest } from '@/lib/network/validation';
 
 const KEY = 'mipypos.pending-operation';
 export interface PendingOperation {
@@ -14,7 +15,44 @@ export interface PendingOperation {
 }
 export async function getPendingOperation(): Promise<PendingOperation | null> {
   const stored = await getSecret(KEY);
-  return stored ? (JSON.parse(stored) as PendingOperation) : null;
+  if (!stored) return null;
+  try {
+    const value: unknown = JSON.parse(stored);
+    if (
+      !value ||
+      typeof value !== 'object' ||
+      !('hostUrl' in value) ||
+      typeof value.hostUrl !== 'string' ||
+      !('username' in value) ||
+      typeof value.username !== 'string' ||
+      !('clientId' in value) ||
+      typeof value.clientId !== 'string' ||
+      !('commandId' in value) ||
+      typeof value.commandId !== 'string' ||
+      !('fingerprint' in value) ||
+      typeof value.fingerprint !== 'string'
+    )
+      throw new Error('Formato no válido');
+    // Operation validation keeps old persisted records compatible without
+    // silently discarding an operation whose commit may already have happened.
+    if (!('operation' in value) || !('args' in value)) throw new Error('Formato no válido');
+    const request = { ...value, token: 'validation' };
+    assertOperationRequest(request);
+    return {
+      hostUrl: value.hostUrl,
+      username: value.username,
+      clientId: value.clientId,
+      commandId: value.commandId,
+      fingerprint: value.fingerprint,
+      operation: request.operation,
+      args: request.args,
+    };
+  } catch (error) {
+    throw new Error(
+      'No se pudo leer la operación pendiente. Se conserva sin reenviarla; no cambies de administrador hasta revisar su confirmación.',
+      { cause: error },
+    );
+  }
 }
 export async function operationFingerprint(operation: string, args: unknown): Promise<string> {
   return Crypto.digestStringAsync(

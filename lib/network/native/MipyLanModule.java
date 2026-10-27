@@ -18,6 +18,7 @@ import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.modules.core.DeviceEventManagerModule;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
@@ -39,6 +40,12 @@ public class MipyLanModule extends ReactContextBaseJavaModule {
     connectivity = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
   }
   @Override public String getName() { return "MipyLan"; }
+  private void emitStatus(String status) {
+    if (!getReactApplicationContext().hasActiveReactInstance()) return;
+    WritableMap event = Arguments.createMap();
+    event.putString("status", status);
+    getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class).emit("MipyLanStatus", event);
+  }
   private WritableMap credentials() {
     WritableMap value = Arguments.createMap();
     value.putString("ssid", ssid);
@@ -126,7 +133,9 @@ public class MipyLanModule extends ReactContextBaseJavaModule {
           LinkProperties properties = connectivity.getLinkProperties(network);
           if (properties == null || properties.getLinkAddresses().isEmpty()) return;
           if (connectivity.bindProcessToNetwork(network)) {
+            boolean changed = boundNetwork == null || !boundNetwork.equals(network);
             boundNetwork = network;
+            if (changed) emitStatus("available");
             if (!settled) { settled = true; promise.resolve(null); }
           } else if (!settled) { settled = true; releaseConnection(); promise.reject("CONNECT", "No se pudo usar la red local."); }
         }
@@ -140,7 +149,12 @@ public class MipyLanModule extends ReactContextBaseJavaModule {
         @Override public void onLost(Network network) {
           if (connection != this || (boundNetwork != null && !boundNetwork.equals(network))) return;
           if (!settled) { settled = true; promise.reject("CONNECT", "Se perdió la red local. Escanea nuevamente el QR."); }
-          releaseConnection();
+          // Keep this one authorized network request alive so Android can call
+          // onAvailable again when the same Wi-Fi returns. Never report TLS
+          // connectivity until the JS client has verified the host's pin.
+          connectivity.bindProcessToNetwork(null);
+          boundNetwork = null;
+          emitStatus("lost");
         }
       };
       connection = callback;

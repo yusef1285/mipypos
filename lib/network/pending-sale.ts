@@ -22,10 +22,7 @@ function isPendingSale(value: unknown): value is PendingSale {
     'clientId' in command &&
     typeof command.clientId === 'string' &&
     'method' in command &&
-    (command.method === 'cash' ||
-      command.method === 'transfer' ||
-      command.method === 'card' ||
-      command.method === 'mixed') &&
+    (command.method === 'cash' || command.method === 'transfer' || command.method === 'mixed') &&
     'sessionId' in command &&
     typeof command.sessionId === 'number' &&
     'payments' in command &&
@@ -35,7 +32,7 @@ function isPendingSale(value: unknown): value is PendingSale {
         typeof payment === 'object' &&
         payment !== null &&
         'type' in payment &&
-        (payment.type === 'cash' || payment.type === 'transfer' || payment.type === 'card') &&
+        (payment.type === 'cash' || payment.type === 'transfer') &&
         'amount' in payment &&
         typeof payment.amount === 'number',
     ) &&
@@ -57,8 +54,16 @@ function isPendingSale(value: unknown): value is PendingSale {
 export async function getPendingSale(): Promise<PendingSale | null> {
   const stored = await AsyncStorage.getItem(KEY);
   if (!stored) return null;
-  const pending: unknown = JSON.parse(stored);
-  if (!isPendingSale(pending)) throw new Error('El formato de la venta pendiente no es válido.');
+  let pending: unknown;
+  try {
+    pending = JSON.parse(stored);
+  } catch (error) {
+    throw new Error('No se pudo leer la venta pendiente. El registro se conserva sin reenviarlo.', {
+      cause: error,
+    });
+  }
+  if (!isPendingSale(pending))
+    throw new Error('El formato de la venta pendiente no es válido. El registro se conserva.');
   return pending;
 }
 export async function upgradePendingSaleTransport(hostUrl: string, verifiedPreviousHost?: string) {

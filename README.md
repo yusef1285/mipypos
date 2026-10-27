@@ -270,4 +270,3 @@ Checklist adicional **pendiente**, sin datos de producción:
 5. Descontar, devolver parcialmente y anular una venta mixta; contrastar devoluciones monetarias, stock, caja, informes diarios y ganancias, sin repetir cantidades ya devueltas.
 6. Reiniciar ambos dispositivos antes/después de confirmar, simular respuesta perdida y recuperar UUID: una sola operación. Exportar/importar negocio v6 y revisar costos, consumos, ajustes y permisos; probar un archivo v5 real.
 7. Entrar como vendedor, supervisor y auditor, intentar abrir paneles o solicitar costos por LAN: denegación y ausencia de costos. Abrir los informes Excel en un lector y comparar cifras y filtros.
-

@@ -26,15 +26,22 @@ import { getPendingOperation } from '@/lib/network/pending-operation';
 import { getPendingSale } from '@/lib/network/pending-sale';
 import { HostRejection, getHostSnapshot, loginToHost, logoutFromHost } from '@/lib/network/client';
 import { loadNetworkConfig, saveNetworkConfig } from '@/lib/network/config';
-import { disconnectHotspot, getLocalHotspot, stopLocalHotspot } from '@/lib/network/hotspot';
+import {
+  disconnectHotspot,
+  getLocalHotspot,
+  stopLocalHotspot,
+  subscribeLanStatus,
+} from '@/lib/network/hotspot';
 import { disconnectDirect, getDirectInfo } from '@/lib/network/direct';
 import { startLanHost, stopLanHost } from '@/lib/network/host';
+import { AppState, Platform } from 'react-native';
 import type { NetworkConfig } from '@/lib/network/types';
 import { validateLicenseKey } from '@/lib/license';
 import type { LicenseMode, SesionCaja, Usuario } from '@/lib/models';
 
 type AuthenticatedUser = Omit<Usuario, 'password_hash'>;
 
+type NetworkStatus = 'connected' | 'syncing' | 'offline' | 'pending' | 'error';
 interface AppContextValue {
   ready: boolean;
   user: AuthenticatedUser | null;
@@ -44,6 +51,8 @@ interface AppContextValue {
   revision: number;
   networkConfig: NetworkConfig;
   hostAddress: string;
+  networkStatus: NetworkStatus;
+  networkError: string;
   login: (username: string, password: string, remember: boolean) => Promise<void>;
   logout: () => void;
   refresh: () => Promise<void>;
@@ -68,14 +77,34 @@ export function AppProvider({ children }: PropsWithChildren) {
     clientId: '',
   });
   const [hostAddress, setHostAddress] = useState('');
+  const [networkStatus, setNetworkStatus] = useState<NetworkStatus>('offline');
+  const [networkError, setNetworkError] = useState('');
   const segments = useSegments();
 
   const refresh = useCallback(async () => {
-    if (networkConfig.mode === 'client' && networkConfig.hostUrl) {
-      const snapshot = await getHostSnapshot(networkConfig.hostUrl);
-      setSession(snapshot.session);
-      setLicenseMode(snapshot.licenseMode);
-      setRevision(snapshot.revision);
+    if (networkConfig.mode === 'client') {
+      if (!networkConfig.hostUrl || networkConfig.recoveryMessage)
+        throw new Error(networkConfig.recoveryMessage ?? 'Escanea el QR del administrador.');
+      setNetworkStatus((current) => (current === 'connected' ? current : 'syncing'));
+      try {
+        const snapshot = await getHostSnapshot(networkConfig.hostUrl);
+        setSession(snapshot.session);
+        setLicenseMode(snapshot.licenseMode);
+        setRevision(snapshot.revision);
+        const pending = Boolean(
+          (await getPendingOperation()) ||
+          (await getPendingSale()) ||
+          (await getPendingWithdrawal()),
+        );
+        setNetworkStatus(pending ? 'pending' : 'connected');
+        setNetworkError('');
+      } catch (error) {
+        setNetworkStatus(error instanceof HostRejection ? 'error' : 'offline');
+        setNetworkError(
+          error instanceof Error ? error.message : 'No se pudo confirmar la conexión.',
+        );
+        throw error;
+      }
       return;
     }
     setSession(await getOpenSession());
@@ -88,7 +117,9 @@ export function AppProvider({ children }: PropsWithChildren) {
       await initializeDatabase();
       const storedNetwork = await loadNetworkConfig();
       setNetworkConfig(storedNetwork);
-      if (storedNetwork.mode === 'host') {
+      setNetworkError(storedNetwork.recoveryMessage ?? '');
+      if (storedNetwork.recoveryMessage) setNetworkStatus('error');
+      if (storedNetwork.mode === 'host' && Platform.OS === 'android') {
         try {
           if (storedNetwork.transport === 'direct' && !(await getDirectInfo())?.isOwner)
             throw new Error(
@@ -130,14 +161,22 @@ export function AppProvider({ children }: PropsWithChildren) {
       return () => undefined;
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
+    let failures = 0;
     const poll = async () => {
+      if (AppState.currentState && AppState.currentState !== 'active') {
+        if (active) timer = setTimeout(() => void poll(), 15000);
+        return;
+      }
       try {
         await refresh();
+        failures = 0;
       } catch (failure) {
+        failures += 1;
         if (active && failure instanceof HostRejection && failure.code === 'AUTH_EXPIRED')
           setUser(null);
       } finally {
-        if (active) timer = setTimeout(() => void poll(), 1500);
+        if (active)
+          timer = setTimeout(() => void poll(), Math.min(30000, 2500 * 2 ** Math.min(failures, 4)));
       }
     };
     timer = setTimeout(() => void poll(), 1500);
@@ -147,8 +186,26 @@ export function AppProvider({ children }: PropsWithChildren) {
     };
   }, [networkConfig, ready, refresh, user]);
 
+  useEffect(() => {
+    if (networkConfig.mode !== 'client') return undefined;
+    return subscribeLanStatus((status) => {
+      if (status === 'lost') {
+        setNetworkStatus('offline');
+        setNetworkError('Se perdió el Wi-Fi. Las operaciones pendientes se conservan.');
+      } else if (user) void refresh().catch(() => undefined);
+    });
+  }, [networkConfig.mode, user, refresh]);
+
   const login = useCallback(
     async (username: string, password: string, remember: boolean) => {
+      if (
+        networkConfig.mode === 'client' &&
+        (!networkConfig.hostUrl || networkConfig.recoveryMessage)
+      )
+        throw new Error(
+          networkConfig.recoveryMessage ??
+            'Escanea el QR del administrador antes de iniciar sesión.',
+        );
       const authenticated =
         networkConfig.mode === 'client' && networkConfig.hostUrl
           ? await loginToHost(networkConfig.hostUrl, username, password)
@@ -200,7 +257,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         networkConfig.mode === 'client' ? networkConfig.hostUrl : undefined,
         networkConfig.hostPin,
       );
-      await saveNetworkConfig(next);
+      const normalized = await saveNetworkConfig(next);
       if (next.mode !== 'host') {
         stopLanHost();
         if (await getLocalHotspot()) await stopLocalHotspot();
@@ -210,7 +267,9 @@ export function AppProvider({ children }: PropsWithChildren) {
         await disconnectDirect();
       }
       const changedAuthority = networkConfig.mode === 'client' || next.mode === 'client';
-      setNetworkConfig(next);
+      setNetworkConfig(normalized);
+      setNetworkStatus('offline');
+      setNetworkError('');
       if (changedAuthority) setUser(null);
       setSession(next.mode === 'client' ? null : await getOpenSession());
       setHostAddress(address);
@@ -236,6 +295,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       revision,
       networkConfig,
       hostAddress,
+      networkStatus,
+      networkError,
       login,
       logout,
       refresh,
@@ -251,6 +312,8 @@ export function AppProvider({ children }: PropsWithChildren) {
       revision,
       networkConfig,
       hostAddress,
+      networkStatus,
+      networkError,
       login,
       logout,
       refresh,

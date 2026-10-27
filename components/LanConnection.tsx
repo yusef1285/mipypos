@@ -33,7 +33,15 @@ import { getPendingOperation, rebindPendingOperation } from '@/lib/network/pendi
 import { getPendingSale, upgradePendingSaleTransport } from '@/lib/network/pending-sale';
 
 export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
-  const { networkConfig, configureNetwork, hostAddress, user } = useApp();
+  const {
+    networkConfig,
+    configureNetwork,
+    hostAddress,
+    user,
+    networkStatus,
+    networkError,
+    refresh,
+  } = useApp();
   const [scanning, setScanning] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -232,12 +240,47 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
         {networkConfig.mode === 'host'
           ? 'Administrador · host'
           : networkConfig.mode === 'client'
-            ? 'Terminal conectada al administrador'
+            ? !user
+              ? 'Terminal · inicia sesión con el administrador'
+              : {
+                  connected: 'Conectado',
+                  syncing: 'Sincronizando',
+                  offline: 'Sin conexión',
+                  pending: 'Cambios pendientes',
+                  error: 'Error de sincronización',
+                }[networkStatus]
             : 'Este dispositivo trabaja solo'}
       </Typography.Paragraph>
       {networkConfig.mode === 'client' ? (
         <Typography.Paragraph type="body-sm" color="muted">
           {networkConfig.hostUrl}. Inicia sesión con un usuario del administrador.
+        </Typography.Paragraph>
+      ) : null}
+      {networkConfig.recoveryMessage || networkError ? (
+        <Typography.Paragraph type="body-sm" className="text-danger">
+          {networkConfig.recoveryMessage || networkError}
+        </Typography.Paragraph>
+      ) : null}
+      {networkConfig.mode === 'client' && user && networkStatus !== 'connected' ? (
+        <Button
+          variant="secondary"
+          isDisabled={busy || networkStatus === 'syncing'}
+          onPress={() => {
+            setBusy(true);
+            void refresh()
+              .catch((failure: unknown) => {
+                setError(failure instanceof Error ? failure.message : 'No se pudo reconectar.');
+                void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+              })
+              .finally(() => setBusy(false));
+          }}
+        >
+          <Button.Label>Reintentar conexión</Button.Label>
+        </Button>
+      ) : null}
+      {Platform.OS !== 'android' ? (
+        <Typography.Paragraph type="body-sm" color="muted">
+          La red segura entre teléfonos requiere Android.
         </Typography.Paragraph>
       ) : null}
       {qr ? (

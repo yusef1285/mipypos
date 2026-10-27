@@ -1,5 +1,11 @@
 import { getDirectInfo } from '@/lib/network/direct';
-import { Linking, NativeModules, PermissionsAndroid, Platform } from 'react-native';
+import {
+  DeviceEventEmitter,
+  Linking,
+  NativeModules,
+  PermissionsAndroid,
+  Platform,
+} from 'react-native';
 
 export interface HotspotCredentials {
   ssid: string;
@@ -82,6 +88,19 @@ export async function connectHotspot(credentials: HotspotCredentials) {
 }
 export async function disconnectHotspot() {
   if (Platform.OS === 'android' && NativeModules.MipyLan) await bridge().disconnect();
+}
+export function subscribeLanStatus(onChange: (status: 'available' | 'lost') => void) {
+  if (Platform.OS !== 'android' || !NativeModules.MipyLan) return () => undefined;
+  const subscription = DeviceEventEmitter.addListener('MipyLanStatus', (event: unknown) => {
+    if (
+      event &&
+      typeof event === 'object' &&
+      'status' in event &&
+      (event.status === 'available' || event.status === 'lost')
+    )
+      onChange(event.status);
+  });
+  return () => subscription.remove();
 }
 export async function openWifiSettings() {
   if (Platform.OS === 'android') await Linking.sendIntent('android.settings.WIFI_SETTINGS');

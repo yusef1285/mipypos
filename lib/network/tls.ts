@@ -30,9 +30,12 @@ const nativeTlsSchema = z.object({
   addListener: z.function({ input: [z.string()], output: z.unknown() }),
   removeListeners: z.function({ input: [z.number()], output: z.unknown() }),
 });
+export const supportsLanTransport = () => Platform.OS === 'android';
 function nativeTls(): TlsModule {
   const parsed = nativeTlsSchema.safeParse(NativeModules.MipyTls);
-  if (Platform.OS !== 'android' || !parsed.success)
+  if (!supportsLanTransport())
+    throw new Error('La conexión segura entre teléfonos solo está disponible en Android.');
+  if (!parsed.success)
     throw new Error(
       'La red segura requiere una nueva compilación Android de MipyPOS; no está disponible en Expo Go.',
     );
@@ -86,8 +89,10 @@ export class SecureLanServer {
   post<T>(path: string, handler: (request: { data: T }) => Promise<unknown>) {
     this.routes.set(`POST ${path}`, handler);
   }
+  private native: TlsModule | null = null;
   async listen(ip: string, port: number) {
     const native = nativeTls();
+    this.native = native;
     this.subscription = new NativeEventEmitter(native).addListener(
       'MipyTlsRequest',
       (request: TlsRequest) => {
@@ -121,8 +126,8 @@ export class SecureLanServer {
     this.subscription = null;
     hostPin = '';
     hostUrl = '';
-    void nativeTls()
-      .stopServer()
-      .catch(() => undefined);
+    const native = this.native;
+    this.native = null;
+    if (native) void native.stopServer().catch(() => undefined);
   }
 }

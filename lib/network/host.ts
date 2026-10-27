@@ -20,6 +20,9 @@ import {
 } from '@/lib/network/operations';
 import { operationFingerprint } from '@/lib/network/pending-operation';
 import { redactCosts } from '@/lib/finance-privacy';
+import { saleUnitPrice } from '@/lib/sale-pricing';
+import { saleFingerprint } from '@/lib/sale-identity';
+import { assertOperationRequest, assertSaleCommand, ProtocolError } from '@/lib/network/validation';
 import { canAccess, type ModuleKey } from '@/lib/permissions';
 
 interface SessionEntry {
@@ -31,11 +34,29 @@ let server: SecureLanServer | null = null;
 function success<T>(data: T): ApiResult<T> {
   return { ok: true, data };
 }
+function requestIdentity(value: unknown): string | undefined {
+  if (
+    value &&
+    typeof value === 'object' &&
+    'commandId' in value &&
+    typeof value.commandId === 'string' &&
+    value.commandId.length <= 128
+  )
+    return value.commandId;
+  return undefined;
+}
 class ExpiredSession extends Error {}
-function failure(error: unknown): ApiResult<never> {
+function failure(error: unknown, requestId?: string): ApiResult<never> {
   return {
     ok: false,
-    code: error instanceof ExpiredSession ? 'AUTH_EXPIRED' : 'REJECTED',
+    success: false,
+    ...(requestId ? { requestId } : {}),
+    code:
+      error instanceof ExpiredSession
+        ? 'AUTH_EXPIRED'
+        : error instanceof ProtocolError
+          ? error.code
+          : 'REJECTED',
     error: error instanceof Error ? error.message : 'Solicitud no válida.',
   };
 }
@@ -62,21 +83,7 @@ async function authorized(token: string, module: ModuleKey, auditRead = false) {
 }
 
 async function buildSnapshot(): Promise<NetworkSnapshot> {
-  const db = await DB.getDatabase();
-  const revision =
-    (
-      await db.getFirstAsync<{ revision: number }>(
-        'SELECT COALESCE(MAX(id),0) AS revision FROM network_events',
-      )
-    )?.revision ?? 0;
-  return {
-    revision,
-    licenseMode: await DB.getLicenseMode(),
-    products: await DB.listProducts(),
-    areas: await DB.listAreas(),
-    areaStock: await DB.listAreaStock(),
-    session: await DB.getOpenSession(),
-  };
+  return DB.getSharedSnapshot();
 }
 
 async function handleOperation(request: OperationRequest, user: Usuario): Promise<unknown> {
@@ -181,8 +188,12 @@ async function handleOperation(request: OperationRequest, user: Usuario): Promis
       return DB.getSale(request.args[0]);
     case 'findTransferTransaction':
       return DB.findTransferTransaction(request.args[0]);
+    default:
+      throw new ProtocolError(
+        'UNKNOWN_OPERATION',
+        'Esta operación no está disponible. Actualiza ambos dispositivos.',
+      );
   }
-  return undefined;
 }
 
 async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
@@ -190,7 +201,12 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
     throw new Error('La venta no tiene identidad de red.');
   if (!Array.isArray(command.items) || !command.items.length)
     throw new Error('El carrito está vacío.');
-  const previous = await DB.findNetworkSale(command.commandId, command.clientId, user.username);
+  const previous = await DB.findNetworkSale(
+    command.commandId,
+    command.clientId,
+    user.username,
+    await saleFingerprint(command),
+  );
   if (previous !== null) return previous;
   if (!command.settlement)
     throw new Error(
@@ -205,7 +221,7 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
       product,
       areaId: input.areaId,
       quantity: input.quantity,
-      price: command.method === 'transfer' ? product.price_transfer : product.price_cash,
+      price: saleUnitPrice(product, command.method),
     };
   });
   return DB.registerSale(
@@ -268,37 +284,50 @@ export async function startLanHost(): Promise<string> {
         id: user.id,
         username: user.username,
         role: user.role,
+        can_authorize_consumption: user.can_authorize_consumption,
       };
       return success({ token, user: publicUser });
     } catch (error) {
-      return failure(error);
+      return failure(error, requestIdentity(request.data));
     }
   });
   nextServer.post<{ token?: string }>('/v1/logout', async (request) => {
     sessions.delete(request.data.token ?? '');
     return success(null);
   });
-  nextServer.post<{ token?: string }>('/v1/snapshot', async (request) => {
-    try {
-      const user = await authorized(request.data.token ?? '', 'home');
-      const snapshot = await buildSnapshot();
-      return success(user.role === 'admin' ? snapshot : redactCosts(snapshot));
-    } catch (error) {
-      return failure(error);
-    }
-  });
+  nextServer.post<{ token?: string; knownRevision?: number; authorityId?: string }>(
+    '/v1/snapshot',
+    async (request) => {
+      try {
+        const user = await authorized(request.data.token ?? '', 'home');
+        if (Number.isInteger(request.data.knownRevision) && request.data.authorityId) {
+          const current = await DB.getSharedRevision();
+          if (
+            current.revision === request.data.knownRevision &&
+            current.authorityId === request.data.authorityId
+          )
+            return success({ unchanged: true, ...current });
+        }
+        const snapshot = await buildSnapshot();
+        return success(user.role === 'admin' ? snapshot : redactCosts(snapshot));
+      } catch (error) {
+        return failure(error, requestIdentity(request.data));
+      }
+    },
+  );
   nextServer.post<{ token?: string }>('/v1/report', async (request) => {
     try {
       const user = await authorized(request.data.token ?? '', 'reports');
       const report = await DB.getDailyReport();
       return success(user.role === 'admin' ? report : redactCosts(report));
     } catch (error) {
-      return failure(error);
+      return failure(error, requestIdentity(request.data));
     }
   });
   nextServer.post<OperationRequest>('/v1/receipt', async (request) => {
     try {
       const input = request.data;
+      assertOperationRequest(input);
       const user = await authorized(input.token, 'home');
       if (
         !input.commandId ||
@@ -317,18 +346,19 @@ export async function startLanHost(): Promise<string> {
         }),
       );
     } catch (error) {
-      return failure(error);
+      return failure(error, requestIdentity(request.data));
     }
   });
   nextServer.post<OperationRequest>('/v1/operation', async (request) => {
     try {
       const input: OperationRequest = request.data;
-      if (
-        !input ||
-        !Object.hasOwn(operationPermissions, input.operation) ||
-        !Array.isArray(input.args)
-      )
-        throw new Error('Operación no válida.');
+      if (!input || !Object.hasOwn(operationPermissions, input.operation))
+        throw new ProtocolError(
+          'UNKNOWN_OPERATION',
+          'Esta operación no está disponible. Actualiza ambos dispositivos.',
+        );
+      if (!Array.isArray(input.args))
+        throw new ProtocolError('INVALID_ARGUMENTS', 'Revisa los datos de la solicitud.');
       const module =
         input.operation === 'getExportRows' && input.args[0] === 'inventory'
           ? 'products'
@@ -348,18 +378,20 @@ export async function startLanHost(): Promise<string> {
         'getAuditSnapshot',
       ]);
       const user = await authorized(input.token, module, auditReads.has(input.operation));
+      assertOperationRequest(input);
       const result = (await handleOperation(input, user)) ?? null;
       return success(user.role === 'admin' ? result : redactCosts(result));
     } catch (error) {
-      return failure(error);
+      return failure(error, requestIdentity(request.data));
     }
   });
   nextServer.post<NetworkSaleCommand>('/v1/sale', async (request) => {
     try {
-      const user = await authorized(request.data.token ?? '', 'sales');
+      const user = await authorized(request.data?.token ?? '', 'sales');
+      assertSaleCommand(request.data);
       return success({ saleId: await handleNetworkSale(request.data, user) });
     } catch (error) {
-      return failure(error);
+      return failure(error, requestIdentity(request.data));
     }
   });
   await nextServer.listen(ip, LAN_PORT);

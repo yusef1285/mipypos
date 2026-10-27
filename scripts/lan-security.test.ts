@@ -4,6 +4,7 @@ import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 let passed = 0;
 let failed = 0;
+const failures: Array<{ name: string; message: string }> = [];
 function test(name: string, action: () => void | Promise<void>) {
   return nodeTest(name, async () => {
     try {
@@ -11,6 +12,7 @@ function test(name: string, action: () => void | Promise<void>) {
       passed += 1;
     } catch (error) {
       failed += 1;
+      failures.push({ name, message: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   });
@@ -21,7 +23,7 @@ after(() => {
   writeFileSync(
     join(directory, 'lan-security-results.json'),
     JSON.stringify(
-      { ranAt: new Date().toISOString(), tests: passed + failed, passed, failed },
+      { ranAt: new Date().toISOString(), tests: passed + failed, passed, failed, failures },
       null,
       2,
     ),
@@ -442,11 +444,12 @@ void test('pending conserva UUID y bloquea usuario, terminal, host y contenido d
   assert.ok([...f.storage.keys()].some((k) => k.startsWith('secure:')));
   assert.ok(!f.storage.has('mipypos.pending-operation'));
 });
-void test('tokens antiguos se eliminan y nunca se migran a una sesión autenticada', async () => {
+void test('token antiguo se migra solo tras verificar la escritura segura; pin queda privado', async () => {
   const h = createHarness();
   h.storage.set('mipypos.network.token', 'copiado');
   const config = h.load('@/lib/network/config');
-  assert.equal(await config.getNetworkToken(), null);
+  assert.equal(await config.getNetworkToken(), 'copiado');
+  assert.equal(h.storage.get('secure:mipypos.network.token'), 'copiado');
   assert.equal(h.storage.has('mipypos.network.token'), false);
   await config.saveNetworkToken('seguro');
   assert.equal(await config.getNetworkToken(), 'seguro');
@@ -909,4 +912,214 @@ void test('puentes Android usan P2P real y OCR incluido, no downloads de modelos
   const plugin = readFileSync('lib/network/withLocalHotspot.ts', 'utf8');
   assert.ok(plugin.includes('com.google.mlkit:text-recognition:16.0.1'));
   assert.ok(!plugin.includes('play-services-mlkit-text-recognition'));
+});
+void test('fallos de lectura o escritura segura conservan el token antiguo', async () => {
+  for (const failure of ['read', 'write', 'verify']) {
+    const h = createHarness({
+      'expo-secure-store': {
+        WHEN_UNLOCKED_THIS_DEVICE_ONLY: 'device',
+        getItemAsync: async () => {
+          if (failure === 'read') throw new Error('locked');
+          return null;
+        },
+        setItemAsync: async () => {
+          if (failure === 'write') throw new Error('full');
+        },
+      },
+    });
+    h.storage.set('mipypos.network.token', 'sesion-valida');
+    await assert.rejects(h.load('@/lib/network/config').getNetworkToken());
+    assert.equal(h.storage.get('mipypos.network.token'), 'sesion-valida');
+  }
+});
+void test('sesión segura tiene prioridad y web no copia secretos al navegador', async () => {
+  const h = createHarness();
+  h.storage.set('mipypos.network.token', 'antiguo');
+  h.storage.set('secure:mipypos.network.token', 'vigente');
+  assert.equal(await h.load('@/lib/network/config').getNetworkToken(), 'vigente');
+  const web = createHarness({ 'react-native': { Platform: { OS: 'web' }, NativeModules: {} } });
+  web.storage.set('mipypos.network.token', 'antiguo');
+  const config = web.load('@/lib/network/config');
+  assert.equal(await config.getNetworkToken(), null);
+  assert.equal(web.storage.get('mipypos.network.token'), 'antiguo');
+  await assert.rejects(config.saveNetworkToken('nuevo'), /navegador/);
+  assert.equal(web.storage.has('secure:mipypos.network.token'), false);
+  const tls = web.load('@/lib/network/tls');
+  const server = new tls.SecureLanServer();
+  assert.doesNotThrow(() => server.stop());
+  await assert.rejects(tls.pinnedRequest(url, '/v1/health', undefined, pin), /Android/);
+});
+void test('configuración normalizada conserva terminal y no cambia autoridad inválida a local', async () => {
+  const h = createHarness();
+  const config = h.load('@/lib/network/config');
+  const first = await config.loadNetworkConfig();
+  assert.equal((await config.loadNetworkConfig()).clientId, first.clientId);
+  h.storage.set(
+    'mipypos.network.config',
+    JSON.stringify({ mode: 'standalone', transport: 'direct', hostUrl: url }),
+  );
+  const standalone = await config.loadNetworkConfig();
+  assert.equal(standalone.transport, 'wifi');
+  assert.equal(standalone.hostUrl, '');
+  const broken = JSON.stringify({
+    mode: 'client',
+    transport: 'unknown',
+    hostUrl: 'http://192.168.49.1:8787',
+    clientId: 'old-client',
+  });
+  h.storage.set('mipypos.network.config', broken);
+  const recovered = await config.loadNetworkConfig();
+  assert.equal(recovered.mode, 'client');
+  assert.equal(recovered.clientId, 'old-client');
+  assert.ok(recovered.recoveryMessage);
+  assert.equal(h.storage.get('mipypos.network.config'), broken);
+});
+void test('revisión real detecta todas las escrituras, rollback y no-op sin depender del log', async () => {
+  const f = await fixture();
+  const id = await f.db.saveProduct(base, 'admin');
+  const initial = await f.db.getSharedSnapshot();
+  f.database.run('DELETE FROM network_events');
+  assert.equal((await f.db.getSharedSnapshot()).revision, initial.revision);
+  f.database.run('UPDATE products SET price_cash=price_cash WHERE id=?', [id]);
+  assert.equal((await f.db.getSharedSnapshot()).revision, initial.revision);
+  f.database.run('UPDATE products SET price_transfer=125 WHERE id=?', [id]);
+  const changed = await f.db.getSharedSnapshot();
+  assert.ok(changed.revision > initial.revision);
+  f.database.run('BEGIN; UPDATE products SET price_cash=300; ROLLBACK;');
+  assert.equal((await f.db.getSharedSnapshot()).revision, changed.revision);
+  const cmd = command('addArea', 'sync');
+  await f.db.addArea('Otra zona', cmd);
+  const committed = await f.db.getSharedSnapshot();
+  await f.db.addArea('Otra zona', cmd);
+  assert.equal((await f.db.getSharedSnapshot()).revision, committed.revision);
+  await f.db.initializeDatabase();
+  assert.equal((await f.db.getSharedSnapshot()).authorityId, initial.authorityId);
+});
+void test('protocolo rechaza operación desconocida y argumentos inválidos con ID', async () => {
+  const f = await lanFixture();
+  const token = await f.config.getNetworkToken();
+  const route = f.routes.get('/v1/operation');
+  assert.ok(route);
+  const response = z.object({
+    success: z.literal(false),
+    ok: z.literal(false),
+    code: z.string(),
+    requestId: z.string(),
+    error: z.string(),
+  });
+  const unknown = response.parse(
+    await route({ data: { token, operation: 'constructor', args: [], commandId: 'unknown-1' } }),
+  );
+  assert.equal(unknown.code, 'UNKNOWN_OPERATION');
+  assert.equal(unknown.requestId, 'unknown-1');
+  const invalid = response.parse(
+    await route({
+      data: {
+        token,
+        operation: 'registerMovement',
+        args: [{ productId: -1 }],
+        commandId: 'invalid-1',
+        clientId: 'terminal-a',
+      },
+    }),
+  );
+  assert.equal(invalid.code, 'INVALID_ARGUMENTS');
+  assert.equal((await f.db.listMovements()).length, 0);
+  assert.equal((await f.db.getDemoUsage()).sales, 0);
+});
+void test('pendiente corrupto se conserva y muestra error controlado, sin reenviarlo', async () => {
+  const h = createHarness();
+  h.storage.set('secure:mipypos.pending-operation', '{truncado');
+  await assert.rejects(
+    h.load('@/lib/network/pending-operation').getPendingOperation(),
+    /Se conserva/,
+  );
+  assert.equal(h.storage.get('secure:mipypos.pending-operation'), '{truncado');
+});
+void test('copia SQLite confirmada y respuesta sin cambios no duplican datos ni revisiones', async () => {
+  const f = await lanFixture();
+  const id = await f.db.saveProduct(base, 'admin');
+  const first = await f.client.getHostSnapshot(url);
+  const second = await f.client.getHostSnapshot(url);
+  assert.deepEqual(second, first);
+  assert.equal(f.database.exec('SELECT COUNT(*) FROM network_replica')[0].values[0][0], 1);
+  const lastCall = f.calls.filter((call) => call.path === '/v1/snapshot').at(-1);
+  assert.equal(lastCall?.body.knownRevision, first.revision);
+  const token = await f.config.getNetworkToken();
+  assert.ok(token);
+  const stored = String(f.database.exec('SELECT payload FROM network_replica')[0].values[0][0]);
+  assert.ok(!stored.includes(token));
+  f.setOffline(true);
+  await assert.rejects(f.client.getHostSnapshot(url), /offline/);
+  f.setOffline(false);
+  f.database.run('UPDATE products SET price_cash=130 WHERE id=?', [id]);
+  const updated = await f.client.getHostSnapshot(url);
+  assert.ok(updated.revision > first.revision);
+  assert.equal(updated.products.find((p) => p.id === id)?.price_cash, 130);
+});
+void test('cambio de usuario no reutiliza copia administrativa ni costos', async () => {
+  const f = await lanFixture();
+  const id = await f.db.saveProduct(base, 'admin');
+  await f.db.setProductCost(
+    { commandId: 'cost-cache', productId: id, cost: 25, reason: 'Compra' },
+    'admin',
+  );
+  const admin = await f.client.getHostSnapshot(url);
+  assert.equal(admin.products[0].unit_cost, 25);
+  await f.db.saveUser({ username: 'seller-cache', password: 'seller123', role: 'seller' });
+  await f.client.loginToHost(url, 'seller-cache', 'seller123');
+  const seller = await f.client.getHostSnapshot(url);
+  assert.equal(seller.products[0].unit_cost, undefined);
+  assert.equal(f.database.exec('SELECT COUNT(*) FROM network_replica')[0].values[0][0], 2);
+});
+void test('UUID de venta liga contenido original y replay no incrementa revisión', async () => {
+  const f = await lanFixture();
+  const id = await f.db.saveProduct(base, 'admin');
+  const sid = await f.db.openCashSession(0, 'admin');
+  const input = {
+    commandId: 'unique-sale',
+    clientId: 'terminal-a',
+    sessionId: sid,
+    method: 'cash' as const,
+    items: [{ productId: id, areaId: 1, quantity: 1 }],
+    payments: [{ type: 'cash' as const, amount: 100 }],
+    settlement: { cashReceived: 100, transferReceipt: null },
+  };
+  const sale = await f.client.registerHostSale(url, input);
+  const revision = (await f.db.getSharedRevision()).revision;
+  assert.equal(await f.client.registerHostSale(url, input), sale);
+  assert.equal((await f.db.getSharedRevision()).revision, revision);
+  await assert.rejects(
+    f.client.registerHostSale(url, {
+      ...input,
+      items: [{ productId: id, areaId: 1, quantity: 2 }],
+      payments: [{ type: 'cash', amount: 200 }],
+      settlement: { cashReceived: 200, transferReceipt: null },
+    }),
+    /otros datos/,
+  );
+  assert.equal((await f.db.getDemoUsage()).sales, 1);
+  assert.equal((await f.db.getProduct(id))?.stock, 9);
+});
+void test('respuesta de venta sin ID o rechazo incompleto conserva pendiente', async () => {
+  for (const response of [{ ok: true, data: {} }, { ok: false }]) {
+    const h = createHarness({
+      '@/lib/network/tls': { pinnedRequest: async () => JSON.stringify(response) },
+    });
+    const config = h.load('@/lib/network/config');
+    await config.saveNetworkToken('token-valid');
+    const pending = h.load('@/lib/network/pending-sale');
+    const network = { mode: 'client' as const, hostUrl: url, clientId: 'terminal-a' };
+    await assert.rejects(
+      pending.createPendingSale(network, 'admin', {
+        method: 'cash',
+        sessionId: 1,
+        items: [{ productId: 1, areaId: 1, quantity: 1 }],
+        payments: [{ type: 'cash', amount: 100 }],
+        settlement: { cashReceived: 100, transferReceipt: null },
+      }),
+      /confirmar/,
+    );
+    assert.ok(await pending.getPendingSale());
+  }
 });

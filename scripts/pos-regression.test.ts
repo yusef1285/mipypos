@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
+import { after, before as beforeAll, test } from 'node:test';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 let passed = 0;
 let failed = 0;
+const failures: Array<{ name: string; message: string }> = [];
 function regression(name: string, action: () => void | Promise<void>) {
   return test(name, async () => {
     try {
@@ -12,6 +13,7 @@ function regression(name: string, action: () => void | Promise<void>) {
       passed += 1;
     } catch (error) {
       failed += 1;
+      failures.push({ name, message: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   });
@@ -22,14 +24,14 @@ after(() => {
   writeFileSync(
     join(directory, 'pos-regression-results.json'),
     JSON.stringify(
-      { ranAt: new Date().toISOString(), tests: passed + failed, passed, failed },
+      { ranAt: new Date().toISOString(), tests: passed + failed, passed, failed, failures },
       null,
       2,
     ),
   );
 });
 import { createHarness, prepareHarness } from './pos-test-harness';
-before(prepareHarness);
+beforeAll(prepareHarness);
 import type { CartItem, CashClosureInput, Producto, TransferReceipt } from '../lib/models';
 import {
   receiptAmount,
@@ -419,11 +421,16 @@ void regression(
   async () => {
     const f = await fixture();
     await assert.rejects(
-      f.db.registerSale(f.cart(1), 'card', [{ type: 'card', amount: 100 }], 'admin'),
+      Reflect.apply(f.db.registerSale, undefined, [
+        f.cart(1),
+        'card',
+        [{ type: 'card', amount: 100 }],
+        'admin',
+      ]),
       /métodos/,
     );
     await assert.rejects(
-      f.db.registerSale(
+      Reflect.apply(f.db.registerSale, undefined, [
         f.cart(1),
         'mixed',
         [
@@ -431,7 +438,7 @@ void regression(
           { type: 'card', amount: 50 },
         ],
         'admin',
-      ),
+      ]),
       /métodos/,
     );
     assert.equal((await f.db.getDemoUsage()).sales, 0);
@@ -1165,4 +1172,129 @@ void regression('fallo de escritura durante importación deja intacto el destino
   await assert.rejects(db.restoreBusinessArchive(archive, 'admin'));
   assert.equal((await db.listProducts()).length, 0);
   assert.equal(await db.getSetting('last_archive_id'), null);
+});
+void regression('precio mixto único y precios históricos con tarifas distintas', async () => {
+  const f = await fixture();
+  await f.db.saveProduct({ ...f.product, price_transfer: 125 }, 'admin');
+  const product = await f.db.getProduct(f.product.id);
+  assert.ok(product);
+  const item = { product, areaId: f.cart(1)[0].areaId, quantity: 1, price: 100 };
+  const mixed = await f.db.registerSale(
+    [item],
+    'mixed',
+    [
+      { type: 'cash', amount: 40 },
+      { type: 'transfer', amount: 60 },
+    ],
+    'admin',
+  );
+  const transfer = await f.db.registerSale(
+    [{ ...item, price: 125 }],
+    'transfer',
+    [{ type: 'transfer', amount: 125 }],
+    'admin',
+  );
+  await assert.rejects(
+    f.db.registerSale([item], 'transfer', [{ type: 'transfer', amount: 100 }], 'admin'),
+    /precio/,
+  );
+  const current = await f.db.getProduct(product.id);
+  assert.ok(current);
+  await f.db.saveProduct({ ...current, price_cash: 150, price_transfer: 175 }, 'admin');
+  assert.equal((await f.db.getSale(mixed))?.lines[0].price, 100);
+  assert.equal((await f.db.getSale(mixed))?.sale.total, 100);
+  assert.equal((await f.db.getSale(transfer))?.lines[0].price, 125);
+});
+void regression(
+  'migración v7 conserva tarjeta histórica y bloquea nuevos inserts SQLite',
+  async () => {
+    const f = await fixture();
+    f.database.run(`DROP TRIGGER reject_new_card_sale; DROP TRIGGER reject_card_sale_edit;
+    DROP TRIGGER sync_sales_insert; DROP TRIGGER sync_sales_delete; DROP TRIGGER sync_sales_update;
+    ALTER TABLE sales DROP COLUMN legacy_card; ALTER TABLE sales DROP COLUMN pricing_basis; PRAGMA user_version=6;`);
+    f.database.run(
+      `INSERT INTO sales(session_id,user,date,total,method,payments) VALUES(?, 'admin', ?, 80, 'card', '[{"type":"card","amount":80}]')`,
+      [f.sessionId, new Date().toISOString()],
+    );
+    const before = f.database.exec('SELECT id,total,method,payments FROM sales')[0].values;
+    await f.db.initializeDatabase();
+    assert.deepEqual(
+      f.database.exec('SELECT id,total,method,payments FROM sales')[0].values,
+      before,
+    );
+    assert.equal(f.database.exec('SELECT legacy_card FROM sales')[0].values[0][0], 1);
+    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 7);
+    const backup = f.backups.get('mipypos.pre-v6.db');
+    assert.ok(backup);
+    assert.deepEqual(backup.exec('SELECT id,total,method,payments FROM sales')[0].values, before);
+    assert.throws(
+      () =>
+        f.database.run(
+          `INSERT INTO sales(session_id,user,date,total,method,payments) VALUES(?, 'admin', ?, 80, 'card', '[{"type":"card","amount":80}]')`,
+          [f.sessionId, new Date().toISOString()],
+        ),
+      /tarjeta/,
+    );
+    const sale = await f.db.getSale(Number(before[0][0]));
+    assert.equal(sale?.sale.method, 'card');
+    assert.equal(sale?.sale.payments[0].type, 'card');
+    await f.db.initializeDatabase();
+    assert.equal(f.database.exec('SELECT COUNT(*) FROM sales')[0].values[0][0], 1);
+  },
+);
+void regression(
+  'si falla backup no migra; si falla migración revierte columnas y versión',
+  async () => {
+    for (const failure of ['BACKUP', 'INSERT OR IGNORE INTO sync_state']) {
+      const f = await fixture();
+      f.database.run(`DROP TRIGGER reject_new_card_sale; DROP TRIGGER reject_card_sale_edit;
+      DROP TRIGGER sync_sales_insert; DROP TRIGGER sync_sales_delete; DROP TRIGGER sync_sales_update;
+      ALTER TABLE sales DROP COLUMN legacy_card; ALTER TABLE sales DROP COLUMN pricing_basis; PRAGMA user_version=6;`);
+      f.failWritesContaining(failure);
+      await assert.rejects(f.db.initializeDatabase());
+      assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 6);
+      assert.ok(
+        !f.database
+          .exec('PRAGMA table_info(sales)')[0]
+          .values.some((row) => row[1] === 'legacy_card'),
+      );
+      assert.equal((await f.db.listProducts()).length, 1);
+      f.failWritesContaining('');
+      await f.db.initializeDatabase();
+      assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 7);
+    }
+  },
+);
+void regression('permiso consumo persistente y usuarios no pueden autoautorizarse', async () => {
+  const f = await fixture();
+  const id = await f.db.saveUser({
+    username: 'supervisor',
+    password: 'supervisor123',
+    role: 'supervisor',
+  });
+  await assert.rejects(f.db.setConsumptionPermission(id, true, 'supervisor'), /permiso/);
+  await f.db.setConsumptionPermission(id, true, 'admin');
+  await f.db.initializeDatabase();
+  assert.equal((await f.db.listUsers()).find((u) => u.id === id)?.can_authorize_consumption, 1);
+  assert.equal(
+    (await f.db.authenticate('supervisor', 'supervisor123'))?.can_authorize_consumption,
+    1,
+  );
+});
+void regression('stock inconsistente se bloquea antes de modificar inventario', async () => {
+  const f = await fixture();
+  f.database.run('UPDATE area_stock SET quantity=3 WHERE product_id=?', [f.product.id]);
+  const before = (await f.db.listMovements()).length;
+  await assert.rejects(
+    f.db.registerMovement({
+      type: 'entrada',
+      productId: f.product.id,
+      quantity: 2,
+      toArea: 'Almacén principal',
+      username: 'admin',
+    }),
+    /no coinciden/,
+  );
+  assert.equal((await f.db.getProduct(f.product.id))?.stock, 10);
+  assert.equal((await f.db.listMovements()).length, before);
 });

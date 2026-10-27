@@ -29,7 +29,7 @@ export const archiveSchema = z
     app: z.literal('MipyPOS'),
     format: z.literal('business-close'),
     version: z.literal(1),
-    schemaVersion: z.union([z.literal(5), z.literal(6)]),
+    schemaVersion: z.union([z.literal(5), z.literal(6), z.literal(7)]),
     archiveId: z.string().uuid(),
     createdAt: z.string().datetime(),
     sourceUser: z.string().min(1),

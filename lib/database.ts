@@ -16,6 +16,10 @@ import { dayRange } from '@/lib/format';
 import { fractionalUnit, validateQuantity, roundMoney, roundQuantity } from '@/lib/units';
 import { CASH_DENOMINATIONS, type SaleSettlement } from '@/lib/models';
 import { validateSettlement } from '@/lib/settlement';
+import { saleUnitPrice } from '@/lib/sale-pricing';
+import { saleFingerprint } from '@/lib/sale-identity';
+import { canAccess } from '@/lib/permissions';
+import { prepareMigrationBackup, migrateHardening } from '@/lib/database-migrations';
 import {
   BUSINESS_TABLES,
   archiveSchema,
@@ -40,6 +44,8 @@ import type {
   DailyReport,
   LineaVenta,
   LicenseMode,
+  LegacyPayment,
+  LegacySaleMethod,
   Movimiento,
   MovementType,
   Payment,
@@ -156,11 +162,11 @@ const parseProductSnapshot = (value: string | null): Record<string, number> => {
     ),
   );
 };
-const parsePayments = (value: string | null): Payment[] => {
+const parsePayments = (value: string | null): LegacyPayment[] => {
   const parsed = parseJson(value);
   if (!Array.isArray(parsed)) return [];
   return parsed.filter(
-    (item): item is Payment =>
+    (item): item is LegacyPayment =>
       isRecord(item) &&
       (item.type === 'cash' || item.type === 'transfer' || item.type === 'card') &&
       typeof item.amount === 'number',
@@ -179,6 +185,57 @@ async function consistentRead<T>(action: () => Promise<T>): Promise<T> {
   await pending;
   return result!;
 }
+export function getSharedRevision() {
+  return consistentRead(async () => {
+    const state = await (
+      await getDatabase()
+    ).getFirstAsync<{ revision: number; authority_id: string }>(
+      'SELECT revision,authority_id FROM sync_state WHERE id=1',
+    );
+    if (!state) throw new Error('La base de datos necesita completar la actualización.');
+    return { revision: state.revision, authorityId: state.authority_id };
+  });
+}
+export function getNetworkReplica(cacheKey: string) {
+  return consistentRead(async () =>
+    (await getDatabase()).getFirstAsync<{ payload: string; confirmed_at: string }>(
+      'SELECT payload,confirmed_at FROM network_replica WHERE cache_key=?',
+      cacheKey,
+    ),
+  );
+}
+export function storeNetworkReplica(cacheKey: string, payload: string) {
+  return consistentRead(async () => {
+    const db = await getDatabase();
+    await db.runAsync(
+      'INSERT INTO network_replica(cache_key,payload,confirmed_at) VALUES(?,?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload,confirmed_at=excluded.confirmed_at',
+      cacheKey,
+      payload,
+      now(),
+    );
+    await db.runAsync(
+      'DELETE FROM network_replica WHERE cache_key NOT IN (SELECT cache_key FROM network_replica ORDER BY confirmed_at DESC LIMIT 16)',
+    );
+  });
+}
+export async function getSharedSnapshot() {
+  return consistentRead(async () => {
+    const db = await getDatabase();
+    const state = await db.getFirstAsync<{ revision: number; authority_id: string }>(
+      'SELECT revision,authority_id FROM sync_state WHERE id=1',
+    );
+    if (!state) throw new Error('La base de datos necesita completar la actualización.');
+    return {
+      revision: state.revision,
+      authorityId: state.authority_id,
+      licenseMode: await getLicenseMode(),
+      products: await listProducts(),
+      areas: await listAreas(),
+      areaStock: await listAreaStock(),
+      session: await getOpenSession(),
+    };
+  });
+}
 export async function getAuditSnapshot() {
   return consistentRead(async () => {
     const db = await getDatabase();
@@ -189,7 +246,7 @@ export async function getAuditSnapshot() {
         user: string;
         date: string;
         total: number;
-        method: SaleMethod;
+        method: LegacySaleMethod;
       }>(
         'SELECT id,user,date,total,method FROM sales WHERE date>=? AND date<=? ORDER BY id DESC',
         start,
@@ -236,7 +293,7 @@ export async function createBusinessArchive(username: string): Promise<BusinessA
       app: 'MipyPOS',
       format: 'business-close',
       version: 1,
-      schemaVersion: 6,
+      schemaVersion: 7,
       archiveId: Crypto.randomUUID(),
       createdAt: now(),
       sourceUser: username,
@@ -263,6 +320,17 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
       throw new Error(
         'Importa en un teléfono sin productos, ventas, movimientos ni turnos. No se mezclan negocios.',
       );
+    const auxiliaryData = await db.getFirstAsync(
+      `SELECT 1 FROM users WHERE username<>? COLLATE NOCASE
+      UNION ALL SELECT 1 FROM areas WHERE name<>'Almacén principal' COLLATE NOCASE
+      UNION ALL SELECT 1 FROM audit_log
+      UNION ALL SELECT 1 FROM network_commands LIMIT 1`,
+      username,
+    );
+    if (auxiliaryData)
+      throw new Error(
+        'El teléfono tiene usuarios o historial propio. Usa un destino vacío para conservar esa información.',
+      );
     if (await getSetting('last_archive_id'))
       throw new Error(
         'Este teléfono ya recibió un negocio. No vuelvas a importar el mismo cierre.',
@@ -284,6 +352,15 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
           sale_lines: { unit_cost: null, category: '' },
         };
         if (archive.schemaVersion === 5) Object.assign(row, legacyExtra[table] ?? {});
+        if (table === 'sales' && archive.schemaVersion < 7) {
+          row.legacy_card =
+            row.method === 'card' ||
+            (typeof row.payments === 'string' &&
+              parsePayments(row.payments).some((payment) => payment.type === 'card'))
+              ? 1
+              : 0;
+          row.pricing_basis = null;
+        }
         const keys = Object.keys(row);
         if (keys.length !== columns.length || keys.some((key) => !allowed.has(key)))
           throw new Error('El archivo contiene columnas incompatibles.');
@@ -372,6 +449,7 @@ export async function getDatabase() {
 
 export async function initializeDatabase() {
   const db = await getDatabase();
+  await prepareMigrationBackup(db);
   await db.execAsync(`
     PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;
@@ -379,7 +457,8 @@ export async function initializeDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT NOT NULL COLLATE NOCASE UNIQUE,
       password_hash TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('admin','supervisor','seller','storekeeper','auditor'))
+      role TEXT NOT NULL CHECK(role IN ('admin','supervisor','seller','storekeeper','auditor')),
+      can_authorize_consumption INTEGER NOT NULL DEFAULT 0 CHECK(can_authorize_consumption IN (0,1))
     );
     CREATE TABLE IF NOT EXISTS products (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -429,7 +508,7 @@ export async function initializeDatabase() {
     );
     CREATE TABLE IF NOT EXISTS movements (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      type TEXT NOT NULL CHECK(type IN ('entrada','salida','traslado')),
+      type TEXT NOT NULL CHECK(type IN ('entrada','salida','traslado','CONSUMO_INTERNO','ANULACION_CONSUMO','DEVOLUCION')),
       product_id INTEGER NOT NULL REFERENCES products(id),
       product_name TEXT NOT NULL,
       from_area TEXT,
@@ -497,9 +576,6 @@ export async function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS movement_filters_idx ON movements(product_id, user, from_area, to_area);
   `);
   // Keep upgrades atomic and never downgrade a newer installation.
-  const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
-  if ((version?.user_version ?? 0) > 6)
-    throw new Error('Esta base de datos necesita una versión más reciente de MipyPOS.');
   await transaction(db, async () => {
     const userSchema = await db.getFirstAsync<{ sql: string }>(
       "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'",
@@ -542,8 +618,8 @@ export async function initializeDatabase() {
     await db.execAsync(`
       INSERT OR IGNORE INTO settings(key,value) SELECT 'usage_products',CAST(MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='products'),0),(SELECT COUNT(*) FROM products)) AS TEXT);
       INSERT OR IGNORE INTO settings(key,value) SELECT 'usage_sales',CAST(MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='sales'),0),(SELECT COUNT(*) FROM sales)) AS TEXT);
-      PRAGMA user_version = 6;
     `);
+    await migrateHardening(db);
   });
   const count = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM users');
   if (!count?.count) {
@@ -680,7 +756,7 @@ export async function authenticateForLogin(username: string, password: string) {
 
 export async function listUsers() {
   return (await getDatabase()).getAllAsync<Usuario>(
-    "SELECT id,username,role,'' AS password_hash FROM users ORDER BY username",
+    "SELECT id,username,role,can_authorize_consumption,'' AS password_hash FROM users ORDER BY username",
   );
 }
 export async function saveUser(
@@ -1472,6 +1548,7 @@ export async function findNetworkSale(
   commandId: string,
   clientId: string,
   username: string,
+  fingerprint?: string,
 ): Promise<number | null> {
   const previous = await (
     await getDatabase()
@@ -1482,6 +1559,8 @@ export async function findNetworkSale(
   );
   const parsed = parseJson(previous?.response ?? null);
   if (!isRecord(parsed) || typeof parsed.saleId !== 'number') return null;
+  if (fingerprint && typeof parsed.fingerprint === 'string' && parsed.fingerprint !== fingerprint)
+    throw new Error('El identificador ya pertenece a una venta con otros datos.');
   const sale = await (
     await getDatabase()
   ).getFirstAsync<{ user: string }>('SELECT user FROM sales WHERE id=?', parsed.saleId);
@@ -1498,6 +1577,19 @@ export async function registerSale(
   settlement?: SaleSettlement,
 ) {
   if (!items.length) throw new Error('El carrito está vacío.');
+  const fingerprint = networkCommand
+    ? await saleFingerprint({
+        items: items.map((item) => ({
+          productId: item.product.id,
+          areaId: item.areaId,
+          quantity: item.quantity,
+        })),
+        method,
+        payments,
+        sessionId: expectedSessionId,
+        settlement,
+      })
+    : undefined;
   const db = await getDatabase();
   const total = roundMoney(
     items.reduce((sum, item) => sum + roundMoney(item.price * item.quantity), 0),
@@ -1524,6 +1616,8 @@ export async function registerSale(
         );
         const parsed = parseJson(previous?.response ?? null);
         if (isRecord(parsed) && typeof parsed.saleId === 'number') {
+          if (typeof parsed.fingerprint === 'string' && parsed.fingerprint !== fingerprint)
+            throw new Error('El identificador ya pertenece a una venta con otros datos.');
           const sale = await db.getFirstAsync<{ user: string }>(
             'SELECT user FROM sales WHERE id=?',
             parsed.saleId,
@@ -1570,7 +1664,7 @@ export async function registerSale(
       )
         throw new Error(`La unidad de ${current.name} cambió. Actualiza el carrito.`);
       currentProducts.set(current.id, current);
-      const price = method === 'transfer' ? current.price_transfer : current.price_cash;
+      const price = saleUnitPrice(current, method);
       if (!Number.isFinite(item.price) || Math.abs(item.price - price) > 0.000001)
         throw new Error(`El precio de ${current.name} cambió. Actualiza el carrito.`);
       if (!Number.isInteger(item.areaId)) throw new Error('Selecciona el área de venta.');
@@ -1582,12 +1676,14 @@ export async function registerSale(
       if (!available || available.quantity + 0.000001 < item.quantity)
         throw new Error(`Stock insuficiente de ${current.name} en el área seleccionada.`);
     }
-    const seller = await db.getFirstAsync<{ id: number }>(
-      'SELECT id FROM users WHERE username=? COLLATE NOCASE',
+    const seller = await db.getFirstAsync<{ id: number; role: UserRole }>(
+      'SELECT id,role FROM users WHERE username=? COLLATE NOCASE',
       username,
     );
+    if (!seller || !canAccess(seller.role, 'sales'))
+      throw new Error('Tu usuario no tiene permiso para registrar ventas.');
     const sale = await db.runAsync(
-      'INSERT INTO sales(session_id,user,date,total,method,payments,settlement,seller_id) VALUES(?,?,?,?,?,?,?,?)',
+      'INSERT INTO sales(session_id,user,date,total,method,payments,settlement,seller_id,pricing_basis) VALUES(?,?,?,?,?,?,?,?,?)',
       session.id,
       username,
       now(),
@@ -1596,6 +1692,7 @@ export async function registerSale(
       json(validPayments),
       validSettlement ? json(validSettlement) : null,
       seller?.id ?? null,
+      method === 'transfer' ? 'transfer' : 'cash',
     );
     saleId = sale.lastInsertRowId;
     for (const item of items) {
@@ -1639,7 +1736,7 @@ export async function registerSale(
     if (networkCommand) {
       await db.runAsync(
         'UPDATE network_commands SET response=? WHERE command_id=? AND client_id=?',
-        json({ saleId }),
+        json({ saleId, fingerprint }),
         networkCommand.commandId,
         networkCommand.clientId,
       );
@@ -1744,6 +1841,10 @@ export async function registerMovement(
           main,
           product.id,
           product.stock,
+        );
+      } else if (Math.abs((assigned?.total ?? 0) - product.stock) > 0.001) {
+        throw new Error(
+          'Las existencias por área no coinciden con el inventario. Revisa el producto antes de moverlo.',
         );
       }
       if (input.type === 'entrada') {

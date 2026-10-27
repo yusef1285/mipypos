@@ -37,6 +37,7 @@ type HarnessModules = {
   '@/lib/network/config': typeof import('../lib/network/config');
   '@/lib/csv': typeof import('../lib/csv');
   '@/lib/network/host': typeof import('../lib/network/host');
+  '@/lib/network/validation': typeof import('../lib/network/validation');
   '@/lib/network/tls': typeof import('../lib/network/tls');
   '@/lib/network/pending-sale': typeof import('../lib/network/pending-sale');
 };
@@ -80,8 +81,31 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
       }
     },
   };
+  const backups = new Map<string, Database>();
   const mocks: Record<string, unknown> = {
-    'expo-sqlite': { openDatabaseAsync: async () => adapter },
+    'expo-sqlite': {
+      openDatabaseAsync: async (name: string) =>
+        name === 'mipypos.db'
+          ? adapter
+          : {
+              name,
+              getFirstAsync: async (query: string) => {
+                const copy = backups.get(name);
+                if (!copy) return null;
+                const statement = copy.prepare(query);
+                try {
+                  return statement.step() ? statement.getAsObject() : null;
+                } finally {
+                  statement.free();
+                }
+              },
+              closeAsync: async () => undefined,
+            },
+      backupDatabaseAsync: async ({ destDatabase }: { destDatabase: { name: string } }) => {
+        if (failSql === 'BACKUP') throw new Error('Injected backup failure');
+        backups.set(destDatabase.name, new sql.Database(database.export()));
+      },
+    },
     'expo-crypto': {
       CryptoDigestAlgorithm: { SHA256: 'SHA256' },
       digestStringAsync: async (_algorithm: string, input: string) =>
@@ -140,6 +164,7 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
   }
   return {
     database,
+    backups,
     storage,
     load,
     failWritesContaining: (query: string) => {

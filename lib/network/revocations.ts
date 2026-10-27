@@ -24,9 +24,17 @@ const revocationsSchema = z.array(
 );
 async function load(): Promise<Revocation[]> {
   const data = await getSecret(KEY);
-  return (data ? revocationsSchema.parse(JSON.parse(data)) : []).filter(
-    (entry) => entry.expiresAt > Date.now(),
-  );
+  if (!data) return [];
+  try {
+    return revocationsSchema
+      .parse(JSON.parse(data))
+      .filter((entry) => entry.expiresAt > Date.now());
+  } catch (error) {
+    throw new Error(
+      'No se pudo comprobar el cierre de la sesión anterior. Su registro se conserva; vuelve a intentarlo antes de iniciar otra sesión.',
+      { cause: error },
+    );
+  }
 }
 export function revokeOrDefer(hostUrl: string, hostPin: string, token: string) {
   return serialized(async () => {

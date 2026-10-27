@@ -18,6 +18,7 @@ export interface NetworkConfig {
   hostPin?: string;
   transport?: 'direct' | 'wifi';
   clientId: string;
+  recoveryMessage?: string;
 }
 
 export interface NetworkSession {
@@ -27,6 +28,7 @@ export interface NetworkSession {
 
 export interface NetworkSnapshot {
   revision: number;
+  authorityId?: string;
   licenseMode: import('@/lib/models').LicenseMode;
   products: Producto[];
   areas: Area[];
@@ -56,5 +58,7 @@ export interface ApiResult<T> {
   ok: boolean;
   data?: T;
   error?: string;
-  code?: 'AUTH_EXPIRED' | 'REJECTED';
+  success?: boolean;
+  requestId?: string;
+  code?: 'AUTH_EXPIRED' | 'REJECTED' | 'UNKNOWN_OPERATION' | 'INVALID_ARGUMENTS';
 }

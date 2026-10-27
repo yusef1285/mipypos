@@ -31,8 +31,9 @@ import { usePosRepository } from '@/lib/use-pos-repository';
 import { createThermalTicket } from '@/lib/ticket';
 import { roundMoney, roundQuantity, validateQuantity } from '@/lib/units';
 import { trackSaleDraft, clearSaleDraft } from '@/lib/sale-draft';
+import { saleUnitPrice } from '@/lib/sale-pricing';
 
-const methods: Array<{ key: Exclude<PaymentType, 'card'>; label: string }> = [
+const methods: Array<{ key: PaymentType; label: string }> = [
   { key: 'cash', label: 'Efectivo' },
   { key: 'transfer', label: 'Transferencia' },
 ];
@@ -55,8 +56,8 @@ export default function Sales() {
     return () => clearSaleDraft(owner);
   }, [cart, user, networkConfig.clientId]);
   const [drafts, setDrafts] = useState<Record<number, string>>({});
-  const [method, setMethod] = useState<Exclude<SaleMethod, 'card'>>('cash');
-  const [amounts, setAmounts] = useState<Record<Exclude<PaymentType, 'card'>, string>>({
+  const [method, setMethod] = useState<SaleMethod>('cash');
+  const [amounts, setAmounts] = useState<Record<PaymentType, string>>({
     cash: '',
     transfer: '',
   });
@@ -158,11 +159,11 @@ export default function Sales() {
           areaId,
           product,
           quantity,
-          price: method === 'transfer' ? product.price_transfer : product.price_cash,
+          price: saleUnitPrice(product, method),
         },
       ]);
   };
-  const chooseMethod = (next: Exclude<SaleMethod, 'card'>) => {
+  const chooseMethod = (next: SaleMethod) => {
     if (saving || pendingSale) return;
     void Haptics.selectionAsync();
     setMethod(next);
@@ -171,7 +172,7 @@ export default function Sales() {
     setCart((current) =>
       current.map((item) => ({
         ...item,
-        price: next === 'transfer' ? item.product.price_transfer : item.product.price_cash,
+        price: saleUnitPrice(item.product, next),
       })),
     );
     setAmounts({ cash: '', transfer: '' });
@@ -507,8 +508,7 @@ export default function Sales() {
               <Typography.Paragraph className="font-semibold">{product.name}</Typography.Paragraph>
               <Typography.Paragraph type="body-sm" color="muted">
                 {available.get(product.id) ?? 0} {product.unit} disponibles ·{' '}
-                {money(method === 'transfer' ? product.price_transfer : product.price_cash)} /{' '}
-                {product.unit}
+                {money(saleUnitPrice(product, method))} / {product.unit}
               </Typography.Paragraph>
             </View>
             <Button

@@ -1,5 +1,5 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
-import type { Producto, Usuario, LineaVenta, Payment } from '@/lib/models';
+import type { Producto, Usuario, LineaVenta, LegacyPayment } from '@/lib/models';
 import type {
   AuthorizationProof,
   ConsumptionInput,
@@ -409,7 +409,7 @@ export async function adjustSale(db: SQLiteDatabase, input: SaleAdjustmentInput,
   );
   const selected = input.kind === 'anulacion' ? lines : lines.filter((l) => l.id === input.lineId);
   if (!selected.length) throw new Error('Selecciona una línea de venta.');
-  const originalPayments = JSON.parse(sale.payments) as Payment[];
+  const originalPayments = JSON.parse(sale.payments) as LegacyPayment[];
   let totalRefund = 0;
   const date = new Date().toISOString();
   for (const line of selected) {
@@ -454,7 +454,7 @@ export async function adjustSale(db: SQLiteDatabase, input: SaleAdjustmentInput,
       await stock(db, p.id, line.area_id, q);
       await movement(db, p, line.area_id, q, 'DEVOLUCION', actor, date);
     }
-    const refunds: Payment[] = originalPayments.map((payment, i) => ({
+    const refunds: LegacyPayment[] = originalPayments.map((payment, i) => ({
       type: payment.type,
       amount:
         i === originalPayments.length - 1 ? 0 : roundMoney((amount * payment.amount) / sale.total),

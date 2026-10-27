@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import * as Crypto from 'expo-crypto';
+import { getNetworkReplica, storeNetworkReplica } from '@/lib/database';
+import { parseSnapshot, unchangedSnapshotSchema } from '@/lib/network/snapshot';
 import { pinnedRequest } from '@/lib/network/tls';
 import type { DailyReport, Payment, Producto, SaleMethod, SesionCaja } from '@/lib/models';
 import {
@@ -8,12 +11,7 @@ import {
   loadNetworkConfig,
 } from '@/lib/network/config';
 import { flushRevocations, revokeOrDefer } from '@/lib/network/revocations';
-import type {
-  ApiResult,
-  NetworkSaleCommand,
-  NetworkSession,
-  NetworkSnapshot,
-} from '@/lib/network/types';
+import type { NetworkSaleCommand, NetworkSession, NetworkSnapshot } from '@/lib/network/types';
 
 import {
   mutationOperations,
@@ -91,19 +89,29 @@ export class HostRejection extends Error {
 }
 
 async function request<T>(hostUrl: string, path: string, body: object): Promise<T> {
-  const result = JSON.parse(await pinnedRequest(hostUrl, path, body)) as ApiResult<T>;
-  if (!result || typeof result.ok !== 'boolean')
-    throw new Error('No se pudo confirmar la respuesta del administrador.');
-  if (!result.ok) {
-    if (result.code === 'AUTH_EXPIRED') await clearNetworkToken();
+  const result: unknown = JSON.parse(await pinnedRequest(hostUrl, path, body));
+  const envelope = z
+    .discriminatedUnion('ok', [
+      z.object({ ok: z.literal(true), data: z.unknown() }),
+      z.object({
+        ok: z.literal(false),
+        code: z.enum(['AUTH_EXPIRED', 'REJECTED', 'UNKNOWN_OPERATION', 'INVALID_ARGUMENTS']),
+        error: z.string().min(1),
+      }),
+    ])
+    .safeParse(result);
+  if (!envelope.success) throw new Error('No se pudo confirmar la respuesta del administrador.');
+  const confirmed = envelope.data;
+  if (!confirmed.ok) {
+    if (confirmed.code === 'AUTH_EXPIRED') await clearNetworkToken();
     throw new HostRejection(
-      result.error ?? 'El administrador rechazó la operación.',
-      result.code ?? 'REJECTED',
+      confirmed.error,
+      confirmed.code === 'AUTH_EXPIRED' ? 'AUTH_EXPIRED' : 'REJECTED',
     );
   }
-  if (result.data === undefined)
+  if (confirmed.data === undefined)
     throw new Error('No se pudo confirmar la respuesta del administrador.');
-  return result.data;
+  return confirmed.data as T;
 }
 
 export async function loginToHost(hostUrl: string, username: string, password: string) {
@@ -137,19 +145,54 @@ export async function logoutFromHost(hostUrl?: string, hostPin?: string) {
 }
 
 const snapshotRequests = new Map<string, Promise<NetworkSnapshot>>();
-export function getHostSnapshot(hostUrl: string): Promise<NetworkSnapshot> {
-  const existing = snapshotRequests.get(hostUrl);
+export async function getHostSnapshot(hostUrl: string): Promise<NetworkSnapshot> {
+  const token = await getNetworkToken();
+  if (!token)
+    throw new HostRejection(
+      'Inicia sesión nuevamente en el teléfono administrador.',
+      'AUTH_EXPIRED',
+    );
+  // A cache/in-flight request belongs to the authenticated bearer, not only the
+  // URL. Switching accounts must never reuse an administrator's unredacted data.
+  const cacheKey = await Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    JSON.stringify([hostUrl, token]),
+  );
+  const existing = snapshotRequests.get(cacheKey);
   if (existing) return existing;
   const pending = (async () => {
-    const token = await getNetworkToken();
-    if (!token)
-      throw new HostRejection(
-        'Inicia sesión nuevamente en el teléfono administrador.',
-        'AUTH_EXPIRED',
-      );
-    return request<NetworkSnapshot>(hostUrl, '/v1/snapshot', { token });
-  })().finally(() => snapshotRequests.delete(hostUrl));
-  snapshotRequests.set(hostUrl, pending);
+    const stored = await getNetworkReplica(cacheKey);
+    let cached: NetworkSnapshot | null = null;
+    if (stored) {
+      try {
+        cached = parseSnapshot(JSON.parse(stored.payload));
+      } catch {
+        cached = null;
+      }
+    }
+    const response = await request<unknown>(hostUrl, '/v1/snapshot', {
+      token,
+      ...(cached?.authorityId
+        ? { knownRevision: cached.revision, authorityId: cached.authorityId }
+        : {}),
+    });
+    const unchanged = unchangedSnapshotSchema.safeParse(response);
+    if (unchanged.success) {
+      if (
+        !cached ||
+        cached.revision !== unchanged.data.revision ||
+        cached.authorityId !== unchanged.data.authorityId
+      )
+        throw new Error(
+          'La revisión recibida no coincide con la copia local. Vuelve a intentarlo.',
+        );
+      return cached;
+    }
+    const snapshot = parseSnapshot(response);
+    await storeNetworkReplica(cacheKey, JSON.stringify(snapshot));
+    return snapshot;
+  })().finally(() => snapshotRequests.delete(cacheKey));
+  snapshotRequests.set(cacheKey, pending);
   return pending;
 }
 
@@ -163,8 +206,11 @@ export async function registerHostSale(
       'Inicia sesión nuevamente en el teléfono administrador.',
       'AUTH_EXPIRED',
     );
-  const result = await request<{ saleId: number }>(hostUrl, '/v1/sale', { ...input, token });
-  return result.saleId;
+  const result = await request<unknown>(hostUrl, '/v1/sale', { ...input, token });
+  const confirmed = z.object({ saleId: z.number().int().positive() }).safeParse(result);
+  if (!confirmed.success)
+    throw new Error('No se pudo confirmar el número de venta. La operación sigue pendiente.');
+  return confirmed.data.saleId;
 }
 
 export async function listHostProducts(hostUrl: string, search = ''): Promise<Producto[]> {

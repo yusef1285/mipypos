@@ -19,11 +19,29 @@ export function usePosRepository(): Repository {
         handler: (...args: PosArgs<K>) => Promise<PosResult<K>>,
       ): ((...args: PosArgs<K>) => Promise<PosResult<K>>) =>
       (...args: PosArgs<K>): Promise<PosResult<K>> => {
-        const restricted = ['investment', 'profitability', 'users', 'consumption'].includes(
-          operationPermissions[operation],
-        );
-        if (restricted && !canAccess(user?.role, operationPermissions[operation]))
-          return Promise.reject(new Error('Acceso restringido.'));
+        const auditReads = [
+          'listProducts',
+          'listAreas',
+          'listAreaStock',
+          'listMovements',
+          'getCashClosurePreview',
+          'listCashClosures',
+          'getDailyReport',
+          'getHomeSummary',
+          'getExportRows',
+          'getSale',
+          'getDemoUsage',
+          'getAuditSnapshot',
+        ];
+        const module =
+          operation === 'getExportRows' && args[0] === 'inventory'
+            ? 'products'
+            : operationPermissions[operation];
+        if (
+          !canAccess(user?.role, module) &&
+          !(user?.role === 'auditor' && auditReads.includes(operation))
+        )
+          return Promise.reject(new Error('Tu usuario no tiene permiso para esta operación.'));
         if (
           user?.role === 'auditor' &&
           (mutationOperations.has(operation) || operation === 'registerCashWithdrawal')
