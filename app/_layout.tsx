@@ -26,6 +26,9 @@ import { registerServiceWorker } from '@/lib/registerServiceWorker';
 import { reportErrorToParent } from '@/lib/reportPreviewError';
 import { InstallPrompt } from '@/components/InstallPrompt';
 import { AppProvider } from '@/lib/app-context';
+import { registerColorTokens } from '@/lib/registerColorTokens';
+
+registerColorTokens();
 
 /**
  * Custom ErrorBoundary that reports React render errors to the parent window (Bilt preview iframe)

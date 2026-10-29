@@ -317,7 +317,7 @@ export default function FinanceDashboard({ sellers = false }: { sellers?: boolea
                 </Button>
               }
             />
-          ) : null
+          ) : undefined
         }
       />
     </Screen>

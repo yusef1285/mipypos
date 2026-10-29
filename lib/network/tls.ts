@@ -93,25 +93,24 @@ export class SecureLanServer {
   async listen(ip: string, port: number) {
     const native = nativeTls();
     this.native = native;
-    this.subscription = new NativeEventEmitter(native).addListener(
-      'MipyTlsRequest',
-      (request: TlsRequest) => {
-        void (async () => {
-          try {
-            const handler = this.routes.get(`${request.method} ${request.path}`);
-            const result = handler
-              ? await handler({ data: JSON.parse(request.body) as never })
-              : { ok: false, code: 'REJECTED', error: 'Ruta o método no válido.' };
-            native.respond(request.id, JSON.stringify(result));
-          } catch {
-            native.respond(
-              request.id,
-              JSON.stringify({ ok: false, code: 'REJECTED', error: 'Solicitud no válida.' }),
-            );
-          }
-        })();
-      },
-    );
+    this.subscription = new NativeEventEmitter<{ MipyTlsRequest: [TlsRequest] }>(
+      native,
+    ).addListener('MipyTlsRequest', (request: TlsRequest) => {
+      void (async () => {
+        try {
+          const handler = this.routes.get(`${request.method} ${request.path}`);
+          const result = handler
+            ? await handler({ data: JSON.parse(request.body) as never })
+            : { ok: false, code: 'REJECTED', error: 'Ruta o método no válido.' };
+          native.respond(request.id, JSON.stringify(result));
+        } catch {
+          native.respond(
+            request.id,
+            JSON.stringify({ ok: false, code: 'REJECTED', error: 'Solicitud no válida.' }),
+          );
+        }
+      })();
+    });
     try {
       hostPin = await native.start(ip, port);
       hostUrl = `https://${ip}:${port}`;

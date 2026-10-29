@@ -214,7 +214,7 @@ export default function Reports() {
                 <Button.Label>Reintentar</Button.Label>
               </Button>
             </View>
-          ) : null
+          ) : undefined
         }
       />
     </Screen>

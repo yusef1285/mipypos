@@ -36,7 +36,7 @@ export async function exportRows(
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, sheet, 'MipyPOS');
     const data = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' });
-    file.write(new Uint8Array(data));
+    await file.write(new Uint8Array(data));
   } else {
     const keys = Object.keys(rows[0]);
     const content =
@@ -50,7 +50,7 @@ export async function exportRows(
               keys.map((key) => `${key}: ${cellText(getCellValue(row, key))}`).join(' | '),
             )
             .join('\n');
-    file.write(content);
+    await file.write(content);
   }
   if (!(await Sharing.isAvailableAsync()))
     throw new Error('No se puede compartir archivos en este dispositivo.');

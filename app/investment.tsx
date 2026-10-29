@@ -347,7 +347,7 @@ export default function Investment() {
                 )
               }
             />
-          ) : null
+          ) : undefined
         }
       />
     </Screen>

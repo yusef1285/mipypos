@@ -351,7 +351,7 @@ export default function Consumption() {
                 </Button>
               }
             />
-          ) : null
+          ) : undefined
         }
       />
     </Screen>

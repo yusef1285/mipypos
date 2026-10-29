@@ -40,7 +40,7 @@ export async function shareBusinessArchive(username: string) {
     `mipypos-cierre-${archive.createdAt.replaceAll(':', '-')}.json`,
   );
   file.create({ overwrite: true });
-  file.write(JSON.stringify({ app: 'MipyPOS', payload, sha256 }));
+  await file.write(JSON.stringify({ app: 'MipyPOS', payload, sha256 }));
   if (file.size > 150 * 1024 * 1024)
     throw new Error(
       'El cierre supera los 150 MB que puede recibir otro teléfono. No se compartió el archivo.',
