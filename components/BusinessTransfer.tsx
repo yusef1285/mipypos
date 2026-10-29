@@ -49,9 +49,9 @@ export function BusinessTransfer() {
     <Card className="gap-4 p-4">
       <Typography.Heading type="h4">Continuar en otro teléfono</Typography.Heading>
       <Typography.Paragraph>
-        El archivo incluye usuarios, ventas, comprobantes, cierres y existencias. La licencia
-        permanece en cada teléfono. Envíalo solo a una persona autorizada: contiene datos personales
-        y credenciales de acceso.
+        El archivo incluye usuarios, ventas, comprobantes, cierres y existencias, pero no
+        contraseñas ni hashes de acceso. La licencia permanece en cada teléfono. Compártelo solo con
+        personas autorizadas: contiene información comercial y datos personales.
       </Typography.Paragraph>
       <Typography.Paragraph type="body-sm" color="muted">
         Cierra la caja y deja de operar en el teléfono anterior. Recibe el archivo en un teléfono
@@ -86,6 +86,20 @@ export function BusinessTransfer() {
             {incoming.tables.products.length === 1 ? 'producto' : 'productos'} ·{' '}
             {incoming.tables.sales.length} {incoming.tables.sales.length === 1 ? 'venta' : 'ventas'}{' '}
             · Fondo próximo: {money(incoming.openingFund)}
+          </Typography.Paragraph>
+          <Typography.Paragraph type="body-sm">
+            Al importar, inicia sesión como{' '}
+            {String(
+              incoming.tables.users.find(
+                (account) => account.role === 'admin' && account.username === incoming.sourceUser,
+              )?.username ??
+                incoming.tables.users.find((account) => account.role === 'admin')?.username,
+            )}{' '}
+            con la contraseña del administrador de este teléfono. Después asigna nuevas contraseñas
+            al resto de usuarios en Usuarios.
+            {incoming.version === 1
+              ? ' El archivo antiguo contiene hashes de acceso; no se reutilizarán. Elimina las copias compartidas cuando termines.'
+              : ''}
           </Typography.Paragraph>
           <Button
             isDisabled={busy}

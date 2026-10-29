@@ -364,7 +364,7 @@ void test('receipt confirma cambio de rol propio sin repetir una operación ya c
     ),
     (error: unknown) =>
       error instanceof f.client.HostRejection &&
-      error.code === 'REJECTED' &&
+      error.code === 'NOT_COMMITTED' &&
       /al menos un administrador/.test(error.message),
   );
   assert.equal(await pending.getPendingOperation(), null);
@@ -502,7 +502,7 @@ void test('rejection elimina pending; timeout o respuesta incompleta lo conserva
   const f = await lanFixture();
   await assert.rejects(
     f.client.requestHostOperation(url, 'addArea', [''], 'admin', 'terminal-a'),
-    /obligatorio/,
+    /Revisa los datos|obligatorio/,
   );
   assert.equal(await f.load('@/lib/network/pending-operation').getPendingOperation(), null);
   const other = createHarness({ '@/lib/network/tls': { pinnedRequest: async () => '{}' } });
@@ -1103,8 +1103,16 @@ void test('UUID de venta liga contenido original y replay no incrementa revisió
 });
 void test('respuesta de venta sin ID o rechazo incompleto conserva pendiente', async () => {
   for (const response of [{ ok: true, data: {} }, { ok: false }]) {
+    const requestedPaths: string[] = [];
     const h = createHarness({
-      '@/lib/network/tls': { pinnedRequest: async () => JSON.stringify(response) },
+      '@/lib/network/tls': {
+        pinnedRequest: async (_hostUrl: string, path: string) => {
+          requestedPaths.push(path);
+          return JSON.stringify(
+            path === '/v1/sale-receipt' ? { ok: true, data: { saleId: null } } : response,
+          );
+        },
+      },
     });
     const config = h.load('@/lib/network/config');
     await config.saveNetworkToken('token-valid');
@@ -1120,6 +1128,410 @@ void test('respuesta de venta sin ID o rechazo incompleto conserva pendiente', a
       }),
       /confirmar/,
     );
+    assert.deepEqual(requestedPaths, ['/v1/sale-receipt', '/v1/sale']);
     assert.ok(await pending.getPendingSale());
+  }
+});
+
+void test('journal cifrado recupera una copia dañada sin cambiar UUID y no resucita una confirmación', async () => {
+  const h = createHarness();
+  const pending = h.load('@/lib/network/pending-operation');
+  const input = {
+    hostUrl: url,
+    username: 'admin',
+    clientId: 'terminal-a',
+    operation: 'saveUser' as const,
+    args: [
+      { username: 'vendedor', password: 'dato-muy-privado-123', role: 'seller' },
+    ] satisfies PosArgs<'saveUser'>,
+  };
+  const first = await pending.prepareOperation(input);
+  const a = 'mipypos.pending-operation.journal.a';
+  const b = 'mipypos.pending-operation.journal.b';
+  assert.equal(h.storage.get(a), h.storage.get(b));
+  assert.ok(!h.storage.get(a)?.includes('dato-muy-privado-123'));
+  h.storage.set(a, 'copia dañada');
+  assert.equal((await pending.getPendingOperation())?.commandId, first.commandId);
+  assert.equal(h.storage.get(`${a}.damaged`), 'copia dañada');
+  assert.equal(h.storage.get(a), h.storage.get(b));
+  const old = h.storage.get(a)!;
+  await pending.clearPendingOperation();
+  h.storage.set(a, old);
+  assert.equal(await pending.getPendingOperation(), null);
+  assert.equal(h.storage.get(a), h.storage.get(b));
+});
+void test('journal con dos copias dañadas o clave perdida conserva evidencia y no envía', async () => {
+  for (const lostKey of [false, true]) {
+    const h = createHarness();
+    const p = h.load('@/lib/network/pending-operation');
+    await p.prepareOperation({
+      hostUrl: url,
+      username: 'admin',
+      clientId: 'terminal-a',
+      operation: 'addArea',
+      args: ['Recuperación'],
+    });
+    const a = 'mipypos.pending-operation.journal.a';
+    const b = 'mipypos.pending-operation.journal.b';
+    if (lostKey) h.storage.delete('secure:mipypos.pending-operation.aes-key');
+    else {
+      h.storage.set(a, 'dañada a');
+      h.storage.set(b, 'dañada b');
+    }
+    const storedCopiesBefore = [h.storage.get(a), h.storage.get(b)];
+    await assert.rejects(p.getPendingOperation(), /conserva sin reenviarlo/);
+    assert.deepEqual([h.storage.get(a), h.storage.get(b)], storedCopiesBefore);
+  }
+});
+void test('migración de pendiente inválido mantiene el original y no genera una copia', async () => {
+  const h = createHarness();
+  h.storage.set('mipypos.pendingWithdrawal.v1', '{truncado');
+  await assert.rejects(
+    h.load('@/lib/network/pending-withdrawal').getPendingWithdrawal(),
+    /conserva/,
+  );
+  assert.equal(h.storage.get('mipypos.pendingWithdrawal.v1'), '{truncado');
+  assert.equal(h.storage.has('mipypos.pendingWithdrawal.v1.journal.a'), false);
+});
+void test('huella alterada en pendiente antiguo no se reenvía ni se descarta', async () => {
+  const h = createHarness();
+  const raw = JSON.stringify({
+    hostUrl: url,
+    username: 'admin',
+    clientId: 'terminal-a',
+    commandId: 'original',
+    operation: 'addArea',
+    args: ['A'],
+    fingerprint: 'incorrecta',
+  });
+  h.storage.set('secure:mipypos.pending-operation', raw);
+  await assert.rejects(h.load('@/lib/network/pending-operation').getPendingOperation(), /conserva/);
+  assert.equal(h.storage.get('secure:mipypos.pending-operation'), raw);
+});
+void test('rechazo de lookup nunca elimina una mutación de resultado incierto', async () => {
+  const f = await lanFixture();
+  f.loseNextResponse();
+  await assert.rejects(
+    f.client.requestHostOperation(url, 'addArea', ['ACK incierto'], 'admin', 'terminal-a'),
+  );
+  const p = f.load('@/lib/network/pending-operation');
+  const id = (await p.getPendingOperation())?.commandId;
+  const receipt = f.routes.get('/v1/receipt')!;
+  f.routes.set('/v1/receipt', async () => ({
+    ok: false,
+    code: 'REJECTED',
+    error: 'No se pudo leer el recibo.',
+  }));
+  await assert.rejects(
+    f.client.requestHostOperation(url, 'addArea', ['ACK incierto'], 'admin', 'terminal-a'),
+  );
+  assert.equal((await p.getPendingOperation())?.commandId, id);
+  f.routes.set('/v1/receipt', receipt);
+  await f.client.requestHostOperation(url, 'addArea', ['ACK incierto'], 'admin', 'terminal-a');
+  assert.equal(await p.getPendingOperation(), null);
+  assert.equal((await f.db.listAreas()).filter((area) => area.name === 'ACK incierto').length, 1);
+});
+void test('logout elimina replicas de todas las sesiones sin eliminar pendientes', async () => {
+  const f = await lanFixture();
+  await f.client.getHostSnapshot(url);
+  assert.equal(f.database.exec('SELECT COUNT(*) FROM network_replica')[0].values[0][0], 1);
+  await f.load('@/lib/network/pending-operation').prepareOperation({
+    hostUrl: url,
+    username: 'admin',
+    clientId: 'terminal-a',
+    operation: 'addArea',
+    args: ['Por confirmar'],
+  });
+  await f.client.logoutFromHost(url, pin);
+  assert.equal(f.database.exec('SELECT COUNT(*) FROM network_replica')[0].values[0][0], 0);
+  assert.ok(await f.load('@/lib/network/pending-operation').getPendingOperation());
+});
+void test('snapshot rechaza referencias huérfanas, pares duplicados y stock diferente', async () => {
+  const f = await fixture();
+  await f.db.saveProduct(base, 'admin');
+  const snapshot = await f.db.getSharedSnapshot();
+  const parse = f.load('@/lib/network/snapshot').parseSnapshot;
+  assert.doesNotThrow(() => parse(snapshot));
+  for (const value of [
+    { ...snapshot, areaStock: [...snapshot.areaStock, snapshot.areaStock[0]] },
+    { ...snapshot, areaStock: [{ ...snapshot.areaStock[0], area_id: 999 }] },
+    { ...snapshot, products: [...snapshot.products, snapshot.products[0]] },
+    { ...snapshot, areaStock: [] },
+  ])
+    assert.throws(() => parse(value), /inconsistentes/);
+});
+void test('descubrimiento no confía en nombres ni direcciones: requiere pin previo y TLS', async () => {
+  const checked: Array<{ address: string; pin: string }> = [];
+  const h = createHarness({
+    'react-native': {
+      Platform: { OS: 'android' },
+      NativeModules: {
+        MipyDiscovery: {
+          advertise: async () => undefined,
+          stopAdvertisement: async () => undefined,
+          cancelDiscovery: async () => undefined,
+          discover: async () => [
+            { name: 'MipyPOS-impostor', hostUrl: 'https://192.168.43.2:8787' },
+            { name: 'MipyPOS-real', hostUrl: url },
+          ],
+        },
+      },
+    },
+    '@/lib/network/client': {
+      checkLanHost: async (address: string, paired: string) => {
+        checked.push({ address, pin: paired });
+        if (address !== url) throw new Error('Pin incorrecto');
+      },
+    },
+  });
+  const discovery = h.load('@/lib/network/discovery');
+  await assert.rejects(discovery.findPairedLanHost(''), /QR/);
+  assert.equal(checked.length, 0);
+  assert.equal(await discovery.findPairedLanHost(pin), url);
+  assert.ok(checked.every((entry) => entry.pin === pin));
+});
+void test('venta LAN con respuesta perdida se confirma por recibo sin volver a descontar stock', async () => {
+  const f = await lanFixture();
+  const productId = await f.db.saveProduct(base, 'admin');
+  const sessionId = await f.db.openCashSession(0, 'admin');
+  const saleRoute = f.routes.get('/v1/sale')!;
+  let lost = true;
+  f.routes.set('/v1/sale', async (request) => {
+    const result = await saleRoute(request);
+    if (lost) {
+      lost = false;
+      throw new Error('ACK perdido');
+    }
+    return result;
+  });
+  const pending = f.load('@/lib/network/pending-sale');
+  const config = await f.config.loadNetworkConfig();
+  await assert.rejects(
+    pending.createPendingSale(config, 'admin', {
+      method: 'cash',
+      sessionId,
+      items: [{ productId, areaId: 1, quantity: 1 }],
+      payments: [{ type: 'cash', amount: 100 }],
+      settlement: { cashReceived: 100, transferReceipt: null },
+    }),
+    /ACK perdido/,
+  );
+  const originalId = (await pending.getPendingSale())?.command.commandId;
+  assert.ok(originalId);
+  const saleId = await pending.sendPendingSale(config, 'admin');
+  assert.ok(saleId > 0);
+  assert.equal(await pending.getPendingSale(), null);
+  assert.equal(f.calls.filter((call) => call.path === '/v1/sale').length, 1);
+  assert.equal((await f.db.getProduct(productId))?.stock, 9);
+  assert.equal((await f.db.getDemoUsage()).sales, 1);
+});
+void test('retiro LAN con respuesta perdida recupera recibo sin repetir la salida de caja', async () => {
+  const f = await lanFixture();
+  const sessionId = await f.db.openCashSession(100, 'admin');
+  const pending = f.load('@/lib/network/pending-withdrawal');
+  const values = {
+    authority: url,
+    username: 'admin',
+    sessionId,
+    amount: 10,
+    reason: 'Entrega autorizada',
+  };
+  const credentials = { adminUsername: 'admin', adminPassword: 'admin-securo-123' };
+  const register = (
+    id: number,
+    input: import('../lib/models').CashWithdrawalInput,
+    username: string,
+  ) =>
+    f.client.requestHostOperation(
+      url,
+      'registerCashWithdrawal',
+      [id, input, username],
+      username,
+      'terminal-a',
+    );
+  f.loseNextResponse();
+  await assert.rejects(pending.submitWithdrawal(values, credentials, register), /perdida/);
+  assert.ok(await pending.getPendingWithdrawal());
+  await pending.submitWithdrawal(values, credentials, register);
+  assert.equal(await pending.getPendingWithdrawal(), null);
+  assert.equal((await f.db.getCashSummary(sessionId)).withdrawalTotal, 10);
+  assert.equal(f.database.exec('SELECT COUNT(*) FROM cash_withdrawals')[0].values[0][0], 1);
+});
+void test('rechazo posterior a commit no elimina una venta ni produce un segundo cobro', async () => {
+  const f = await lanFixture();
+  const productId = await f.db.saveProduct(base, 'admin');
+  const sessionId = await f.db.openCashSession(0, 'admin');
+  const saleRoute = f.routes.get('/v1/sale')!;
+  f.routes.set('/v1/sale', async (request) => {
+    await saleRoute(request);
+    return { ok: false, code: 'REJECTED', error: 'No se pudo construir la respuesta.' };
+  });
+  const pending = f.load('@/lib/network/pending-sale');
+  const saleId = await pending.createPendingSale(await f.config.loadNetworkConfig(), 'admin', {
+    method: 'cash',
+    sessionId,
+    items: [{ productId, areaId: 1, quantity: 1 }],
+    payments: [{ type: 'cash', amount: 100 }],
+    settlement: { cashReceived: 100, transferReceipt: null },
+  });
+  assert.ok(saleId > 0);
+  assert.equal(await pending.getPendingSale(), null);
+  assert.equal((await f.db.getProduct(productId))?.stock, 9);
+  assert.equal((await f.db.getDemoUsage()).sales, 1);
+});
+void test('respuesta snapshot atrasada tras logout no repuebla la replica ni se devuelve', async () => {
+  const f = await lanFixture();
+  const route = f.routes.get('/v1/snapshot')!;
+  let release!: () => void;
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.routes.set('/v1/snapshot', async (request) => {
+    const result = await route(request);
+    started();
+    await barrier;
+    return result;
+  });
+  const response = f.client.getHostSnapshot(url);
+  const rejected = assert.rejects(response, /sesión cambió/);
+  await begun;
+  await f.client.logoutFromHost(url, pin);
+  release();
+  await rejected;
+  assert.equal(f.database.exec('SELECT COUNT(*) FROM network_replica')[0].values[0][0], 0);
+});
+void test('AUTH_EXPIRED atrasado no cierra una nueva sesión válida', async () => {
+  const f = await lanFixture();
+  let release!: () => void;
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.routes.set('/v1/report', async () => {
+    started();
+    await barrier;
+    return { ok: false, code: 'AUTH_EXPIRED', error: 'Sesión anterior vencida.' };
+  });
+  const response = f.client.getHostReport(url);
+  const rejected = assert.rejects(response, /vencida/);
+  await begun;
+  await f.client.loginToHost(url, 'admin', 'admin-securo-123');
+  const token = await f.config.getNetworkToken();
+  release();
+  await rejected;
+  assert.equal(await f.config.getNetworkToken(), token);
+});
+void test('comprobante grande migra cifrado, recupera copia y mantiene UUID', async () => {
+  const h = createHarness();
+  const key = 'mipypos.pendingLanSale.v2';
+  const record = {
+    hostUrl: url,
+    username: 'admin',
+    command: {
+      commandId: 'comprobante-original',
+      clientId: 'terminal-a',
+      sessionId: 1,
+      method: 'transfer',
+      payments: [{ type: 'transfer', amount: 100 }],
+      items: [{ productId: 1, areaId: 1, quantity: 1 }],
+      settlement: {
+        cashReceived: null,
+        transferReceipt: {
+          ci: '',
+          fullName: 'Datos privados del comprador',
+          address: '',
+          amount: 100,
+          rawText: '',
+          reference: 'TRANSFERENCIA-ORIGINAL',
+          receiptDate: '',
+          imageBase64: 'A'.repeat(500000),
+          reviewed: true,
+        },
+      },
+    },
+  };
+  h.storage.set(key, JSON.stringify(record));
+  const p = h.load('@/lib/network/pending-sale');
+  assert.deepEqual(await p.getPendingSale(), record);
+  assert.equal(h.storage.has(key), false);
+  assert.ok(!h.storage.get(`${key}.journal.a`)?.includes('Datos privados del comprador'));
+  h.storage.set(`${key}.journal.b`, 'dañada');
+  assert.equal((await p.getPendingSale())?.command.commandId, record.command.commandId);
+});
+void test('recibo de operación malformado muestra mensaje legible y conserva pendiente', async () => {
+  for (const data of [{}, { found: true }, { found: 'sí', value: 1 }]) {
+    const f = await lanFixture();
+    f.routes.set('/v1/receipt', async () => ({ ok: true, data }));
+    await assert.rejects(
+      f.client.requestHostOperation(url, 'addArea', ['Sin confirmar'], 'admin', 'terminal-a'),
+      { message: 'No se pudo confirmar la operación pendiente.' },
+    );
+    assert.ok(await f.load('@/lib/network/pending-operation').getPendingOperation());
+    assert.equal(f.calls.filter((call) => call.path === '/v1/operation').length, 0);
+    assert.equal(
+      (await f.db.listAreas()).filter((area) => area.name === 'Sin confirmar').length,
+      0,
+    );
+  }
+});
+void test('recibo de venta malformado muestra mensaje legible y conserva pendiente', async () => {
+  for (const data of [{}, { saleId: 0 }, { saleId: '1' }]) {
+    const f = await lanFixture();
+    const productId = await f.db.saveProduct(base, 'admin');
+    const sessionId = await f.db.openCashSession(0, 'admin');
+    f.routes.set('/v1/sale-receipt', async () => ({ ok: true, data }));
+    const pending = f.load('@/lib/network/pending-sale');
+    await assert.rejects(
+      pending.createPendingSale(await f.config.loadNetworkConfig(), 'admin', {
+        method: 'cash',
+        sessionId,
+        items: [{ productId, areaId: 1, quantity: 1 }],
+        payments: [{ type: 'cash', amount: 100 }],
+        settlement: { cashReceived: 100, transferReceipt: null },
+      }),
+      { message: 'No se pudo confirmar la venta pendiente.' },
+    );
+    assert.ok(await pending.getPendingSale());
+    assert.equal(f.calls.filter((call) => call.path === '/v1/sale').length, 0);
+    assert.equal((await f.db.getProduct(productId))?.stock, 10);
+    assert.equal((await f.db.getDemoUsage()).sales, 0);
+  }
+});
+void test('recibo de retiro malformado muestra mensaje legible y conserva pendiente', async () => {
+  for (const data of [{}, { withdrawalId: 0 }, { withdrawalId: '1' }]) {
+    const f = await lanFixture();
+    const sessionId = await f.db.openCashSession(100, 'admin');
+    f.routes.set('/v1/withdrawal-receipt', async () => ({ ok: true, data }));
+    const pending = f.load('@/lib/network/pending-withdrawal');
+    const register = (
+      id: number,
+      input: import('../lib/models').CashWithdrawalInput,
+      username: string,
+    ) =>
+      f.client.requestHostOperation(
+        url,
+        'registerCashWithdrawal',
+        [id, input, username],
+        username,
+        'terminal-a',
+      );
+    await assert.rejects(
+      pending.submitWithdrawal(
+        { authority: url, username: 'admin', sessionId, amount: 10, reason: 'Entrega autorizada' },
+        { adminUsername: 'admin', adminPassword: 'admin-securo-123' },
+        register,
+      ),
+      { message: 'No se pudo confirmar la extracción pendiente.' },
+    );
+    assert.ok(await pending.getPendingWithdrawal());
+    assert.equal(f.calls.filter((call) => call.path === '/v1/operation').length, 0);
+    assert.equal((await f.db.getCashSummary(sessionId)).withdrawalTotal, 0);
   }
 });

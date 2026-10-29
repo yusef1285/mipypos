@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
@@ -39,6 +39,9 @@ type HarnessModules = {
   '@/lib/network/host': typeof import('../lib/network/host');
   '@/lib/network/validation': typeof import('../lib/network/validation');
   '@/lib/network/tls': typeof import('../lib/network/tls');
+  '@/lib/network/discovery': typeof import('../lib/network/discovery');
+  '@/lib/network/pending-store': typeof import('../lib/network/pending-store');
+  '@/lib/network/snapshot': typeof import('../lib/network/snapshot');
   '@/lib/network/pending-sale': typeof import('../lib/network/pending-sale');
 };
 
@@ -82,6 +85,27 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
     },
   };
   const backups = new Map<string, Database>();
+  class TestAesKey {
+    constructor(readonly raw: Buffer) {}
+    static async generate() {
+      return new TestAesKey(randomBytes(32));
+    }
+    static async import(value: string, encoding: 'base64' | 'hex') {
+      return new TestAesKey(Buffer.from(value, encoding));
+    }
+    async encoded(encoding: 'base64' | 'hex') {
+      return this.raw.toString(encoding);
+    }
+  }
+  class TestSealedData {
+    constructor(readonly raw: Buffer) {}
+    static fromCombined(value: string) {
+      return new TestSealedData(Buffer.from(value, 'base64'));
+    }
+    async combined() {
+      return this.raw.toString('base64');
+    }
+  }
   const mocks: Record<string, unknown> = {
     'expo-sqlite': {
       openDatabaseAsync: async (name: string) =>
@@ -111,6 +135,29 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
       digestStringAsync: async (_algorithm: string, input: string) =>
         createHash('sha256').update(input).digest('hex'),
       randomUUID,
+      AESEncryptionKey: TestAesKey,
+      AESSealedData: TestSealedData,
+      aesEncryptAsync: async (
+        bytes: Uint8Array,
+        key: TestAesKey,
+        options: { additionalData: Uint8Array },
+      ) => {
+        const nonce = randomBytes(12);
+        const cipher = createCipheriv('aes-256-gcm', key.raw, nonce);
+        cipher.setAAD(options.additionalData);
+        const encrypted = Buffer.concat([cipher.update(bytes), cipher.final()]);
+        return new TestSealedData(Buffer.concat([nonce, encrypted, cipher.getAuthTag()]));
+      },
+      aesDecryptAsync: async (
+        sealed: TestSealedData,
+        key: TestAesKey,
+        options: { additionalData: Uint8Array },
+      ) => {
+        const decipher = createDecipheriv('aes-256-gcm', key.raw, sealed.raw.subarray(0, 12));
+        decipher.setAAD(options.additionalData);
+        decipher.setAuthTag(sealed.raw.subarray(-16));
+        return Buffer.concat([decipher.update(sealed.raw.subarray(12, -16)), decipher.final()]);
+      },
     },
     '@react-native-async-storage/async-storage': {
       __esModule: true,

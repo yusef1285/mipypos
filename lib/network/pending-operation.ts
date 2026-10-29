@@ -1,5 +1,5 @@
 import * as Crypto from 'expo-crypto';
-import { getSecret, setSecret, removeSecret } from '@/lib/network/secure-storage';
+import { createPendingStore } from '@/lib/network/pending-store';
 import type { OperationRequest, PosOperation } from '@/lib/network/operations';
 import { assertOperationRequest } from '@/lib/network/validation';
 
@@ -13,9 +13,7 @@ export interface PendingOperation {
   args: OperationRequest['args'];
   fingerprint: string;
 }
-export async function getPendingOperation(): Promise<PendingOperation | null> {
-  const stored = await getSecret(KEY);
-  if (!stored) return null;
+async function parsePendingOperation(stored: string): Promise<PendingOperation> {
   try {
     const value: unknown = JSON.parse(stored);
     if (
@@ -38,6 +36,8 @@ export async function getPendingOperation(): Promise<PendingOperation | null> {
     if (!('operation' in value) || !('args' in value)) throw new Error('Formato no válido');
     const request = { ...value, token: 'validation' };
     assertOperationRequest(request);
+    if ((await operationFingerprint(request.operation, request.args)) !== value.fingerprint)
+      throw new Error('El contenido pendiente cambió.');
     return {
       hostUrl: value.hostUrl,
       username: value.username,
@@ -54,6 +54,8 @@ export async function getPendingOperation(): Promise<PendingOperation | null> {
     );
   }
 }
+const store = createPendingStore(KEY, parsePendingOperation, { legacySecure: true });
+export const getPendingOperation = store.get;
 export async function operationFingerprint(operation: string, args: unknown): Promise<string> {
   return Crypto.digestStringAsync(
     Crypto.CryptoDigestAlgorithm.SHA256,
@@ -76,12 +78,11 @@ export async function prepareOperation(input: Omit<PendingOperation, 'commandId'
     return pending;
   }
   const next = { ...input, commandId: Crypto.randomUUID(), fingerprint };
-  await setSecret(KEY, JSON.stringify(next));
+  await store.set(next);
   return next;
 }
 export async function rebindPendingOperation(verifiedPreviousHost: string, hostUrl: string) {
   const pending = await getPendingOperation();
-  if (pending?.hostUrl === verifiedPreviousHost)
-    await setSecret(KEY, JSON.stringify({ ...pending, hostUrl }));
+  if (pending?.hostUrl === verifiedPreviousHost) await store.set({ ...pending, hostUrl });
 }
-export const clearPendingOperation = () => removeSecret(KEY);
+export const clearPendingOperation = store.clear;

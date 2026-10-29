@@ -1,4 +1,5 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { findCashWithdrawalReceipt } from '@/lib/database';
+import { createPendingStore } from '@/lib/network/pending-store';
 import * as Crypto from 'expo-crypto';
 import { z } from 'zod';
 import { HostRejection } from '@/lib/network/client';
@@ -14,10 +15,8 @@ const schema = z.object({
   reason: z.string().min(1),
 });
 export type PendingWithdrawal = z.infer<typeof schema>;
-export async function getPendingWithdrawal(): Promise<PendingWithdrawal | null> {
-  const value = await AsyncStorage.getItem(KEY);
-  return value ? schema.parse(JSON.parse(value)) : null;
-}
+const store = createPendingStore(KEY, (raw) => schema.parse(JSON.parse(raw)), { allowWeb: true });
+export const getPendingWithdrawal = store.get;
 export async function upgradePendingWithdrawalTransport(
   hostUrl: string,
   verifiedPreviousHost?: string,
@@ -29,7 +28,7 @@ export async function upgradePendingWithdrawalTransport(
       pending.authority.replace(/^http:/, 'https:') === hostUrl) ||
       pending.authority === verifiedPreviousHost)
   )
-    await AsyncStorage.setItem(KEY, JSON.stringify({ ...pending, authority: hostUrl }));
+    await store.set({ ...pending, authority: hostUrl });
 }
 let sending = false;
 export async function submitWithdrawal(
@@ -53,7 +52,7 @@ export async function submitWithdrawal(
         'Confirma la extracción pendiente con el mismo usuario, importe y administrador.',
       );
     const command = existing ?? { ...values, commandId: Crypto.randomUUID() };
-    await AsyncStorage.setItem(KEY, JSON.stringify(command));
+    await store.set(command);
     try {
       const id = await register(
         command.sessionId,
@@ -65,14 +64,22 @@ export async function submitWithdrawal(
         },
         command.username,
       );
-      await AsyncStorage.removeItem(KEY);
+      await store.clear();
       return id;
     } catch (error) {
-      if (
-        values.authority === 'local' ||
-        (error instanceof HostRejection && error.code === 'REJECTED')
-      )
-        await AsyncStorage.removeItem(KEY);
+      if (values.authority === 'local') {
+        const receipt = await findCashWithdrawalReceipt(
+          command.sessionId,
+          command,
+          command.username,
+        );
+        if (receipt !== null) {
+          await store.clear();
+          return receipt;
+        }
+        await store.clear();
+      } else if (error instanceof HostRejection && error.code === 'NOT_COMMITTED')
+        await store.clear();
       throw error;
     }
   } finally {

@@ -87,6 +87,7 @@ const withLocalHotspot: ConfigPlugin = (config) => {
         'LanIdentity.java',
         'MipyReceiptModule.java',
         'MipyDirectModule.java',
+        'MipyDiscoveryModule.java',
       ])
         writeFileSync(
           join(directory, file),

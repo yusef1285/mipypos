@@ -28,7 +28,7 @@ export const archiveSchema = z
   .object({
     app: z.literal('MipyPOS'),
     format: z.literal('business-close'),
-    version: z.literal(1),
+    version: z.union([z.literal(1), z.literal(2)]),
     schemaVersion: z.union([z.literal(5), z.literal(6), z.literal(7)]),
     archiveId: z.string().uuid(),
     createdAt: z.string().datetime(),
@@ -72,11 +72,18 @@ export function parseBusinessArchive(value: unknown): BusinessArchive {
     throw new Error('El archivo no es un cierre completo compatible con esta versión de MipyPOS.');
   const archive = parsed.data;
   if (
+    archive.version === 2 &&
+    archive.tables.users.some((user) => Object.hasOwn(user, 'password_hash'))
+  )
+    throw new Error('El archivo de traslado contiene credenciales que no deberían exportarse.');
+  if (
     !archive.tables.users.some(
       (user) =>
         user.role === 'admin' &&
-        typeof user.password_hash === 'string' &&
-        /^[0-9a-f]{64}$/.test(user.password_hash),
+        typeof user.username === 'string' &&
+        user.username.length > 0 &&
+        (archive.version === 2 ||
+          (typeof user.password_hash === 'string' && /^[0-9a-f]{64}$/.test(user.password_hash))),
     )
   )
     throw new Error('El archivo no contiene un administrador válido.');

@@ -28,6 +28,11 @@ import {
   getDirectInfo,
   type DirectInfo,
 } from '@/lib/network/direct';
+import {
+  cancelLanDiscovery,
+  findPairedLanHost,
+  getAdvertisementError,
+} from '@/lib/network/discovery';
 import { getHostPin } from '@/lib/network/tls';
 import { getPendingOperation, rebindPendingOperation } from '@/lib/network/pending-operation';
 import { getPendingSale, upgradePendingSaleTransport } from '@/lib/network/pending-sale';
@@ -216,6 +221,27 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       setBusy(false);
     }
   };
+  useEffect(
+    () => () => {
+      void cancelLanDiscovery().catch(() => undefined);
+    },
+    [],
+  );
+  const findAdministrator = async () => {
+    try {
+      setBusy(true);
+      setError('');
+      const hostUrl = await findPairedLanHost(networkConfig.hostPin ?? '');
+      await connect(createLanQr(hostUrl, undefined, networkConfig.hostPin));
+    } catch (failure) {
+      setError(
+        failure instanceof Error ? failure.message : 'No se pudo encontrar al administrador.',
+      );
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } finally {
+      setBusy(false);
+    }
+  };
   let qr = '';
   if (networkConfig.mode === 'host' && hostAddress.startsWith('https://')) {
     if (networkConfig.transport !== 'direct' || direct?.isOwner)
@@ -333,6 +359,19 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
           <Button.Label>Escanear QR</Button.Label>
         </Button>
       )}
+      {networkConfig.mode === 'host' && getAdvertisementError() ? (
+        <Typography.Paragraph type="body-sm" color="muted">
+          {getAdvertisementError()}
+        </Typography.Paragraph>
+      ) : null}
+      {networkConfig.mode === 'client' &&
+      networkConfig.transport !== 'direct' &&
+      networkConfig.hostPin &&
+      Platform.OS === 'android' ? (
+        <Button variant="secondary" isDisabled={busy} onPress={() => void findAdministrator()}>
+          <Button.Label>{busy ? 'Buscando…' : 'Buscar mi administrador en Wi-Fi'}</Button.Label>
+        </Button>
+      ) : null}
       {allowHost && user?.role === 'admin' && Platform.OS === 'android' ? (
         <View className="gap-3">
           <Button isDisabled={busy} onPress={() => void startDirect()}>

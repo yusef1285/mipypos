@@ -1,4 +1,5 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createPendingStore } from '@/lib/network/pending-store';
+import { assertSaleCommand } from '@/lib/network/validation';
 import * as Crypto from 'expo-crypto';
 import { HostRejection, registerHostSale } from '@/lib/network/client';
 import type { NetworkConfig, NetworkSaleCommand } from '@/lib/network/types';
@@ -51,9 +52,7 @@ function isPendingSale(value: unknown): value is PendingSale {
     )
   );
 }
-export async function getPendingSale(): Promise<PendingSale | null> {
-  const stored = await AsyncStorage.getItem(KEY);
-  if (!stored) return null;
+function parsePendingSale(stored: string): PendingSale {
   let pending: unknown;
   try {
     pending = JSON.parse(stored);
@@ -64,8 +63,11 @@ export async function getPendingSale(): Promise<PendingSale | null> {
   }
   if (!isPendingSale(pending))
     throw new Error('El formato de la venta pendiente no es válido. El registro se conserva.');
+  assertSaleCommand({ ...pending.command, token: 'validation' });
   return pending;
 }
+const store = createPendingStore(KEY, parsePendingSale);
+export const getPendingSale = store.get;
 export async function upgradePendingSaleTransport(hostUrl: string, verifiedPreviousHost?: string) {
   const pending = await getPendingSale();
   if (
@@ -74,7 +76,7 @@ export async function upgradePendingSaleTransport(hostUrl: string, verifiedPrevi
       pending.hostUrl.replace(/^http:/, 'https:') === hostUrl) ||
       pending.hostUrl === verifiedPreviousHost)
   )
-    await AsyncStorage.setItem(KEY, JSON.stringify({ ...pending, hostUrl }));
+    await store.set({ ...pending, hostUrl });
 }
 let sending = false;
 let creating = false;
@@ -92,12 +94,11 @@ export async function sendPendingSale(config: NetworkConfig, username: string): 
       throw new Error('Confirma la venta pendiente con el mismo usuario y administrador.');
     try {
       const id = await registerHostSale(pending.hostUrl, pending.command);
-      await AsyncStorage.removeItem(KEY);
+      await store.clear();
       return id;
     } catch (error) {
-      // Only an explicit transactional rejection is safe to discard. A timeout is not a rejection.
-      if (error instanceof HostRejection && error.code === 'REJECTED')
-        await AsyncStorage.removeItem(KEY);
+      // Only an identity-scoped, authoritative absence check can resolve a rejection.
+      if (error instanceof HostRejection && error.code === 'NOT_COMMITTED') await store.clear();
       throw error;
     }
   } finally {
@@ -118,7 +119,7 @@ export async function createPendingSale(
       username,
       command: { ...input, commandId: Crypto.randomUUID(), clientId: config.clientId },
     };
-    await AsyncStorage.setItem(KEY, JSON.stringify(pending));
+    await store.set(pending);
     return await sendPendingSale(config, username);
   } finally {
     creating = false;

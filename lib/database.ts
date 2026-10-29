@@ -204,6 +204,11 @@ export function getNetworkReplica(cacheKey: string) {
     ),
   );
 }
+export function clearNetworkReplicas() {
+  return consistentRead(async () => {
+    await (await getDatabase()).runAsync('DELETE FROM network_replica');
+  });
+}
 export function storeNetworkReplica(cacheKey: string, payload: string) {
   return consistentRead(async () => {
     const db = await getDatabase();
@@ -283,6 +288,8 @@ export async function createBusinessArchive(username: string): Promise<BusinessA
         ),
       ),
     );
+    // Portable files never carry login credentials. The source DB and private backup are unchanged.
+    for (const account of tables.users) delete account.password_hash;
     const usage = await getDemoUsage();
     const sequences = (
       await db.getAllAsync<{ name: string; seq: number }>('SELECT name,seq FROM sqlite_sequence')
@@ -292,7 +299,7 @@ export async function createBusinessArchive(username: string): Promise<BusinessA
     return {
       app: 'MipyPOS',
       format: 'business-close',
-      version: 1,
+      version: 2,
       schemaVersion: 7,
       archiveId: Crypto.randomUUID(),
       createdAt: now(),
@@ -339,6 +346,17 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
     const tables = Object.fromEntries(
       BUSINESS_TABLES.map((table) => [table, archive.tables[table] ?? []]),
     ) as Record<(typeof BUSINESS_TABLES)[number], ArchiveRow[]>;
+    // Re-enroll credentials without importing even the hashes in legacy v1 files.
+    // The source administrator adopts the receiving administrator's existing password.
+    const importedAdmin =
+      tables.users.find(
+        (account) => account.role === 'admin' && account.username === archive.sourceUser,
+      ) ?? tables.users.find((account) => account.role === 'admin');
+    if (!importedAdmin) throw new Error('El archivo no contiene un administrador válido.');
+    for (const account of tables.users) {
+      account.password_hash =
+        account === importedAdmin ? user.password_hash : await hashPassword(Crypto.randomUUID());
+    }
     for (let index = BUSINESS_TABLES.length - 1; index >= 0; index -= 1)
       await db.execAsync(`DELETE FROM ${BUSINESS_TABLES[index]}`);
     for (const table of BUSINESS_TABLES) {
@@ -1037,6 +1055,29 @@ export async function openCashSession(fund: number, username: string, command?: 
     throw error;
   }
 }
+export function findCashWithdrawalReceipt(
+  sessionId: number,
+  input: Pick<CashWithdrawalInput, 'commandId' | 'amount' | 'reason'>,
+  username: string,
+) {
+  return consistentRead(async () => {
+    const previous = await (
+      await getDatabase()
+    ).getFirstAsync<CashWithdrawal>(
+      'SELECT * FROM cash_withdrawals WHERE command_id=?',
+      input.commandId,
+    );
+    if (!previous) return null;
+    if (
+      previous.session_id !== sessionId ||
+      previous.amount !== input.amount ||
+      previous.reason !== input.reason.trim() ||
+      previous.username !== username
+    )
+      throw new Error('La extracción pendiente no coincide. Revisa el registro de caja.');
+    return previous.id;
+  });
+}
 export async function registerCashWithdrawal(
   sessionId: number,
   input: CashWithdrawalInput,
@@ -1543,6 +1584,14 @@ function validatePayments(total: number, method: SaleMethod, payments: Payment[]
   if (method !== 'mixed' && (positive.length !== 1 || positive[0].type !== method))
     throw new Error('El método no coincide con el pago registrado.');
   return positive;
+}
+export function getNetworkSaleReceipt(
+  commandId: string,
+  clientId: string,
+  username: string,
+  fingerprint: string,
+) {
+  return consistentRead(() => findNetworkSale(commandId, clientId, username, fingerprint));
 }
 export async function findNetworkSale(
   commandId: string,

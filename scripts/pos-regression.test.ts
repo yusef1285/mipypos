@@ -1104,7 +1104,7 @@ async function closedArchive() {
   return { source: f, archive: await f.db.createBusinessArchive('admin') };
 }
 void regression(
-  'traslado completo restaura historia, stock, imágenes y hashes sin copiar licencia',
+  'traslado sin credenciales restaura historia, stock e imágenes y conserva licencia del destino',
   async () => {
     const { source, archive } = await closedArchive();
     const target = createHarness();
@@ -1122,11 +1122,22 @@ void regression(
       (await db.getSale(1))?.sale.settlement?.transferReceipt?.imageBase64,
       sampleReceipt().imageBase64,
     );
-    assert.equal((await db.authenticate('auditor', 'auditor123'))?.role, 'auditor');
-    assert.equal(
-      (await db.authenticate('admin', 'admin123'))?.password_hash,
-      archive.tables.users.find((row) => row.role === 'admin')?.password_hash,
+    assert.equal(await db.authenticate('auditor', 'auditor123'), null);
+    assert.equal(archive.version, 2);
+    assert.ok(archive.tables.users.every((row) => !Object.hasOwn(row, 'password_hash')));
+    assert.equal((await db.authenticate('admin', 'admin123'))?.role, 'admin');
+    assert.ok(await source.db.authenticate('auditor', 'auditor123'));
+    const importedAuditor = (await db.listUsers()).find(
+      (account) => account.username === 'auditor',
     );
+    assert.ok(importedAuditor);
+    await db.saveUser({
+      id: importedAuditor.id,
+      username: 'auditor',
+      role: 'auditor',
+      password: 'nueva-clave-auditor',
+    });
+    assert.equal((await db.authenticate('auditor', 'nueva-clave-auditor'))?.role, 'auditor');
     assert.equal((await db.getDemoUsage()).sales, 4);
     assert.equal(await db.getSetting('next_opening_fund'), String(archive.openingFund));
     const next = await db.openCashSession(archive.openingFund, 'admin');
@@ -1346,5 +1357,43 @@ void regression(
     assert.ok((await db.listUsers()).find((user) => user.id === id));
     assert.ok(await db.authenticate('usuario-propio', 'secreto123'));
     assert.equal((await db.listProducts()).length, 0);
+  },
+);
+void regression(
+  'archivo v2 rechaza hashes; archivo v1 conserva datos pero no reutiliza credenciales',
+  async () => {
+    const { archive } = await closedArchive();
+    const withHashes = structuredClone(archive);
+    for (const account of withHashes.tables.users) account.password_hash = 'a'.repeat(64);
+    const h = createHarness();
+    const db = h.load('@/lib/database');
+    await db.initializeDatabase();
+    await assert.rejects(db.restoreBusinessArchive(withHashes, 'admin'), /credenciales/);
+    assert.ok(await db.authenticate('admin', 'admin123'));
+    const legacy = { ...withHashes, version: 1 };
+    await db.restoreBusinessArchive(legacy, 'admin');
+    assert.ok(await db.authenticate('admin', 'admin123'));
+    assert.equal((await db.getAuditSnapshot()).sales.length, archive.tables.sales.length);
+  },
+);
+void regression(
+  'administrador importado usa clave del receptor aunque su nombre sea diferente',
+  async () => {
+    const { archive } = await closedArchive();
+    const h = createHarness();
+    const db = h.load('@/lib/database');
+    await db.initializeDatabase();
+    await db.saveUser({
+      id: 1,
+      username: 'receptor',
+      role: 'admin',
+      password: 'clave-del-receptor',
+    });
+    // The destination must contain no audit entries when receiving a business.
+    h.database.run('DELETE FROM audit_log');
+    await db.restoreBusinessArchive(archive, 'receptor');
+    assert.ok(await db.authenticate('admin', 'clave-del-receptor'));
+    assert.equal(await db.authenticate('admin', 'admin123'), null);
+    assert.equal(await db.authenticate('receptor', 'clave-del-receptor'), null);
   },
 );

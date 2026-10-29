@@ -1,3 +1,5 @@
+import { advertiseLanHost, stopLanAdvertisement } from '@/lib/network/discovery';
+import { z } from 'zod';
 import * as Crypto from 'expo-crypto';
 import * as Network from 'expo-network';
 import { SecureLanServer } from '@/lib/network/tls';
@@ -385,6 +387,45 @@ export async function startLanHost(): Promise<string> {
       return failure(error, requestIdentity(request.data));
     }
   });
+  nextServer.post<NetworkSaleCommand>('/v1/sale-receipt', async (request) => {
+    try {
+      const user = await authorized(request.data?.token ?? '', 'home');
+      assertSaleCommand(request.data);
+      const saleId = await DB.getNetworkSaleReceipt(
+        request.data.commandId,
+        request.data.clientId,
+        user.username,
+        await saleFingerprint(request.data),
+      );
+      return success({ saleId });
+    } catch (error) {
+      return failure(error, requestIdentity(request.data));
+    }
+  });
+  nextServer.post<{
+    token?: string;
+    sessionId?: number;
+    commandId?: string;
+    amount?: number;
+    reason?: string;
+  }>('/v1/withdrawal-receipt', async (request) => {
+    try {
+      const user = await authorized(request.data?.token ?? '', 'home');
+      const input = z
+        .object({
+          sessionId: z.number().int().positive(),
+          commandId: z.string().min(1).max(128),
+          amount: z.number().finite().positive(),
+          reason: z.string().min(1).max(2000),
+        })
+        .parse(request.data);
+      return success({
+        withdrawalId: await DB.findCashWithdrawalReceipt(input.sessionId, input, user.username),
+      });
+    } catch (error) {
+      return failure(error, requestIdentity(request.data));
+    }
+  });
   nextServer.post<NetworkSaleCommand>('/v1/sale', async (request) => {
     try {
       const user = await authorized(request.data?.token ?? '', 'sales');
@@ -406,9 +447,12 @@ export async function startLanHost(): Promise<string> {
       { cause: error },
     );
   }
+  const identity = await DB.getSharedRevision();
+  await advertiseLanHost(identity.authorityId, LAN_PORT);
   return address;
 }
 export function stopLanHost() {
+  stopLanAdvertisement();
   server?.stop();
   server = null;
   sessions.clear();

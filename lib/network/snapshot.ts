@@ -56,5 +56,28 @@ export function parseSnapshot(value: unknown): NetworkSnapshot {
     throw new Error(
       'No se pudo verificar la copia de existencias del administrador. Actualiza ambos dispositivos e inténtalo de nuevo.',
     );
-  return parsed.data;
+  const snapshot = parsed.data;
+  const products = new Set(snapshot.products.map((product) => product.id));
+  const areas = new Set(snapshot.areas.map((area) => area.id));
+  const pairs = new Set<string>();
+  const totals = new Map<number, number>();
+  let invalid = products.size !== snapshot.products.length || areas.size !== snapshot.areas.length;
+  for (const stock of snapshot.areaStock) {
+    const key = `${stock.area_id}:${stock.product_id}`;
+    if (!products.has(stock.product_id) || !areas.has(stock.area_id) || pairs.has(key))
+      invalid = true;
+    pairs.add(key);
+    totals.set(stock.product_id, (totals.get(stock.product_id) ?? 0) + stock.quantity);
+  }
+  if (
+    snapshot.products.some(
+      (product) => Math.abs(product.stock - (totals.get(product.id) ?? 0)) > 0.001,
+    )
+  )
+    invalid = true;
+  if (invalid)
+    throw new Error(
+      'La copia recibida tiene existencias o referencias inconsistentes. Vuelve a sincronizar.',
+    );
+  return snapshot;
 }
