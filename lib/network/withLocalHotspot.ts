@@ -12,7 +12,7 @@ import {
   androidLegacyBackupRules,
   androidDataExtractionRules,
   applyAndroidPrivateBackupPolicy,
-} from '../android-backup-policy';
+} from '../android-backup-policy.js';
 
 const withLocalHotspot: ConfigPlugin = (config) => {
   config = withAndroidManifest(config, (mod) => {

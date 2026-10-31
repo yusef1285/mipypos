@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before as beforeAll, test } from 'node:test';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { z } from 'zod';
 import { XML } from 'expo/config-plugins';
 import {
@@ -2240,6 +2241,31 @@ void regression(
     assert.equal((await selector.resolveDatabaseFile()).fileName, active.candidate);
   },
 );
+
+void regression('Expo carga el plugin LAN en Node sin un cargador TypeScript heredado', () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--eval',
+      `const assert = require('node:assert/strict');
+       const { resolveConfigPluginFunction } = require('@expo/config-plugins/build/utils/plugin-resolver');
+       const plugin = resolveConfigPluginFunction(process.cwd(), './lib/network/withLocalHotspot.ts');
+       assert.equal(typeof plugin, 'function');
+       const config = plugin({ name: 'MipyPOS', slug: 'mipypos' });
+       for (const mod of ['manifest', 'appBuildGradle', 'mainApplication', 'dangerous']) {
+         assert.equal(typeof config.mods.android[mod], 'function');
+       }`,
+    ],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, NODE_OPTIONS: '' },
+      encoding: 'utf8',
+      timeout: 30_000,
+    },
+  );
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+});
 
 const backupExclude = z.object({ $: z.object({ domain: z.string(), path: z.literal('.') }) });
 const backupBlock = z.object({
