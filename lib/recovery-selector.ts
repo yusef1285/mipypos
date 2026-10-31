@@ -3,6 +3,7 @@ import { Directory, File } from 'expo-file-system';
 import * as SQLite from 'expo-sqlite';
 import { Platform } from 'react-native';
 import { z } from 'zod';
+import { loadDatabaseAnchor, reserveDatabaseCreation } from '@/lib/recovery-anchor';
 
 const KEY = 'mipypos.recovery.selector.v1';
 const fileName = z.string().regex(/^mipypos(?:\.restored\.[0-9a-f-]{36})?\.db$/);
@@ -47,19 +48,29 @@ export async function saveRecoverySelector(selector: RecoverySelector) {
 // generation remains authoritative. No db/WAL/SHM file is renamed or removed.
 export async function resolveDatabaseFile(): Promise<{ fileName: string; authorityId?: string }> {
   const selector = await loadRecoverySelector();
+  const anchor = await loadDatabaseAnchor();
+  if (selector && anchor?.phase === 'ready' && selector.authorityId !== anchor.authorityId)
+    throw new Error(
+      'La identidad del selector no coincide con este negocio. Los archivos se conservan.',
+    );
   if (!selector) {
     if (Platform.OS !== 'web') {
       const directory: unknown = SQLite.defaultDatabaseDirectory;
       if (typeof directory !== 'string')
         throw new Error('No se pudo verificar la carpeta de datos. No se abrirá otra base.');
       const folder = new Directory(directory);
-      if (
-        folder.exists &&
-        folder.list().some((entry) => entry.name.startsWith('mipypos.restored.'))
-      )
+      const entries = folder.exists ? folder.list() : [];
+      if (entries.some((entry) => entry.name.startsWith('mipypos.restored.')))
         throw new Error(
           'Falta el registro de recuperación y existen bases conservadas. No se abrirá una versión antigua; tus archivos necesitan revisión.',
         );
+      if (!new File(directory, 'mipypos.db').exists) {
+        if (anchor || entries.some((entry) => entry.name.startsWith('mipypos.')))
+          throw new Error(
+            'No se encontró la base instalada. No se creará una base vacía ni se utilizará una copia antigua automáticamente.',
+          );
+        await reserveDatabaseCreation();
+      }
     }
     return { fileName: 'mipypos.db' };
   }

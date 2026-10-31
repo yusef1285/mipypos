@@ -1,7 +1,9 @@
 import * as SQLite from 'expo-sqlite';
 import * as Crypto from 'expo-crypto';
 
-export const DATABASE_VERSION = 8;
+import { assertRecoveryJournalAvailable, migrateRecoveryJournal } from '@/lib/recovery-journal';
+
+export const DATABASE_VERSION = 9;
 
 // The SQLite backup API includes committed WAL pages. Copies stay in the private
 // database directory; never export this credential-bearing recovery database.
@@ -10,6 +12,7 @@ export async function prepareMigrationBackup(db: SQLite.SQLiteDatabase) {
     (await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version'))?.user_version ?? 0;
   if (version > DATABASE_VERSION)
     throw new Error('Esta base de datos necesita una versión más reciente de MipyPOS.');
+  await assertRecoveryJournalAvailable(db);
   const existing = await db.getFirstAsync(
     "SELECT name FROM sqlite_master WHERE type='table' AND name='users'",
   );
@@ -129,5 +132,6 @@ export async function migrateHardening(db: SQLite.SQLiteDatabase) {
     throw new Error(
       'Hay referencias incompletas en la base de datos. Restaura una copia antes de continuar.',
     );
+  await migrateRecoveryJournal(db);
   await db.execAsync(`PRAGMA user_version=${DATABASE_VERSION}`);
 }

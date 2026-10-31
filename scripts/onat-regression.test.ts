@@ -245,13 +245,13 @@ check('indicadores de cumplimiento, próximos y vencidos', () => {
   assert.equal(fiscalStatus('2026-02-01', true, '2026-02-02'), 'Cumplida');
   assert.equal(fiscalStatus('2026-02-05', false, '2026-02-02'), 'Próxima');
 });
-check('migración v8 aditiva e idempotente', async () => {
+check('migraciones fiscales y v9 aditivas e idempotentes', async () => {
   const f = await fixture();
   await f.db.initializeDatabase();
   const d = await f.db.getDatabase();
   assert.equal(
     (await d.getFirstAsync<{ user_version: number }>('PRAGMA user_version'))?.user_version,
-    8,
+    9,
   );
   assert.equal((await f.db.getFiscalData(filter, 'admin')).profiles.length, 1);
 });

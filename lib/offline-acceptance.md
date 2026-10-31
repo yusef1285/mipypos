@@ -1,6 +1,25 @@
 # MipyPOS — matriz de aceptación offline
 
-## Alcance y evidencia
+## Continuidad actual: conciliación con journal privado v9
+
+La migración v8→v9 y la restauración con replay registrado están implementadas. Este apartado sustituye las referencias históricas siguientes al bloqueo de **toda** copia divergente; no cambia el estado de los módulos empresariales ausentes ni aprueba producción.
+
+| Área                               | Implementado                                                 | Integrado                                                                     | Probado automáticamente                                                         | Probado en Android | Requiere validación externa                        | Pendiente                                                                       |
+| ---------------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ------------------ | -------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Journal privado transaccional      | Sí, linaje/ID/secuencia e imágenes antes/después             | Triggers SQLite, copia previa y migración9                                    | Suite recovery y regresiones existentes                                         | No                 | Durabilidad nativa, volumen y espacio              | Retención/poda segura, protección externa ante pérdida del dispositivo          |
+| Recuperación de copia antigua v9   | Sí, solo continuación de historial verificable               | Generación aislada, recibos, stock/caja, finanzas, ONAT, selector y auditoría | Imágenes, conservación, reintentos, cambios/borrados, fallos y ramas rechazadas | No                 | Cortes de energía reales, WAL/SHM, cierre/reinicio | Base original perdida/corrupta y ramas de dispositivos desconectados            |
+| Compatibilidad de copia v8         | Sí para estado empresarial igual                             | Migra solo candidato; conserva snapshot fuente                                | Aceptación de iguales y rechazo de divergentes                                  | No                 | Copias reales de instalaciones previas             | Conciliación retrospectiva sin evidencia (no se infiere)                        |
+| Selección y comprobación asistida  | Sí, todas las copias catalogadas y estados de compatibilidad | Ajustes, reautenticación, inspección de solo lectura, validación repetida     | Estados coincidente/continuación/bloqueada                                      | No                 | UI autenticada,320pt, accesibilidad, temas         | Captura de preview solo mostró login; no se afirma comprobación visual completa |
+| Pendientes LAN de otros terminales | Bloqueo conservador, no fusión                               | UUID, TLS y recibos existentes preservados                                    | Conflictos y confirmaciones locales bajo pruebas                                | No                 | Dos Android desconectados/reconectados             | Conciliación remota integral/autonomía (Fase10)                                 |
+| Identidad externa de instalación | Sí, ancla SecureStore y testigo durable; reserva previa a crear archivo | Resolución antes de SQLite, identidad antes de migrar, confirmación tras commit y selector | 13 casos nuevos: pérdida/vacío/autoridad ajena/ancla/testigo/reinicio/v8/storage bloqueado | No | SecureStore y cortes reales; recuperación asistida del ancla | Catálogo externo autenticado y journal redundante para recuperar original perdido; no se infiere ausencia de operaciones |
+
+SQLite operativo es **v9**; formato de traslado comercial sigue en **esquema8**. Journal y linaje son privados y no forman parte de ese formato ni de la réplica LAN. No se ha borrado ni sustituido la base en uso. La nueva suite se registra en `.expo/recovery-regression-results.json`; la evidencia anterior de264 es histórica desde esta continuación.
+
+### Resultado actual comprobado
+
+**309/309** (116 POS + 77 LAN + 24 finanzas + 47 ONAT + 45 recuperación), artefactos frescos 31/10/2026 22:11:22–22:12:03 UTC. Incluye las 296 previas y 13 nuevas pruebas de identidad externa y prevención de creación vacía. Tipos y parser CSS limpios, lint 0 errores/4 advertencias revisadas; formato ejecutado, sin comprobación independiente `format:check`. **Expo Doctor actual: falló exit1 en evaluación de Expo config**, sin stderr de causa disponible. Dependencias alineadas (`expo install --check`:0), árbol limpio. No se declara compilación satisfactoria ni se reutiliza Doctor20/20 histórico. APK/Android/UI autenticada siguen sin evidencia ejecutada. No se añadió otra migración: SQLite permanece v9.
+
+## Alcance y evidencia histórica anterior
 
 Esta matriz corresponde a la auditoría y estabilización incremental del proyecto existente. No certifica producción ni sustituye aceptación Android. Se mantienen Expo SDK 58, React Native, TypeScript, Router, SQLite v8, hashes, licencias, cuotas e identidad de publicación. No se introducen servicios remotos, sincronización global, PWA nueva ni Desktop.
 

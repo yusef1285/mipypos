@@ -39,6 +39,7 @@ after(() => {
 });
 import { createHarness, prepareHarness } from './pos-test-harness';
 beforeAll(prepareHarness);
+import type { Database } from 'sql.js';
 import type { CartItem, CashClosureInput, Producto, TransferReceipt } from '../lib/models';
 import {
   receiptAmount,
@@ -99,6 +100,16 @@ async function fixture(overrides: Record<string, unknown> = {}) {
     };
   };
   return { ...harness, db, product, main, target, sessionId, cart, pay, closure };
+}
+
+// Recreate the actual pre-v9 schema in downgrade fixtures, not just its version.
+function stripRecoveryJournal(database: Database) {
+  const rows =
+    database.exec(
+      "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'recovery_%'",
+    )[0]?.values ?? [];
+  for (const [name] of rows) database.run(`DROP TRIGGER "${String(name).replaceAll('"', '""')}"`);
+  database.run('DROP TABLE recovery_journal; DROP TABLE recovery_lineage;');
 }
 
 void regression('migración conserva datos existentes y se puede repetir', async () => {
@@ -1227,6 +1238,7 @@ void regression(
   'migración v7 conserva tarjeta histórica y bloquea nuevos inserts SQLite',
   async () => {
     const f = await fixture();
+    stripRecoveryJournal(f.database);
     f.database.run(`DROP TRIGGER reject_new_card_sale; DROP TRIGGER reject_card_sale_edit;
     DROP TRIGGER sync_sales_insert; DROP TRIGGER sync_sales_delete; DROP TRIGGER sync_sales_update;
     ALTER TABLE sales DROP COLUMN legacy_card; ALTER TABLE sales DROP COLUMN pricing_basis; PRAGMA user_version=6;`);
@@ -1241,7 +1253,7 @@ void regression(
       before,
     );
     assert.equal(f.database.exec('SELECT legacy_card FROM sales')[0].values[0][0], 1);
-    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 8);
+    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 9);
     const backup = f.backups.get('mipypos.pre-v6.db');
     assert.ok(backup);
     assert.deepEqual(backup.exec('SELECT id,total,method,payments FROM sales')[0].values, before);
@@ -1265,6 +1277,7 @@ void regression(
   async () => {
     for (const failure of ['BACKUP', 'INSERT OR IGNORE INTO sync_state']) {
       const f = await fixture();
+      stripRecoveryJournal(f.database);
       f.database.run(`DROP TRIGGER reject_new_card_sale; DROP TRIGGER reject_card_sale_edit;
       DROP TRIGGER sync_sales_insert; DROP TRIGGER sync_sales_delete; DROP TRIGGER sync_sales_update;
       ALTER TABLE sales DROP COLUMN legacy_card; ALTER TABLE sales DROP COLUMN pricing_basis; PRAGMA user_version=6;`);
@@ -1279,7 +1292,7 @@ void regression(
       assert.equal((await f.db.listProducts()).length, 1);
       f.failWritesContaining('');
       await f.db.initializeDatabase();
-      assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 8);
+      assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 9);
     }
   },
 );
@@ -1302,7 +1315,7 @@ void regression(
     assert.ok(f.backups.get('mipypos.pre-v6.db'));
     f.failWritesContaining('');
     await f.db.initializeDatabase();
-    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 8);
+    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 9);
   },
 );
 void regression(
@@ -1433,7 +1446,7 @@ void regression(
         "SELECT * FROM settings WHERE key IN ('license_mode','usage_products','usage_sales')",
       ),
     );
-    assert.equal(copy.exec('PRAGMA user_version')[0].values[0][0], 8);
+    assert.equal(copy.exec('PRAGMA user_version')[0].values[0][0], 9);
     assert.equal(copy.exec('PRAGMA foreign_key_check').length, 0);
     const original = copy.exec('SELECT * FROM products');
     const currentProduct = await f.db.getProduct(f.product.id);
@@ -1619,13 +1632,13 @@ void regression(
     const backup = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
     const file = f.backups.get(backup.fileName);
     assert.ok(file);
-    file.run('PRAGMA user_version=9');
+    file.run('PRAGMA user_version=10');
     await assert.rejects(
       f.db.inspectPrivateRecoveryBackup('admin', 'admin123', backup.id),
       /No se pudo verificar/,
     );
-    assert.equal(file.exec('PRAGMA user_version')[0].values[0][0], 9);
-    file.run('PRAGMA user_version=8');
+    assert.equal(file.exec('PRAGMA user_version')[0].values[0][0], 10);
+    file.run('PRAGMA user_version=9');
     file.run("UPDATE sync_state SET authority_id='otra-autoridad' WHERE id=1");
     await assert.rejects(
       f.db.inspectPrivateRecoveryBackup('admin', 'admin123', backup.id),
@@ -1738,9 +1751,9 @@ void regression(
 );
 void regression('versión futura se rechaza antes de crear o modificar tablas', async () => {
   const h = createHarness();
-  h.database.run('PRAGMA user_version=9');
+  h.database.run('PRAGMA user_version=10');
   await assert.rejects(h.load('@/lib/database').initializeDatabase(), /más reciente/);
-  assert.equal(h.database.exec('PRAGMA user_version')[0].values[0][0], 9);
+  assert.equal(h.database.exec('PRAGMA user_version')[0].values[0][0], 10);
   assert.equal(h.database.exec("SELECT name FROM sqlite_master WHERE type='table'").length, 0);
 });
 void regression(
@@ -1874,13 +1887,11 @@ void regression(
     await f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin');
     const before = await f.db.getAuditSnapshot();
     const products = await f.db.listProducts();
-    await assert.rejects(
-      f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true),
-      /difiere/,
-    );
-    assert.deepEqual(await f.db.getAuditSnapshot(), before);
+    const restored = await f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true);
+    assert.ok(restored.reconciliation.replayEntries > 0);
+    assert.deepEqual((await f.db.getAuditSnapshot()).sales, before.sales);
     assert.deepEqual(await f.db.listProducts(), products);
-    assert.equal(f.storage.has('mipypos.recovery.selector.v1'), false);
+    assert.equal(f.storage.has('mipypos.recovery.selector.v1'), true);
   },
 );
 
@@ -1892,10 +1903,8 @@ void regression(
     const product = await f.db.getProduct(f.product.id);
     assert.ok(product);
     await f.db.saveProduct({ ...product, price_cash: 125 }, 'admin');
-    await assert.rejects(
-      f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true),
-      /products/,
-    );
+    const restored = await f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true);
+    assert.ok(restored.reconciliation.replayEntries > 0);
     assert.equal((await f.db.getProduct(f.product.id))?.price_cash, 125);
   },
 );
@@ -1929,10 +1938,8 @@ void regression(
     f.database.run(
       "INSERT INTO network_commands(command_id,client_id,action,response,created_at) VALUES('confirmed-after','terminal','action','{\"value\":42}','2026-10-31T10:00:00.000Z')",
     );
-    await assert.rejects(
-      f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true),
-      /network_commands/,
-    );
+    const restored = await f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true);
+    assert.ok(restored.reconciliation.replayEntries > 0);
     assert.equal(
       (
         await (
@@ -2302,7 +2309,7 @@ void regression(
   },
 );
 
-for (const version of [7, 9]) {
+for (const version of [8, 10]) {
   void regression(
     `recuperación rechaza versión SQLite ${version} al verificar una generación`,
     async () => {

@@ -12,6 +12,7 @@ import {
   Typography,
   useThemeColor,
 } from 'heroui-native';
+import { FinanceSelect } from '@/components/FinanceSelect';
 import { useApp } from '@/lib/app-context';
 import {
   createPrivateRecoveryBackup,
@@ -37,6 +38,7 @@ function RecoveryBackupForm({ username }: { username: string }) {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [copies, setCopies] = useState<RecoveryBackup[]>([]);
   const [lastCopy, setLastCopy] = useState<RecoveryBackup | null>(null);
   const [inspection, setInspection] = useState<RecoveryBackupInspection | null>(null);
   const [checking, setChecking] = useState(false);
@@ -47,8 +49,11 @@ function RecoveryBackupForm({ username }: { username: string }) {
   useEffect(() => {
     let active = true;
     void listPrivateRecoveryBackups(username)
-      .then((copies) => {
-        if (active) setLastCopy(copies[0] ?? null);
+      .then((availableCopies) => {
+        if (active) {
+          setCopies(availableCopies);
+          setLastCopy(availableCopies[0] ?? null);
+        }
       })
       .catch((failure: unknown) => {
         if (active) {
@@ -73,6 +78,8 @@ function RecoveryBackupForm({ username }: { username: string }) {
     try {
       const copy = await createPrivateRecoveryBackup(username, password);
       setLastCopy(copy);
+      setCopies((previous) => [copy, ...previous]);
+      setConfirmed(false);
       setPassword('');
       setSuccess(true);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -95,9 +102,14 @@ function RecoveryBackupForm({ username }: { username: string }) {
     setSuccess(false);
     setInspection(null);
     try {
-      setInspection(await inspectPrivateRecoveryBackup(username, password, lastCopy.id));
+      const inspectionResult = await inspectPrivateRecoveryBackup(username, password, lastCopy.id);
+      setInspection(inspectionResult);
       setPassword('');
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      if (inspectionResult.recovery?.status === 'blocked') {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      } else {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
     } catch (failure) {
       setError(
         failure instanceof Error
@@ -146,20 +158,37 @@ function RecoveryBackupForm({ username }: { username: string }) {
       <Typography.Heading type="h4">Copia privada de recuperación</Typography.Heading>
       <Typography.Paragraph type="body-sm" color="muted">
         Incluye tus datos y cuentas. Permanece en este teléfono; no protege contra pérdida o
-        desinstalación. Solo se restaura si conserva todas las operaciones actuales. Las copias
-        antiguas con diferencias se bloquean para evitar pérdidas.
+        desinstalación. Se conservan las operaciones posteriores cuando existe un historial
+        verificable. Si las versiones divergen o faltan confirmaciones, la restauración se bloquea.
       </Typography.Paragraph>
       {loading ? (
         <Spinner size="sm" />
       ) : lastCopy ? (
         <Typography.Paragraph type="body-sm">
-          Última copia: {new Date(lastCopy.createdAt).toLocaleString('es-CU')}
+          Copia seleccionada: {new Date(lastCopy.createdAt).toLocaleString('es-CU')}
         </Typography.Paragraph>
       ) : (
         <Typography.Paragraph type="body-sm" color="muted">
           Aún no hay copias manuales.
         </Typography.Paragraph>
       )}
+      {!busy && copies.length > 1 ? (
+        <FinanceSelect
+          label="Copia que quieres recuperar"
+          options={copies.map((copy) => ({
+            value: copy.id,
+            label: `${new Date(copy.createdAt).toLocaleString('es-CU')} · ${copy.id.slice(0, 8)}`,
+          }))}
+          value={lastCopy?.id ?? ''}
+          onChange={(id) => {
+            setLastCopy(copies.find((copy) => copy.id === id) ?? null);
+            setInspection(null);
+            setConfirmed(false);
+            setSuccess(false);
+            setError('');
+          }}
+        />
+      ) : null}
       <TextField isDisabled={busy}>
         <Label>Tu contraseña de administrador</Label>
         <Input
@@ -187,6 +216,18 @@ function RecoveryBackupForm({ username }: { username: string }) {
           restaurado datos.
         </Typography.Paragraph>
       ) : null}
+      {inspection?.recovery ? (
+        <Typography.Paragraph
+          className={inspection.recovery.status === 'blocked' ? 'text-danger' : 'text-foreground'}
+          accessibilityRole="alert"
+        >
+          {inspection.recovery.status === 'blocked'
+            ? `Restauración bloqueada. ${inspection.recovery.reason ?? 'Los estados no coinciden.'}`
+            : inspection.recovery.status === 'forward'
+              ? `Se conservarán ${inspection.recovery.replayEntries} cambios registrados posteriores a esta copia. Se comprobarán de nuevo antes de activarla.`
+              : 'La copia coincide con tus operaciones actuales. Se verificará de nuevo al restaurar.'}
+        </Typography.Paragraph>
+      ) : null}
       <Button isDisabled={busy || loading || !password} onPress={() => void save()}>
         {busy && !checking && !restoring ? <Spinner size="sm" color={spinnerColor} /> : null}
         <Button.Label>
@@ -200,7 +241,7 @@ function RecoveryBackupForm({ username }: { username: string }) {
           onPress={() => void check()}
         >
           {checking ? <Spinner size="sm" /> : null}
-          <Button.Label>{checking ? 'Comprobando…' : 'Comprobar última copia'}</Button.Label>
+          <Button.Label>{checking ? 'Comprobando…' : 'Comprobar copia seleccionada'}</Button.Label>
         </Button>
       ) : null}
       {lastCopy && networkConfig.mode === 'standalone' ? (
@@ -220,11 +261,19 @@ function RecoveryBackupForm({ username }: { username: string }) {
           </ControlField>
           <Button
             variant="secondary"
-            isDisabled={busy || loading || !password || !confirmed}
+            isDisabled={
+              busy ||
+              loading ||
+              !password ||
+              !confirmed ||
+              inspection?.recovery?.status === 'blocked'
+            }
             onPress={() => void restore()}
           >
             {restoring ? <Spinner size="sm" /> : null}
-            <Button.Label>{restoring ? 'Restaurando…' : 'Restaurar última copia'}</Button.Label>
+            <Button.Label>
+              {restoring ? 'Restaurando…' : 'Restaurar copia seleccionada'}
+            </Button.Label>
           </Button>
         </>
       ) : null}

@@ -1,6 +1,48 @@
 # MipyPOS Pro Max
 
-## Continuación de la misión prioritaria — 31 de octubre de 2026
+## Conciliación de recuperación — continuidad v9
+
+**Avance implementado, no finalización total ni aprobación de producción.** La base existente se actualiza de forma aditiva **v8 → v9**, con copia privada previa y transacción de migración. Se conservan usuarios, hashes, licencias, cuotas y datos comerciales. El formato de traslado empresarial permanece en **esquema8**: el journal privado no se transfiere por LAN ni se incluye en los archivos comerciales.
+
+### Copias antiguas con cambios posteriores
+
+`lib/recovery-journal.ts` captura INSERT/UPDATE/DELETE mediante triggers en la misma transacción que cada cambio empresarial. Incluye imágenes anteriores/posteriores, identificador aleatorio estable por cambio, secuencia y linaje UUID de la instalación. Una transacción fallida tampoco deja cambios confirmados en el journal. Los registros de respaldo/restauración y el estado diagnóstico no se confunden con operaciones comerciales.
+
+La restauración compara íntegramente el prefijo de ambos historiales y solo acepta una continuación de la misma autoridad y linaje, sin huecos. Reconstruye la copia en una generación aislada mediante imágenes de filas, **no vuelve a llamar a ventas, consumos, pagos ni mutaciones de dominio**. Suspende triggers únicamente en ese candidato para evitar repetir efectos; vuelve a instalarlos dentro de la misma transacción. Comprueba cada imagen anterior, referencias, integridad, versión, esquema e igualdad final con el estado actual antes de activar la generación mediante el selector durable existente. Conserva todos los recibos LAN para que los reintentos devuelvan la confirmación original.
+
+Una copia v8 de estado empresarial idéntico sigue siendo restaurable: solo se migra el candidato, nunca el archivo fuente. Una copia v8 divergente se bloquea porque no tiene evidencia histórica retrospectiva. También se bloquean ramas diferentes, imágenes incompatibles, journal incompleto, cambios no registrados, pendientes ambiguos y bases actuales corruptas. El arranque v9 no recrea silenciosamente un journal perdido ni una captura ausente, ocultando un intervalo sin evidencia.
+
+En Ajustes se puede **seleccionar cualquiera de las copias registradas**, comprobarla y ver si coincide, si necesita conciliación posterior o si está bloqueada. La comprobación no modifica ni activa la copia. Todas las validaciones se repiten bajo la barrera de mantenimiento al restaurar; la inspección previa no es una autorización permanente.
+
+### Identidad durable y prevención de reinicios vacíos
+
+`lib/recovery-anchor.ts` guarda la autoridad instalada en SecureStore y un testigo de presencia fuera de SQLite. El primer arranque reserva la creación antes de abrir el archivo y confirma la identidad después del commit. Al reabrir o migrar se comprueba la autoridad; una base vacía que reemplace la instalada no vuelve a generar administrador ni licencia. Una identidad ausente, dañada o incompatible bloquea el arranque sin regenerar evidencia.
+
+Si falta `mipypos.db` y hay ancla o archivos privados/migraciones/WAL conservados, no se abre SQLite ni se crea otra base. Tampoco se utiliza una copia antigua automáticamente. Una instalación previa sin ancla y con su base presente continúa migrando y conserva cuentas, autoridad y cuotas. El selector de restauración debe coincidir con la identidad externa.
+
+Esta protección **no recupera las operaciones de un archivo perdido**: el catálogo y el journal siguen dentro de la base. Hace falta un catálogo autenticado independiente y una conservación verificable de los cambios posteriores. Si se borran simultáneamente todos los archivos, el testigo y SecureStore, no existe evidencia local para distinguirlo de una instalación nueva. Un fallo durante la reserva sin archivo o pérdida parcial del ancla queda bloqueado para revisión; no hay reparación automática de ese estado. La semántica de SecureStore y los cortes de energía requieren pruebas Android.
+
+### Límites concretos
+
+- Hace falta una base actual íntegra y su historial completo. **No resuelve pérdida/corrupción de la base original ni reúne ramas de terminales independientes.** No inventa confirmaciones de dispositivos desconectados.
+- Se mantiene el requisito de administrador reautenticado, modo independiente, cola local sin operaciones ambiguas, copia previa, cierre/reapertura y confirmación final. Los journals LAN pendientes no se borran ni reenvían durante la restauración.
+- El journal contiene datos sensibles y ocupa espacio creciente. No se poda sin un contrato de retención probado; permanece dentro de SQLite privado, con el respaldo automático Android excluido. No constituye un paquete portátil cifrado ni una copia externa ante pérdida del teléfono.
+- Las pruebas usan SQLite `sql.js` y APIs nativas simuladas. La captura de Ajustes a320pt vuelve a mostrar login: **la revisión visual autenticada está incompleta**. No se generó APK ni se probaron WAL/SHM, pérdida de energía, OCR, impresión o LAN física en Android.
+- La misión integral y los módulos empresariales restantes siguen abiertos en `lib/offline-acceptance.md`; esta implementación no convierte fases posteriores en funciones terminadas.
+
+### Regresión añadida
+
+`npm run test:recovery` ejecuta la suite dedicada y `npm run validate:pos` ahora incluye las cinco suites. El artefacto `.expo/recovery-regression-results.json` registra resultados nuevos. Cubre migración8→9/reintento/rollback, compatibilidad8, conservación de venta y recibos tras respuesta perdida, cambios/borrados, prefijos divergentes, huecos, imágenes alteradas, paginación, recuperación repetida, fallos de seis etapas, consumo/anulación, costo histórico/rentabilidad, fiscalidad/inmutabilidad y comprobación previa. El timestamp de consulta financiera se valida aparte: no es un dato empresarial persistido.
+
+### Verificación de esta continuación
+
+**309/309 regresiones aprobadas:** 116 POS, 77 LAN, 24 finanzas, 47 ONAT y 45 recuperación. Los cinco artefactos `.expo/*-results.json` tienen marcas del 31 de octubre de 2026 entre 22:11:22 y 22:12:03 UTC. Se añadieron 13 casos sobre creación reservada, archivo perdido, reemplazo vacío, autoridad ajena, pérdida/corrupción del ancla y testigo, reinicio tras commit, migración v8 y almacenamiento seguro bloqueado. TypeScript limpio, parsers CSS aprobados y lint **0 errores/4 advertencias** de dependencias de efectos ya revisadas y conservadas por su función de invalidación. Se ejecutó el formateador; no se acredita un `format:check` independiente. Las 296 pruebas de la entrega anterior se mantienen dentro de este total.
+
+**Expo Doctor actual falló (exit1)** al evaluar `node node_modules/expo/bin/cli config --json --full`. La herramienta no devolvió el stderr que identifica la causa; la inspección de config/imports/plugins no encontró un defecto atribuible con certeza. `expo install --check` salió0 y el árbol de dependencias resuelve limpio. Por tanto, **no se reutiliza el20/20 anterior como aprobación actual ni se afirma compilación nativa satisfactoria**. Falta obtener el diagnóstico completo y resolverlo antes de construir.
+
+No se generó un APK ni se ejecutaron dispositivos/emuladores en esta continuación. La documentación de Bilt describe compilación Play en formato AAB (`https://bilt.me/docs/guides/publish-to-google-play#step-5-build-and-upload-your-first-app-bundle`); no equivale a un APK instalable entregado aquí. Se mantienen más abajo las instrucciones de compilación externa del proyecto.
+
+## Continuación anterior de la misión prioritaria — 31 de octubre de 2026
 
 **Entrega parcial; producción NO APROBADA.** Se continuó sobre SQLite v8 sin reiniciar datos, alterar licencias ni añadir dependencia de Internet. Esta ejecución implementa protecciones de recuperación y contratos; no implementa los módulos empresariales restantes ni autonomía LAN.
 

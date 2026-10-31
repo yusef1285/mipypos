@@ -54,6 +54,13 @@ import {
   verifyRecoveryDatabase,
   type RecoveryReconciliation,
 } from '@/lib/recovery-reconciliation';
+import { DATABASE_VERSION } from '@/lib/database-migrations';
+import {
+  assertRecoveryJournalAvailable,
+  migrateRecoveryJournal,
+  reconcileRecoveryCandidate,
+} from '@/lib/recovery-journal';
+import { assertDatabaseIdentity, confirmDatabaseIdentity } from '@/lib/recovery-anchor';
 import { getPendingOperation } from '@/lib/network/pending-operation';
 import { getPendingSale } from '@/lib/network/pending-sale';
 import { getPendingWithdrawal } from '@/lib/network/pending-withdrawal';
@@ -515,6 +522,8 @@ export async function getDatabase() {
       const selected = await resolveDatabaseFile();
       const raw = await SQLite.openDatabaseAsync(selected.fileName);
       try {
+        await assertDatabaseIdentity(raw, selected.authorityId);
+        await assertRecoveryJournalAvailable(raw);
         if (selected.authorityId) await verifyRecoveryDatabase(raw, selected.authorityId);
         const gate = new DatabaseConnectionGate(raw);
         connectionGate = gate;
@@ -548,6 +557,7 @@ export function initializeDatabase() {
 
 async function initializeDatabaseInternal() {
   const db = await getDatabase();
+  await assertDatabaseIdentity(db);
   await prepareMigrationBackup(db);
   await db.execAsync('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   // Schema, upgrades and initial rows form one atomic operation. Keep connection
@@ -757,6 +767,7 @@ async function initializeDatabaseInternal() {
   `);
     await db.runAsync("INSERT OR IGNORE INTO settings(key,value) VALUES('license_mode','demo')");
   });
+  await confirmDatabaseIdentity(db);
   return db;
 }
 
@@ -910,7 +921,38 @@ export async function inspectPrivateRecoveryBackup(
       'SELECT authority_id FROM sync_state WHERE id=1',
     );
     if (!identity?.authority_id) throw new Error('No se pudo verificar la identidad de tus datos.');
-    return inspectRecoverySnapshot(parsed.data, identity.authority_id);
+    const inspection = await inspectRecoverySnapshot(parsed.data, identity.authority_id);
+    const source = await SQLite.openDatabaseAsync(parsed.data.fileName, { useNewConnection: true });
+    try {
+      await source.execAsync('PRAGMA query_only=ON');
+      await verifyRecoveryDatabase(db, identity.authority_id);
+      const comparison = await reconcileRecoveryDatabases(db, source);
+      return {
+        ...inspection,
+        recovery: {
+          status: comparison.canRestore
+            ? comparison.replayEntries
+              ? 'forward'
+              : 'equal'
+            : 'blocked',
+          replayEntries: comparison.replayEntries,
+        },
+      } satisfies RecoveryBackupInspection;
+    } catch (error) {
+      return {
+        ...inspection,
+        recovery: {
+          status: 'blocked',
+          replayEntries: 0,
+          reason:
+            error instanceof Error
+              ? error.message
+              : 'No se pudo confirmar la compatibilidad con los datos actuales.',
+        },
+      } satisfies RecoveryBackupInspection;
+    } finally {
+      await source.closeAsync();
+    }
   });
 }
 
@@ -1079,25 +1121,41 @@ export async function restorePrivateRecoveryBackup(
         'Ya existe un archivo de recuperación con ese identificador. No se sobrescribirá.',
       );
     await SQLite.backupDatabaseAsync({ sourceDatabase: source, destDatabase: candidate });
-    await candidate.withTransactionAsync(async () => {
-      await preserveRecoveryRuntime(current, candidate!);
-      await candidate!.runAsync(
-        'INSERT INTO audit_log(action,username,date,detail) VALUES(?,?,?,?)',
-        'recovery.restore',
-        administrator.username,
-        now(),
-        json({
-          restoreId,
-          backupId,
-          safetyBackupId: safetyCopy.id,
-          policy: 'equal-business-state',
-          confirmedReceipts: reconciliation.confirmedReceipts,
-        }),
-      );
-    });
+    if (backup.schemaVersion === 8) {
+      // Upgrade only the isolated candidate; an unchanged v8 snapshot remains
+      // recoverable, but cannot acquire missing historical evidence retroactively.
+      await candidate.withTransactionAsync(async () => {
+        await migrateRecoveryJournal(candidate!);
+        await candidate!.execAsync(`PRAGMA user_version=${DATABASE_VERSION}`);
+      });
+    }
+    await reconcileRecoveryCandidate(
+      current,
+      candidate,
+      async () => {
+        await preserveRecoveryRuntime(current, candidate!);
+        await candidate!.runAsync(
+          'INSERT INTO audit_log(action,username,date,detail) VALUES(?,?,?,?)',
+          'recovery.restore',
+          administrator.username,
+          now(),
+          json({
+            restoreId,
+            backupId,
+            safetyBackupId: safetyCopy.id,
+            policy: reconciliation.replayEntries
+              ? 'verified-journal-forward-recovery'
+              : 'equal-business-state',
+            replayEntries: reconciliation.replayEntries,
+            confirmedReceipts: reconciliation.confirmedReceipts,
+          }),
+        );
+      },
+      backup.schemaVersion === 8,
+    );
     await verifyRecoveryDatabase(candidate, identity.authority_id);
     const verified = await reconcileRecoveryDatabases(current, candidate);
-    if (!verified.canRestore)
+    if (verified.tables.some((table) => table.status !== 'equal'))
       throw new Error('La conciliación final no coincide. Se conserva la base original.');
     await candidate.closeAsync();
     candidate = null;

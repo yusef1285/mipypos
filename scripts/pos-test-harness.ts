@@ -27,6 +27,8 @@ function values(args: unknown[]): SqlValue[] {
 }
 
 type HarnessModules = {
+  '@/lib/recovery-anchor': typeof import('../lib/recovery-anchor');
+  '@/lib/recovery-journal': typeof import('../lib/recovery-journal');
   '@/lib/recovery-selector': typeof import('../lib/recovery-selector');
   '@/lib/recovery-reconciliation': typeof import('../lib/recovery-reconciliation');
   '@/lib/database-maintenance': typeof import('../lib/database-maintenance');
@@ -56,6 +58,8 @@ type HarnessModules = {
 export function createHarness(overrides: Record<string, unknown> = {}) {
   const database: Database = new sql.Database();
   const storage = new Map<string, string>();
+  let primaryDatabaseExists = true;
+  const openedDatabaseNames: string[] = [];
   let failSql = '';
   let recoveryFault:
     | 'close-active'
@@ -136,7 +140,11 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
     'expo-sqlite': {
       defaultDatabaseDirectory: 'file:///private/SQLite',
       openDatabaseAsync: async (name: string) => {
-        if (name === 'mipypos.db') return adapter;
+        openedDatabaseNames.push(name);
+        if (name === 'mipypos.db') {
+          primaryDatabaseExists = true;
+          return adapter;
+        }
         if (name.startsWith('mipypos.restored.') && backups.has(name))
           injectRecoveryFault('candidate-reopen');
         let queryOnly = false;
@@ -158,7 +166,9 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
           if (failSql && query.includes(failSql)) throw new Error('Injected write failure');
           const copy = backups.get(name);
           if (!copy) throw new Error('Missing fixture database');
-          copy.run(query, values(args));
+          // sql.js with an empty bind array executes only the first statement.
+          // Expo execAsync executes the whole batch, including migration DDL.
+          copy.run(query, args.length ? values(args) : undefined);
           return {
             changes: copy.getRowsModified(),
             lastInsertRowId: Number(queryRows('SELECT last_insert_rowid() AS id')[0]?.id ?? 0),
@@ -219,7 +229,7 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
           this.name = name;
         }
         get exists() {
-          return this.name === 'mipypos.db' || backups.has(this.name);
+          return (this.name === 'mipypos.db' && primaryDatabaseExists) || backups.has(this.name);
         }
       },
     },
@@ -316,6 +326,11 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
     backups,
     storage,
     load,
+    openedDatabaseNames,
+    setPrimaryDatabaseExists: (exists: boolean) => {
+      primaryDatabaseExists = exists;
+    },
+    reloadModules: () => cache.clear(),
     failWritesContaining: (query: string) => {
       failSql = query;
     },

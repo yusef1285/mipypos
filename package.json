@@ -14,7 +14,8 @@
     "test:lan": "tsx --test scripts/lan-security.test.ts",
     "test:finance": "tsx --test scripts/finance-regression.test.ts",
     "test:onat": "tsx --test scripts/onat-regression.test.ts",
-    "validate:pos": "npm run test:pos && npm run test:lan && npm run test:finance && npm run test:onat",
+    "test:recovery": "tsx --test scripts/recovery-regression.test.ts",
+    "validate:pos": "npm run test:pos && npm run test:lan && npm run test:finance && npm run test:onat && npm run test:recovery",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check ."
   },

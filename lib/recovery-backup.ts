@@ -26,6 +26,11 @@ export interface RecoveryBackupInspection {
   products: number;
   cashSessions: number;
   commandReceipts: number;
+  recovery?: {
+    status: 'equal' | 'forward' | 'blocked';
+    replayEntries: number;
+    reason?: string;
+  };
 }
 
 // Verification never opens a missing path (SQLite would create an empty database).
@@ -39,7 +44,7 @@ export async function inspectRecoverySnapshot(
   const copy = parsed.data;
   if (copy.authorityId !== expectedAuthorityId)
     throw new Error('La copia pertenece a otra autoridad. No se utilizará.');
-  if (copy.schemaVersion !== DATABASE_VERSION)
+  if (copy.schemaVersion !== 8 && copy.schemaVersion !== DATABASE_VERSION)
     throw new Error('Esta copia necesita revisión de compatibilidad antes de recuperarla.');
   const directory: unknown = SQLite.defaultDatabaseDirectory;
   if (Platform.OS === 'web' || typeof directory !== 'string' || !directory)

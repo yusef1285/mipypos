@@ -1,6 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import * as Crypto from 'expo-crypto';
 import { DATABASE_VERSION } from '@/lib/database-migrations';
+import { JOURNAL_EXCLUDED_TABLES, planRecoveryReplay } from '@/lib/recovery-journal';
 
 export interface RecoveryTableDifference {
   table: string;
@@ -13,17 +14,12 @@ export interface RecoveryReconciliation {
   tables: RecoveryTableDifference[];
   confirmedReceipts: number;
   backupReceipts: number;
+  replayEntries: number;
 }
 
-// These are device runtime/diagnostic records, never financial effects. Their
-// current contents are preserved in the new generation, not rolled back.
-export const RECOVERY_RUNTIME_TABLES = new Set([
-  'login_attempts',
-  'network_events',
-  'network_replica',
-  'sync_state',
-  'sqlite_sequence',
-]);
+// Device runtime and private recovery evidence never roll back. The journal
+// is not a LAN replica and must not be exported with commercial data.
+export const RECOVERY_RUNTIME_TABLES = JOURNAL_EXCLUDED_TABLES;
 const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
 export async function verifyRecoveryDatabase(db: SQLiteDatabase, authorityId: string) {
   const checks = await db.getAllAsync<{ integrity_check: string }>('PRAGMA integrity_check');
@@ -77,10 +73,20 @@ export async function reconcileRecoveryDatabases(
   current: SQLiteDatabase,
   backup: SQLiteDatabase,
 ): Promise<RecoveryReconciliation> {
+  const backupVersion = await backup.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  const legacy = backupVersion?.user_version === 8;
+  // v9 adds only private journal structures. A v8 backup must otherwise have
+  // exactly the existing schema; do not hide unexpected objects in the backup.
   const schemaQuery =
-    "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
-  const currentSchema = await current.getAllAsync(schemaQuery);
-  const backupSchema = await backup.getAllAsync(schemaQuery);
+    "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'";
+  const currentSchema = await current.getAllAsync(
+    schemaQuery +
+      (legacy
+        ? " AND tbl_name NOT IN ('recovery_journal','recovery_lineage') AND name NOT LIKE 'recovery_capture_%'"
+        : '') +
+      ' ORDER BY type,name',
+  );
+  const backupSchema = await backup.getAllAsync(schemaQuery + ' ORDER BY type,name');
   if (JSON.stringify(currentSchema) !== JSON.stringify(backupSchema))
     throw new Error('La estructura de la copia no coincide con la instalación. No se restaurará.');
   const names = await current.getAllAsync<{ name: string }>(
@@ -104,8 +110,15 @@ export async function reconcileRecoveryDatabases(
   const backupReceipts = await backup.getFirstAsync<{ count: number }>(
     'SELECT COUNT(*) AS count FROM network_commands',
   );
+  const equal = tables.every((table) => table.status === 'equal');
+  if (legacy && !equal)
+    throw new Error(
+      'La copia v8 difiere de los datos actuales y no tiene historial para conciliarlos. Se conservan ambas bases.',
+    );
+  const replay = equal ? null : await planRecoveryReplay(current, backup);
   return {
-    canRestore: tables.every((table) => table.status === 'equal'),
+    canRestore: equal || (replay !== null && replay.entries > 0),
+    replayEntries: replay?.entries ?? 0,
     tables,
     confirmedReceipts: currentReceipts?.count ?? 0,
     backupReceipts: backupReceipts?.count ?? 0,
@@ -116,8 +129,8 @@ export async function preserveRecoveryRuntime(
   current: SQLiteDatabase,
   destination: SQLiteDatabase,
 ) {
-  // Copy all audit/settings rows after equality of business contents has been
-  // demonstrated. Retains backup catalog, authentication attempts and receipts.
+  // Called only with triggers suspended on an isolated candidate after verified
+  // row replay. Full business equality is required again before activation.
   for (const table of [...RECOVERY_RUNTIME_TABLES, 'settings', 'audit_log']) {
     const exists = await current.getFirstAsync(
       "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
