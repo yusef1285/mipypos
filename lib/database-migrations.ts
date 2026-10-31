@@ -16,6 +16,27 @@ export async function prepareMigrationBackup(db: SQLite.SQLiteDatabase) {
   if (version === DATABASE_VERSION || !existing) return;
   const destination = await SQLite.openDatabaseAsync(`mipypos.pre-v${version}.db`);
   try {
+    // A failed migration can be retried after the source changes. Never replace
+    // the original recovery evidence with the newer (possibly damaged) source.
+    const saved = await destination.getFirstAsync(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='users'",
+    );
+    if (saved) {
+      const savedVersion = await destination.getFirstAsync<{ user_version: number }>(
+        'PRAGMA user_version',
+      );
+      const integrity = await destination.getFirstAsync<{ integrity_check: string }>(
+        'PRAGMA integrity_check',
+      );
+      if (savedVersion?.user_version !== version || integrity?.integrity_check !== 'ok')
+        throw new Error('La copia original necesita revisión. Se conserva sin sobrescribirla.');
+      return;
+    }
+    const otherTables = await destination.getFirstAsync(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1",
+    );
+    if (otherTables)
+      throw new Error('La copia existente está incompleta. Se conserva sin sobrescribirla.');
     await SQLite.backupDatabaseAsync({ sourceDatabase: db, destDatabase: destination });
     const check = await destination.getFirstAsync<{ integrity_check: string }>(
       'PRAGMA integrity_check',

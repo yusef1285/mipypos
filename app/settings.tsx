@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react';
 import { Alert, View } from 'react-native';
 
 import { LanConnection } from '@/components/LanConnection';
+import { RecoveryBackupControls } from '@/components/RecoveryBackupControls';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
 import { getDeviceInfo, validateLicenseKey } from '@/lib/license';
@@ -107,6 +108,7 @@ export default function Settings() {
         <Row label="Identificador" value={device?.id ?? ''} />
         <Row label="Versión" value={device?.version ?? '1.0.0'} />
       </Card>
+      <RecoveryBackupControls />
       <LanConnection allowHost />
       <Button variant="danger-soft" size="lg" onPress={logout}>
         <LogOut className="text-danger" size={19} />

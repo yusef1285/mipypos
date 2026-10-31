@@ -245,9 +245,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       assertPendingAuthority(
         networkConfig,
         next,
-        [operation?.hostUrl, pending?.hostUrl, withdrawal?.authority].filter(
-          (authority): authority is string => authority !== undefined,
+        [operation, pending, withdrawal].flatMap((record) =>
+          record ? ['authority' in record ? record.authority : record.hostUrl] : [],
         ),
+        [operation, pending, withdrawal].flatMap((record) => (record ? [record.hostPin] : [])),
       );
       if (next.mode === 'host' && user?.role !== 'admin')
         throw new Error('Solo un administrador puede iniciar el host.');

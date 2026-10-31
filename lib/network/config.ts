@@ -98,25 +98,54 @@ export async function saveNetworkConfig(config: NetworkConfig) {
   await AsyncStorage.setItem(CONFIG_KEY, JSON.stringify(publicConfig(normalized)));
   return normalized;
 }
-// Pending HTTPS commands must keep their previously paired TLS identity, not
-// merely an IP address. A missing secure pin requires assisted reconciliation.
-export function assertPendingAuthority(
+// New encrypted journals retain the original public TLS pin. Old journals without
+// an anchor still require reconciliation; an IP or a candidate QR cannot supply it.
+export function pendingAuthorityPin(
   current: NetworkConfig,
-  next: NetworkConfig,
   authorities: readonly string[],
-) {
-  const remote = authorities.filter((authority) => authority !== 'local');
-  if (!remote.length) return;
+  pins: readonly (string | undefined)[] = [],
+): string | undefined {
+  const remote = authorities.flatMap((authority, index) =>
+    authority === 'local' ? [] : [{ authority, pin: pins[index] }],
+  );
+  if (!remote.length) return current.hostPin;
+  const expected = current.hostPin ?? remote[0]?.pin;
   if (
-    current.mode !== 'client' ||
-    !current.hostPin ||
-    next.mode !== 'client' ||
-    next.hostPin !== current.hostPin
+    !expected ||
+    remote.some(
+      (record) =>
+        (record.pin !== undefined && record.pin !== expected) ||
+        (!current.hostPin && (!record.pin || !record.authority.startsWith('https:'))),
+    )
   )
     throw new Error(
       'No se puede verificar la identidad original del administrador. Las operaciones pendientes se conservan; revisa su confirmación antes de volver a emparejar.',
     );
-  if (remote.some((authority) => authority !== current.hostUrl && authority !== next.hostUrl))
+  if (!current.hostPin) validateHostPin(expected);
+  return expected;
+}
+export function assertPendingAuthority(
+  current: NetworkConfig,
+  next: NetworkConfig,
+  authorities: readonly string[],
+  pins: readonly (string | undefined)[] = [],
+) {
+  const remote = authorities.filter((authority) => authority !== 'local');
+  if (!remote.length) return;
+  const originalPin = pendingAuthorityPin(current, authorities, pins);
+  if (current.mode !== 'client' || next.mode !== 'client' || next.hostPin !== originalPin)
+    throw new Error(
+      'No se puede verificar la identidad original del administrador. Las operaciones pendientes se conservan; revisa su confirmación antes de volver a emparejar.',
+    );
+  if (
+    authorities.some(
+      (authority, index) =>
+        authority !== 'local' &&
+        authority !== current.hostUrl &&
+        authority !== next.hostUrl &&
+        !(!current.hostPin && pins[index] === originalPin),
+    )
+  )
     throw new Error('Confirma las operaciones pendientes con el administrador original.');
 }
 

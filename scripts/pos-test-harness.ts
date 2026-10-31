@@ -109,11 +109,18 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
   }
   const mocks: Record<string, unknown> = {
     'expo-sqlite': {
+      defaultDatabaseDirectory: 'file:///private/SQLite',
       openDatabaseAsync: async (name: string) =>
         name === 'mipypos.db'
           ? adapter
           : {
               name,
+              execAsync: async (query: string) => {
+                // Separate connections have a connection-local query_only flag.
+                // sql.js retains one object per fixture file, so enforce only
+                // non-query-only statements here, without changing that object.
+                if (query !== 'PRAGMA query_only=ON') backups.get(name)?.run(query);
+              },
               getFirstAsync: async (query: string) => {
                 const copy = backups.get(name);
                 if (!copy) return null;
@@ -124,11 +131,34 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
                   statement.free();
                 }
               },
+              getAllAsync: async (query: string) => {
+                const copy = backups.get(name);
+                if (!copy) return [];
+                const statement = copy.prepare(query);
+                try {
+                  const rows: Record<string, SqlValue>[] = [];
+                  while (statement.step()) rows.push(statement.getAsObject());
+                  return rows;
+                } finally {
+                  statement.free();
+                }
+              },
               closeAsync: async () => undefined,
             },
       backupDatabaseAsync: async ({ destDatabase }: { destDatabase: { name: string } }) => {
         if (failSql === 'BACKUP') throw new Error('Injected backup failure');
         backups.set(destDatabase.name, new sql.Database(database.export()));
+      },
+    },
+    'expo-file-system': {
+      File: class {
+        readonly name: string;
+        constructor(_directory: string, name: string) {
+          this.name = name;
+        }
+        get exists() {
+          return backups.has(this.name);
+        }
       },
     },
     'expo-crypto': {

@@ -2,10 +2,12 @@ import * as Crypto from 'expo-crypto';
 import { createPendingStore } from '@/lib/network/pending-store';
 import type { OperationRequest, PosOperation } from '@/lib/network/operations';
 import { assertOperationRequest } from '@/lib/network/validation';
+import { validateHostPin } from '@/lib/network/qr';
 
 const KEY = 'mipypos.pending-operation';
 export interface PendingOperation {
   hostUrl: string;
+  hostPin?: string;
   username: string;
   clientId: string;
   commandId: string;
@@ -40,6 +42,9 @@ async function parsePendingOperation(stored: string): Promise<PendingOperation> 
       throw new Error('El contenido pendiente cambió.');
     return {
       hostUrl: value.hostUrl,
+      ...('hostPin' in value
+        ? { hostPin: validateHostPin(typeof value.hostPin === 'string' ? value.hostPin : '') }
+        : {}),
       username: value.username,
       clientId: value.clientId,
       commandId: value.commandId,
@@ -68,6 +73,7 @@ export async function prepareOperation(input: Omit<PendingOperation, 'commandId'
   if (pending) {
     if (
       pending.hostUrl !== input.hostUrl ||
+      (pending.hostPin !== undefined && pending.hostPin !== input.hostPin) ||
       pending.username !== input.username ||
       pending.clientId !== input.clientId ||
       pending.fingerprint !== fingerprint

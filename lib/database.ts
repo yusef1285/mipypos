@@ -21,6 +21,14 @@ import { saleFingerprint } from '@/lib/sale-identity';
 import { canAccess } from '@/lib/permissions';
 import { prepareMigrationBackup, migrateHardening } from '@/lib/database-migrations';
 import {
+  createRecoverySnapshot,
+  inspectRecoverySnapshot,
+  recoveryBackupSchema,
+  type RecoveryBackup,
+  type RecoveryBackupInspection,
+} from '@/lib/recovery-backup';
+import { loadNetworkConfig } from '@/lib/network/config';
+import {
   BUSINESS_TABLES,
   archiveSchema,
   parseBusinessArchive,
@@ -461,11 +469,31 @@ export async function hashPassword(password: string) {
 }
 
 export async function getDatabase() {
-  databasePromise ??= SQLite.openDatabaseAsync('mipypos.db');
+  if (!databasePromise) {
+    const opening = SQLite.openDatabaseAsync('mipypos.db');
+    databasePromise = opening;
+    void opening.catch(() => {
+      if (databasePromise === opening) databasePromise = null;
+    });
+  }
   return databasePromise;
 }
 
-export async function initializeDatabase() {
+let initializationPromise: Promise<SQLite.SQLiteDatabase> | null = null;
+export function initializeDatabase() {
+  if (!initializationPromise) {
+    const attempt = initializeDatabaseInternal();
+    initializationPromise = attempt;
+    void attempt
+      .finally(() => {
+        if (initializationPromise === attempt) initializationPromise = null;
+      })
+      .catch(() => undefined);
+  }
+  return initializationPromise;
+}
+
+async function initializeDatabaseInternal() {
   const db = await getDatabase();
   await prepareMigrationBackup(db);
   await db.execAsync('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
@@ -770,6 +798,116 @@ export async function authenticateForLogin(username: string, password: string) {
   });
   if (!allowed) throw new Error('Demasiados intentos. Espera un minuto e inténtalo de nuevo.');
   return authenticate(username, password);
+}
+
+export async function listPrivateRecoveryBackups(username: string): Promise<RecoveryBackup[]> {
+  if ((await loadNetworkConfig()).mode === 'client')
+    throw new Error('Crea y consulta las copias en el teléfono administrador.');
+  return consistentRead(async () => {
+    const db = await getDatabase();
+    const user = await db.getFirstAsync<Usuario>(
+      'SELECT * FROM users WHERE username=? COLLATE NOCASE',
+      username,
+    );
+    if (user?.role !== 'admin')
+      throw new Error('Solo un administrador puede consultar las copias.');
+    const rows = await db.getAllAsync<{ value: string }>(
+      "SELECT value FROM settings WHERE key LIKE 'private_backup:%'",
+    );
+    return rows
+      .map((row) => {
+        const parsed = recoveryBackupSchema.safeParse(parseJson(row.value));
+        if (!parsed.success)
+          throw new Error('El registro de copias necesita revisión. Las copias se conservan.');
+        return parsed.data;
+      })
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  });
+}
+
+export async function inspectPrivateRecoveryBackup(
+  username: string,
+  password: string,
+  backupId: string,
+): Promise<RecoveryBackupInspection> {
+  if ((await loadNetworkConfig()).mode === 'client')
+    throw new Error('Comprueba la copia en el teléfono administrador.');
+  const authenticated = await authenticateForLogin(username, password);
+  if (authenticated?.role !== 'admin')
+    throw new Error('Confirma la contraseña de tu cuenta de administrador.');
+  return consistentRead(async () => {
+    const db = await getDatabase();
+    const current = await db.getFirstAsync<Usuario>(
+      'SELECT * FROM users WHERE id=?',
+      authenticated.id,
+    );
+    if (current?.role !== 'admin' || current.password_hash !== authenticated.password_hash)
+      throw new Error('La cuenta cambió. Inicia sesión de nuevo antes de comprobar la copia.');
+    if ((await loadNetworkConfig()).mode === 'client')
+      throw new Error('Comprueba la copia en el teléfono administrador.');
+    const row = await db.getFirstAsync<{ value: string }>(
+      'SELECT value FROM settings WHERE key=?',
+      `private_backup:${backupId}`,
+    );
+    const parsed = recoveryBackupSchema.safeParse(parseJson(row?.value ?? null));
+    if (!parsed.success || parsed.data.id !== backupId)
+      throw new Error('No se pudo verificar el registro de la copia. Se conserva sin modificar.');
+    const identity = await db.getFirstAsync<{ authority_id: string }>(
+      'SELECT authority_id FROM sync_state WHERE id=1',
+    );
+    if (!identity?.authority_id) throw new Error('No se pudo verificar la identidad de tus datos.');
+    return inspectRecoverySnapshot(parsed.data, identity.authority_id);
+  });
+}
+
+export async function createPrivateRecoveryBackup(
+  username: string,
+  password: string,
+): Promise<RecoveryBackup> {
+  if ((await loadNetworkConfig()).mode === 'client')
+    throw new Error('Crea la copia en el teléfono administrador, no en una terminal cliente.');
+  const authenticated = await authenticateForLogin(username, password);
+  if (authenticated?.role !== 'admin')
+    throw new Error('Confirma la contraseña de tu cuenta de administrador.');
+  const db = await getDatabase();
+  const pending = mutationQueue.then(async () => {
+    const current = await db.getFirstAsync<Usuario>(
+      'SELECT * FROM users WHERE id=?',
+      authenticated.id,
+    );
+    if (current?.role !== 'admin' || current.password_hash !== authenticated.password_hash)
+      throw new Error('La cuenta cambió. Inicia sesión de nuevo antes de crear la copia.');
+    if ((await loadNetworkConfig()).mode === 'client')
+      throw new Error('Crea la copia en el teléfono administrador.');
+    const copy = await createRecoverySnapshot(db);
+    // The snapshot is verified before its metadata is advertised. A failed catalog
+    // write leaves the file preserved, never a falsely confirmed recovery copy.
+    await db.withTransactionAsync(async () => {
+      await db.runAsync(
+        'INSERT INTO settings(key,value) VALUES(?,?)',
+        `private_backup:${copy.id}`,
+        json(copy),
+      );
+      await db.runAsync(
+        'INSERT INTO audit_log(action,username,date,detail) VALUES(?,?,?,?)',
+        'recovery.backup',
+        current.username,
+        now(),
+        json({ backupId: copy.id, schemaVersion: copy.schemaVersion }),
+      );
+      await db.runAsync(
+        'INSERT INTO network_events(type,entity_id,created_at) VALUES(?,NULL,?)',
+        'data.changed',
+        now(),
+      );
+    });
+    return copy;
+  });
+  mutationQueue = pending.then(
+    () => undefined,
+    () => undefined,
+  );
+  return pending;
 }
 
 export async function listUsers() {

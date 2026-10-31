@@ -1314,6 +1314,362 @@ void regression(
   },
 );
 
+void regression(
+  'reintento de migración conserva el respaldo original sin sobrescribirlo',
+  async () => {
+    const f = await fixture();
+    f.database.run('PRAGMA user_version=6');
+    const originalUsers = f.database.exec('SELECT * FROM users ORDER BY id');
+    const originalProducts = f.database.exec('SELECT * FROM products ORDER BY id');
+    const originalSettings = f.database.exec('SELECT * FROM settings ORDER BY key');
+    f.failWritesContaining('INSERT OR IGNORE INTO sync_state');
+    await assert.rejects(f.db.initializeDatabase());
+    const backup = f.backups.get('mipypos.pre-v6.db');
+    assert.ok(backup);
+    f.database.run("UPDATE products SET name='Origen cambiado tras fallo' WHERE id=1");
+    f.failWritesContaining('');
+    await f.db.initializeDatabase();
+    assert.equal(f.backups.get('mipypos.pre-v6.db'), backup);
+    assert.deepEqual(backup.exec('SELECT * FROM users ORDER BY id'), originalUsers);
+    assert.deepEqual(backup.exec('SELECT * FROM products ORDER BY id'), originalProducts);
+    assert.deepEqual(backup.exec('SELECT * FROM settings ORDER BY key'), originalSettings);
+    assert.equal(backup.exec('PRAGMA user_version')[0].values[0][0], 6);
+    assert.equal((await f.db.getProduct(1))?.name, 'Origen cambiado tras fallo');
+  },
+);
+
+void regression(
+  'copia previa de versión incorrecta bloquea actualización sin destruir evidencia',
+  async () => {
+    const f = await fixture();
+    f.database.run('PRAGMA user_version=6');
+    f.failWritesContaining('INSERT OR IGNORE INTO sync_state');
+    await assert.rejects(f.db.initializeDatabase());
+    const backup = f.backups.get('mipypos.pre-v6.db');
+    assert.ok(backup);
+    backup.run('PRAGMA user_version=5');
+    const original = backup.exec('SELECT * FROM users');
+    f.failWritesContaining('');
+    await assert.rejects(f.db.initializeDatabase(), /copia segura/);
+    assert.equal(f.backups.get('mipypos.pre-v6.db'), backup);
+    assert.deepEqual(backup.exec('SELECT * FROM users'), original);
+    assert.equal(backup.exec('PRAGMA user_version')[0].values[0][0], 5);
+    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 6);
+  },
+);
+
+void regression(
+  'arranques concurrentes comparten una inicialización sin duplicar semillas',
+  async () => {
+    const h = createHarness();
+    const db = h.load('@/lib/database');
+    const first = db.initializeDatabase();
+    const second = db.initializeDatabase();
+    assert.equal(first, second);
+    await Promise.all([first, second]);
+    assert.equal((await db.listUsers()).length, 1);
+    assert.equal((await db.listAreas()).length, 1);
+    assert.equal(h.database.exec('PRAGMA foreign_key_check').length, 0);
+  },
+);
+
+void regression('apertura SQLite rechazada no envenena los siguientes reintentos', async () => {
+  const source = createHarness();
+  const connection = await source.load('@/lib/database').getDatabase();
+  let attempts = 0;
+  const h = createHarness({
+    'expo-sqlite': {
+      openDatabaseAsync: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('Apertura interrumpida');
+        return connection;
+      },
+    },
+  });
+  const db = h.load('@/lib/database');
+  await assert.rejects(
+    Promise.all([db.initializeDatabase(), db.initializeDatabase()]),
+    /interrumpida/,
+  );
+  assert.equal(attempts, 1);
+  await db.initializeDatabase();
+  assert.equal(attempts, 2);
+  assert.equal((await db.listUsers()).length, 1);
+});
+
+void regression(
+  'copia privada conserva cuentas, licencia, cuotas, ventas y caja sin sobrescribir otras',
+  async () => {
+    const f = await fixture();
+    await f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin');
+    const tables = [
+      'users',
+      'products',
+      'area_stock',
+      'sales',
+      'sale_lines',
+      'cash_sessions',
+      'sync_state',
+    ];
+    const before = tables.map((table) => f.database.exec(`SELECT * FROM ${table}`));
+    const first = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    const copy = f.backups.get(first.fileName);
+    assert.ok(copy);
+    for (const [index, table] of tables.entries())
+      assert.deepEqual(copy.exec(`SELECT * FROM ${table}`), before[index]);
+    assert.deepEqual(
+      copy.exec(
+        "SELECT * FROM settings WHERE key IN ('license_mode','usage_products','usage_sales')",
+      ),
+      f.database.exec(
+        "SELECT * FROM settings WHERE key IN ('license_mode','usage_products','usage_sales')",
+      ),
+    );
+    assert.equal(copy.exec('PRAGMA user_version')[0].values[0][0], 7);
+    assert.equal(copy.exec('PRAGMA foreign_key_check').length, 0);
+    const original = copy.exec('SELECT * FROM products');
+    const currentProduct = await f.db.getProduct(f.product.id);
+    assert.ok(currentProduct);
+    await f.db.saveProduct({ ...currentProduct, price_cash: 200 }, 'admin');
+    const second = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    assert.notEqual(first.fileName, second.fileName);
+    assert.deepEqual(copy.exec('SELECT * FROM products'), original);
+    assert.equal((await f.db.listPrivateRecoveryBackups('admin')).length, 2);
+    assert.equal(
+      f.database.exec("SELECT COUNT(*) FROM audit_log WHERE action='recovery.backup'")[0]
+        .values[0][0],
+      2,
+    );
+  },
+);
+
+void regression(
+  'copia privada requiere administrador autenticado y limita contraseñas fallidas',
+  async () => {
+    const f = await fixture();
+    await f.db.saveUser({ username: 'vendedor', password: 'pass1234', role: 'seller' });
+    await assert.rejects(f.db.createPrivateRecoveryBackup('vendedor', 'pass1234'), /administrador/);
+    await assert.rejects(f.db.listPrivateRecoveryBackups('vendedor'), /administrador/);
+    for (let attempt = 0; attempt < 5; attempt++)
+      await assert.rejects(f.db.createPrivateRecoveryBackup('admin', 'incorrecta'), /contraseña/);
+    await assert.rejects(
+      f.db.createPrivateRecoveryBackup('admin', 'admin123'),
+      /Demasiados intentos/,
+    );
+    assert.equal(f.backups.size, 0);
+    assert.equal((await f.db.listPrivateRecoveryBackups('admin')).length, 0);
+  },
+);
+
+void regression(
+  'terminal cliente no respalda su base como si fuera la autoridad comercial',
+  async () => {
+    const f = await fixture();
+    f.storage.set(
+      'mipypos.network.config',
+      JSON.stringify({
+        mode: 'client',
+        hostUrl: 'https://192.168.43.1:8787',
+        clientId: 'terminal-a',
+      }),
+    );
+    f.storage.set('secure:mipypos.network.pin', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
+    await assert.rejects(f.db.createPrivateRecoveryBackup('admin', 'admin123'), /administrador/);
+    await assert.rejects(f.db.listPrivateRecoveryBackups('admin'), /administrador/);
+    assert.equal(f.backups.size, 0);
+  },
+);
+
+void regression('fallo de backup no anuncia éxito y conserva copias anteriores', async () => {
+  const f = await fixture();
+  const first = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+  const copy = f.backups.get(first.fileName);
+  f.failWritesContaining('BACKUP');
+  await assert.rejects(f.db.createPrivateRecoveryBackup('admin', 'admin123'), /backup failure/);
+  assert.equal((await f.db.listPrivateRecoveryBackups('admin')).length, 1);
+  assert.equal(f.backups.get(first.fileName), copy);
+  f.failWritesContaining('');
+  await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+  assert.equal((await f.db.listPrivateRecoveryBackups('admin')).length, 2);
+});
+
+void regression(
+  'fallo de catálogo de respaldo conserva archivo pero revierte manifest y auditoría',
+  async () => {
+    const f = await fixture();
+    f.failWritesContaining('INSERT INTO audit_log');
+    await assert.rejects(f.db.createPrivateRecoveryBackup('admin', 'admin123'));
+    assert.equal(f.backups.size, 1);
+    assert.equal((await f.db.listPrivateRecoveryBackups('admin')).length, 0);
+    assert.equal(
+      f.database.exec("SELECT COUNT(*) FROM audit_log WHERE action='recovery.backup'")[0]
+        .values[0][0],
+      0,
+    );
+    f.failWritesContaining('');
+    await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    assert.equal(f.backups.size, 2);
+    assert.equal((await f.db.listPrivateRecoveryBackups('admin')).length, 1);
+  },
+);
+
+void regression(
+  'copias simultáneas y venta producen snapshots íntegros sin duplicar efectos',
+  async () => {
+    const f = await fixture();
+    const [first, second, saleId] = await Promise.all([
+      f.db.createPrivateRecoveryBackup('admin', 'admin123'),
+      f.db.createPrivateRecoveryBackup('admin', 'admin123'),
+      f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin'),
+    ]);
+    assert.notEqual(first.fileName, second.fileName);
+    assert.ok(saleId > 0);
+    for (const item of [first, second]) {
+      const copy = f.backups.get(item.fileName);
+      assert.ok(copy);
+      const sales = Number(copy.exec('SELECT COUNT(*) FROM sales')[0].values[0][0]);
+      const stock = Number(copy.exec('SELECT stock FROM products WHERE id=1')[0].values[0][0]);
+      assert.equal(stock, 10 - sales);
+      assert.equal(copy.exec('PRAGMA foreign_key_check').length, 0);
+    }
+    assert.equal((await f.db.getProduct(f.product.id))?.stock, 9);
+    assert.equal((await f.db.getDemoUsage()).sales, 1);
+  },
+);
+
+void regression(
+  'verificar copia privada lee historial original sin secretos ni modificar archivo',
+  async () => {
+    const f = await fixture();
+    await f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin');
+    const backup = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    const file = f.backups.get(backup.fileName);
+    assert.ok(file);
+    const before = file.export();
+    await f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin');
+    const inspection = await f.db.inspectPrivateRecoveryBackup('admin', 'admin123', backup.id);
+    assert.equal(inspection.sales, 1);
+    assert.equal(inspection.products, 1);
+    assert.equal(inspection.cashSessions, 1);
+    assert.equal(inspection.commandReceipts, 0);
+    assert.ok(inspection.verifiedAt);
+    assert.deepEqual(file.export(), before);
+    assert.equal((await f.db.getDemoUsage()).sales, 2);
+    assert.equal((await f.db.getProduct(f.product.id))?.stock, 8);
+    assert.equal(JSON.stringify(inspection).includes('password_hash'), false);
+    assert.equal(JSON.stringify(inspection).includes('admin123'), false);
+  },
+);
+
+void regression(
+  'verificar archivo ausente no crea SQLite ni elimina registro de respaldo',
+  async () => {
+    const f = await fixture();
+    const backup = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    f.backups.delete(backup.fileName);
+    await assert.rejects(
+      f.db.inspectPrivateRecoveryBackup('admin', 'admin123', backup.id),
+      /No se encontró/,
+    );
+    assert.equal(f.backups.size, 0);
+    assert.equal((await f.db.listPrivateRecoveryBackups('admin')).length, 1);
+  },
+);
+
+void regression('verificar respaldo requiere rol contraseña y autoridad local', async () => {
+  const f = await fixture();
+  const backup = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+  await f.db.saveUser({ username: 'seller', password: 'pass1234', role: 'seller' });
+  await assert.rejects(
+    f.db.inspectPrivateRecoveryBackup('seller', 'pass1234', backup.id),
+    /administrador/,
+  );
+  await assert.rejects(
+    f.db.inspectPrivateRecoveryBackup('admin', 'incorrecta', backup.id),
+    /contraseña/,
+  );
+  f.storage.set(
+    'mipypos.network.config',
+    JSON.stringify({
+      mode: 'client',
+      hostUrl: 'https://192.168.43.1:8787',
+      clientId: 'terminal-a',
+    }),
+  );
+  f.storage.set('secure:mipypos.network.pin', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=');
+  await assert.rejects(
+    f.db.inspectPrivateRecoveryBackup('admin', 'admin123', backup.id),
+    /administrador/,
+  );
+  assert.equal(f.backups.size, 1);
+});
+
+void regression(
+  'verificar respaldo rechaza versión o identidad alterada y conserva evidencia',
+  async () => {
+    const f = await fixture();
+    const backup = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    const file = f.backups.get(backup.fileName);
+    assert.ok(file);
+    file.run('PRAGMA user_version=8');
+    await assert.rejects(
+      f.db.inspectPrivateRecoveryBackup('admin', 'admin123', backup.id),
+      /No se pudo verificar/,
+    );
+    assert.equal(file.exec('PRAGMA user_version')[0].values[0][0], 8);
+    file.run('PRAGMA user_version=7');
+    file.run("UPDATE sync_state SET authority_id='otra-autoridad' WHERE id=1");
+    await assert.rejects(
+      f.db.inspectPrivateRecoveryBackup('admin', 'admin123', backup.id),
+      /No se pudo verificar/,
+    );
+    assert.equal(
+      file.exec('SELECT authority_id FROM sync_state')[0].values[0][0],
+      'otra-autoridad',
+    );
+    assert.equal((await f.db.listPrivateRecoveryBackups('admin')).length, 1);
+  },
+);
+
+void regression(
+  'catálogo de recuperación no permite intercambiar nombres de archivos',
+  async () => {
+    const f = await fixture();
+    const first = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    const second = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    f.database.run('UPDATE settings SET value=? WHERE key=?', [
+      JSON.stringify({ ...first, fileName: second.fileName }),
+      `private_backup:${first.id}`,
+    ]);
+    await assert.rejects(
+      f.db.inspectPrivateRecoveryBackup('admin', 'admin123', first.id),
+      /registro/,
+    );
+    await assert.rejects(f.db.listPrivateRecoveryBackups('admin'), /registro/);
+    assert.equal(f.backups.size, 2);
+  },
+);
+
+void regression(
+  'verificar respaldo rechaza referencias rotas sin repararlas automáticamente',
+  async () => {
+    const f = await fixture();
+    await f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin');
+    const backup = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    const file = f.backups.get(backup.fileName);
+    assert.ok(file);
+    file.run('PRAGMA foreign_keys=OFF');
+    file.run('UPDATE sale_lines SET sale_id=999999');
+    const before = file.exec('SELECT * FROM sale_lines');
+    await assert.rejects(
+      f.db.inspectPrivateRecoveryBackup('admin', 'admin123', backup.id),
+      /No se pudo verificar/,
+    );
+    assert.deepEqual(file.exec('SELECT * FROM sale_lines'), before);
+    assert.equal((await f.db.listPrivateRecoveryBackups('admin')).length, 1);
+  },
+);
+
 void regression('permiso consumo persistente y usuarios no pueden autoautorizarse', async () => {
   const f = await fixture();
   const id = await f.db.saveUser({

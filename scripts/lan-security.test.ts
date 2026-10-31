@@ -263,7 +263,13 @@ async function lanFixture() {
     '@/lib/network/hotspot': { getLanHostIp: async () => '192.168.43.1' },
     '@/lib/network/tls': {
       SecureLanServer: Server,
-      pinnedRequest: async (_url: string, path: string, body: Record<string, unknown> = {}) => {
+      pinnedRequest: async (
+        _url: string,
+        path: string,
+        body: Record<string, unknown> = {},
+        expectedPin?: string,
+      ) => {
+        if (expectedPin !== undefined) assert.equal(expectedPin, pin, 'identidad TLS original');
         if (offline) throw new Error('offline');
         calls.push({ path, body });
         const handler = routes.get(path);
@@ -1534,6 +1540,190 @@ void test('recibo de retiro malformado muestra mensaje legible y conserva pendie
     assert.equal(f.calls.filter((call) => call.path === '/v1/operation').length, 0);
     assert.equal((await f.db.getCashSummary(sessionId)).withdrawalTotal, 0);
   }
+});
+
+void test('journal anclado recupera pin perdido y confirma recibo sin repetir operación', async () => {
+  const f = await lanFixture();
+  const pending = f.load('@/lib/network/pending-operation');
+  f.loseNextResponse();
+  await assert.rejects(
+    f.client.requestHostOperation(url, 'addArea', ['Recuperación anclada'], 'admin', 'terminal-a'),
+    /perdida/,
+  );
+  const original = await pending.getPendingOperation();
+  assert.ok(original);
+  assert.equal(original.hostPin, pin);
+  f.storage.delete('secure:mipypos.network.pin');
+  const current = await f.config.loadNetworkConfig();
+  const next = { ...current, hostUrl: url, hostPin: pin };
+  const beforeCalls = f.calls.length;
+  assert.throws(
+    () =>
+      f.config.assertPendingAuthority(
+        current,
+        { ...next, hostPin: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=' },
+        [original.hostUrl],
+        [original.hostPin],
+      ),
+    /identidad original/,
+  );
+  assert.equal(f.calls.length, beforeCalls);
+  assert.equal((await pending.getPendingOperation())?.commandId, original.commandId);
+  f.config.assertPendingAuthority(current, next, [original.hostUrl], [original.hostPin]);
+  await f.config.saveNetworkConfig(next);
+  await f.client.loginToHost(url, 'admin', 'admin-securo-123');
+  assert.equal(await pending.getPendingOperation(), null);
+  assert.equal(f.calls.filter((call) => call.path === '/v1/operation').length, 1);
+  assert.equal(
+    (await f.db.listAreas()).filter((area) => area.name === 'Recuperación anclada').length,
+    1,
+  );
+});
+
+void test('pin y dirección perdidos recuperan IP nueva exclusivamente desde journal anclado', async () => {
+  const f = await lanFixture();
+  f.loseNextResponse();
+  await assert.rejects(
+    f.client.requestHostOperation(url, 'addArea', ['Nueva IP segura'], 'admin', 'terminal-a'),
+    /perdida/,
+  );
+  const pending = f.load('@/lib/network/pending-operation');
+  const original = await pending.getPendingOperation();
+  assert.ok(original);
+  f.storage.delete('secure:mipypos.network.pin');
+  const current = await f.config.loadNetworkConfig();
+  assert.equal(current.hostUrl, '');
+  const next = { ...current, hostUrl: 'https://192.168.1.2:8787', hostPin: pin };
+  f.config.assertPendingAuthority(current, next, [original.hostUrl], [original.hostPin]);
+  await f.client.checkLanHost(next.hostUrl, next.hostPin);
+  await pending.rebindPendingOperation(original.hostUrl, next.hostUrl);
+  const rebound = await pending.getPendingOperation();
+  assert.equal(rebound?.hostPin, pin);
+  assert.equal(rebound?.commandId, original.commandId);
+  assert.equal(rebound?.fingerprint, original.fingerprint);
+  await f.config.saveNetworkConfig(next);
+  await f.client.loginToHost(next.hostUrl, 'admin', 'admin-securo-123');
+  assert.equal(await pending.getPendingOperation(), null);
+  assert.equal(f.calls.filter((call) => call.path === '/v1/operation').length, 1);
+  assert.equal(
+    (await f.db.listAreas()).filter((area) => area.name === 'Nueva IP segura').length,
+    1,
+  );
+});
+
+void test('venta anclada conserva UUID y stock tras recuperar pin perdido', async () => {
+  const f = await lanFixture();
+  const productId = await f.db.saveProduct(base, 'admin');
+  const sessionId = await f.db.openCashSession(0, 'admin');
+  const pending = f.load('@/lib/network/pending-sale');
+  const route = f.routes.get('/v1/sale')!;
+  f.routes.set('/v1/sale', async (request) => {
+    await route(request);
+    throw new Error('ACK perdido');
+  });
+  await assert.rejects(
+    pending.createPendingSale(await f.config.loadNetworkConfig(), 'admin', {
+      method: 'cash',
+      sessionId,
+      items: [{ productId, areaId: 1, quantity: 1 }],
+      payments: [{ type: 'cash', amount: 100 }],
+      settlement: { cashReceived: 100, transferReceipt: null },
+    }),
+    /ACK perdido/,
+  );
+  const original = await pending.getPendingSale();
+  assert.ok(original);
+  assert.equal(original.hostPin, pin);
+  f.storage.delete('secure:mipypos.network.pin');
+  const current = await f.config.loadNetworkConfig();
+  await assert.rejects(pending.sendPendingSale(current, 'admin'), /mismo usuario/);
+  const next = { ...current, hostUrl: url, hostPin: pin };
+  f.config.assertPendingAuthority(current, next, [original.hostUrl], [original.hostPin]);
+  await f.config.saveNetworkConfig(next);
+  assert.equal((await pending.getPendingSale())?.command.commandId, original.command.commandId);
+  assert.ok(await pending.sendPendingSale(next, 'admin'));
+  assert.equal(await pending.getPendingSale(), null);
+  assert.equal((await f.db.getProduct(productId))?.stock, 9);
+  assert.equal(f.calls.filter((call) => call.path === '/v1/sale').length, 1);
+});
+
+void test('extracción anclada conserva identidad y confirma una única salida tras recuperar pin', async () => {
+  const f = await lanFixture();
+  const sessionId = await f.db.openCashSession(100, 'admin');
+  const pending = f.load('@/lib/network/pending-withdrawal');
+  const values = {
+    authority: url,
+    hostPin: pin,
+    username: 'admin',
+    sessionId,
+    amount: 10,
+    reason: 'Anticipo autorizado',
+  };
+  const credentials = { adminUsername: 'admin', adminPassword: 'admin-securo-123' };
+  const register = (
+    id: number,
+    input: import('../lib/models').CashWithdrawalInput,
+    username: string,
+  ) =>
+    f.client.requestHostOperation(
+      url,
+      'registerCashWithdrawal',
+      [id, input, username],
+      username,
+      'terminal-a',
+    );
+  f.loseNextResponse();
+  await assert.rejects(pending.submitWithdrawal(values, credentials, register), /perdida/);
+  const original = await pending.getPendingWithdrawal();
+  assert.ok(original);
+  assert.equal(original.hostPin, pin);
+  f.storage.delete('secure:mipypos.network.pin');
+  const current = await f.config.loadNetworkConfig();
+  const next = { ...current, hostUrl: url, hostPin: pin };
+  f.config.assertPendingAuthority(current, next, [original.authority], [original.hostPin]);
+  await f.config.saveNetworkConfig(next);
+  await assert.rejects(
+    pending.submitWithdrawal({ ...values, hostPin: undefined }, credentials, register),
+    /pendiente/,
+  );
+  assert.equal((await pending.getPendingWithdrawal())?.commandId, original.commandId);
+  await pending.submitWithdrawal(values, credentials, register);
+  assert.equal(await pending.getPendingWithdrawal(), null);
+  assert.equal((await f.db.getCashSummary(sessionId)).withdrawalTotal, 10);
+  assert.equal(f.database.exec('SELECT COUNT(*) FROM cash_withdrawals')[0].values[0][0], 1);
+});
+
+void test('recuperación exige ancla para todos los pendientes y no la deduce de otro registro', async () => {
+  const h = createHarness();
+  const config = h.load('@/lib/network/config');
+  const current = { mode: 'client' as const, hostUrl: url, clientId: 'terminal-a' };
+  const next = { ...current, hostUrl: 'https://192.168.1.2:8787', hostPin: pin };
+  assert.doesNotThrow(() =>
+    config.assertPendingAuthority(current, next, [url, url, url], [pin, pin, pin]),
+  );
+  for (const anchors of [
+    [pin, undefined],
+    [pin, 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB='],
+    [],
+  ])
+    assert.throws(
+      () => config.assertPendingAuthority(current, next, [url, url], anchors),
+      /identidad original/,
+    );
+  assert.throws(
+    () => config.assertPendingAuthority(current, next, [url.replace('https:', 'http:')], [pin]),
+    /identidad original/,
+  );
+  assert.throws(
+    () =>
+      config.assertPendingAuthority(
+        { ...current, hostPin: pin },
+        next,
+        [url],
+        ['BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB='],
+      ),
+    /identidad original/,
+  );
 });
 
 void test('pin perdido bloquea QR de la misma IP y conserva el UUID pendiente', async () => {

@@ -8,6 +8,10 @@ import type { CashWithdrawalInput } from '@/lib/models';
 const KEY = 'mipypos.pendingWithdrawal.v1';
 const schema = z.object({
   authority: z.string(),
+  hostPin: z
+    .string()
+    .regex(/^[A-Za-z0-9+/]{43}=$/)
+    .optional(),
   username: z.string(),
   sessionId: z.number().int(),
   commandId: z.string(),
@@ -43,6 +47,7 @@ export async function submitWithdrawal(
     if (
       existing &&
       (existing.authority !== values.authority ||
+        (existing.hostPin !== undefined && existing.hostPin !== values.hostPin) ||
         existing.username !== values.username ||
         existing.sessionId !== values.sessionId ||
         existing.amount !== values.amount ||

@@ -56,6 +56,9 @@ export function CashWithdrawalForm({
         {
           sessionId: pending?.sessionId ?? sessionId,
           authority: networkConfig.mode === 'client' ? networkConfig.hostUrl : 'local',
+          ...(networkConfig.mode === 'client' && networkConfig.hostPin
+            ? { hostPin: networkConfig.hostPin }
+            : {}),
           username: user.username,
           amount: value,
           reason: reason.trim(),

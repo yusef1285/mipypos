@@ -31,8 +31,15 @@ async function resolvePendingOperation<T>(
   pending: PendingOperation,
   token: string,
 ): Promise<T> {
+  if (pending.hostPin && pending.hostPin !== (await loadNetworkConfig()).hostPin)
+    throw new Error('Confirma la operación pendiente con el administrador original.');
   const lookup = async () => {
-    const raw = await request<unknown>(hostUrl, '/v1/receipt', { ...pending, token });
+    const raw = await request<unknown>(
+      hostUrl,
+      '/v1/receipt',
+      { ...pending, token },
+      pending.hostPin,
+    );
     const parsed = z
       .discriminatedUnion('found', [
         z.object({ found: z.literal(false) }),
@@ -53,7 +60,7 @@ async function resolvePendingOperation<T>(
   }
   let result: T;
   try {
-    result = await request<T>(hostUrl, '/v1/operation', { ...pending, token });
+    result = await request<T>(hostUrl, '/v1/operation', { ...pending, token }, pending.hostPin);
   } catch (error) {
     if (!(error instanceof HostRejection) || error.code !== 'REJECTED') throw error;
     const confirmed = await lookup();
@@ -82,15 +89,21 @@ export async function requestHostOperation<K extends PosOperation>(
     if (!token)
       throw new HostRejection('Inicia sesión en el teléfono administrador.', 'AUTH_EXPIRED');
     if (operation === 'registerCashWithdrawal') {
+      const { hostPin } = await loadNetworkConfig();
       const input = args as PosArgs<'registerCashWithdrawal'>;
       const receipt = async () => {
-        const value = await request<unknown>(hostUrl, '/v1/withdrawal-receipt', {
-          token,
-          sessionId: input[0],
-          commandId: input[1].commandId,
-          amount: input[1].amount,
-          reason: input[1].reason,
-        });
+        const value = await request<unknown>(
+          hostUrl,
+          '/v1/withdrawal-receipt',
+          {
+            token,
+            sessionId: input[0],
+            commandId: input[1].commandId,
+            amount: input[1].amount,
+            reason: input[1].reason,
+          },
+          hostPin,
+        );
         const parsed = z
           .object({ withdrawalId: z.number().int().positive().nullable() })
           .safeParse(value);
@@ -100,7 +113,12 @@ export async function requestHostOperation<K extends PosOperation>(
       const existing = await receipt();
       if (existing !== null) return existing as PosResult<K>;
       try {
-        return await request<PosResult<K>>(hostUrl, '/v1/operation', { operation, args, token });
+        return await request<PosResult<K>>(
+          hostUrl,
+          '/v1/operation',
+          { operation, args, token },
+          hostPin,
+        );
       } catch (error) {
         if (!(error instanceof HostRejection) || error.code !== 'REJECTED') throw error;
         const confirmed = await receipt();
@@ -110,7 +128,15 @@ export async function requestHostOperation<K extends PosOperation>(
     }
     if (!mutationOperations.has(operation))
       return request<PosResult<K>>(hostUrl, '/v1/operation', { operation, args, token });
-    const pending = await prepareOperation({ hostUrl, username, clientId, operation, args });
+    const { hostPin } = await loadNetworkConfig();
+    const pending = await prepareOperation({
+      hostUrl,
+      username,
+      clientId,
+      operation,
+      args,
+      ...(hostPin ? { hostPin } : {}),
+    });
     return resolvePendingOperation<PosResult<K>>(hostUrl, pending, token);
   };
   if (!mutationOperations.has(operation)) return run();
@@ -143,8 +169,8 @@ export class HostRejection extends Error {
   }
 }
 
-async function request<T>(hostUrl: string, path: string, body: object): Promise<T> {
-  const result: unknown = JSON.parse(await pinnedRequest(hostUrl, path, body));
+async function request<T>(hostUrl: string, path: string, body: object, pin?: string): Promise<T> {
+  const result: unknown = JSON.parse(await pinnedRequest(hostUrl, path, body, pin));
   const envelope = z
     .discriminatedUnion('ok', [
       z.object({ ok: z.literal(true), data: z.unknown() }),
@@ -276,6 +302,7 @@ export async function getHostSnapshot(hostUrl: string): Promise<NetworkSnapshot>
 export async function registerHostSale(
   hostUrl: string,
   input: Omit<NetworkSaleCommand, 'token'>,
+  hostPin?: string,
 ): Promise<number> {
   const token = await getNetworkToken();
   if (!token)
@@ -286,7 +313,7 @@ export async function registerHostSale(
   const receipt = async () => {
     const parsed = z
       .object({ saleId: z.number().int().positive().nullable() })
-      .safeParse(await request<unknown>(hostUrl, '/v1/sale-receipt', { ...input, token }));
+      .safeParse(await request<unknown>(hostUrl, '/v1/sale-receipt', { ...input, token }, hostPin));
     if (!parsed.success) throw new Error('No se pudo confirmar la venta pendiente.');
     return parsed.data.saleId;
   };
@@ -294,7 +321,7 @@ export async function registerHostSale(
   if (previous !== null) return previous;
   let result: unknown;
   try {
-    result = await request<unknown>(hostUrl, '/v1/sale', { ...input, token });
+    result = await request<unknown>(hostUrl, '/v1/sale', { ...input, token }, hostPin);
   } catch (error) {
     if (!(error instanceof HostRejection) || error.code !== 'REJECTED') throw error;
     const confirmed = await receipt();

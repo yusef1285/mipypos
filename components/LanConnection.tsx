@@ -155,26 +155,34 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
     try {
       setBusy(true);
       const { hostUrl, hostPin, wifi, directAddress } = parseLanConnection(data);
-      const sameIdentity = !!networkConfig.hostPin && networkConfig.hostPin === hostPin;
-      const retainsAuthority = (previous: string) =>
-        previous.replace(/^http:/, 'https:') === hostUrl ||
-        (sameIdentity && previous === networkConfig.hostUrl);
       const operation = await getPendingOperation();
-      if (operation && !retainsAuthority(operation.hostUrl))
-        throw new Error('Confirma la operación pendiente antes de cambiar de administrador.');
       const pending = await getPendingSale();
-      if (pending && !retainsAuthority(pending.hostUrl))
-        throw new Error('Confirma la venta pendiente antes de cambiar de administrador.');
       const withdrawal = await getPendingWithdrawal();
-      if (withdrawal && !retainsAuthority(withdrawal.authority))
-        throw new Error('Confirma la extracción pendiente antes de cambiar de administrador.');
+      const records = [operation, pending, withdrawal].filter((record) => record !== null);
+      const authorities = records.map((record) =>
+        'authority' in record ? record.authority : record.hostUrl,
+      );
+      const pins = records.map((record) => record.hostPin);
       assertPendingAuthority(
         networkConfig,
         { ...networkConfig, mode: 'client', hostUrl, hostPin },
-        [operation?.hostUrl, pending?.hostUrl, withdrawal?.authority].filter(
-          (authority): authority is string => authority !== undefined,
-        ),
+        authorities,
+        pins,
       );
+      // Identity may be recovered only from every authenticated pending journal.
+      // The candidate still has to complete the pinned TLS handshake below.
+      const sameIdentity = (networkConfig.hostPin ?? records[0]?.hostPin) === hostPin;
+      const retainsAuthority = (previous: string, journalPin?: string) =>
+        previous.replace(/^http:/, 'https:') === hostUrl ||
+        (sameIdentity &&
+          (previous === networkConfig.hostUrl ||
+            (!networkConfig.hostPin && journalPin === hostPin)));
+      if (operation && !retainsAuthority(operation.hostUrl, operation.hostPin))
+        throw new Error('Confirma la operación pendiente antes de cambiar de administrador.');
+      if (pending && !retainsAuthority(pending.hostUrl, pending.hostPin))
+        throw new Error('Confirma la venta pendiente antes de cambiar de administrador.');
+      if (withdrawal && !retainsAuthority(withdrawal.authority, withdrawal.hostPin))
+        throw new Error('Confirma la extracción pendiente antes de cambiar de administrador.');
       if (directAddress) {
         await disconnectHotspot();
         const current = await getDirectInfo();
@@ -199,9 +207,19 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       }
       await checkLanHost(hostUrl, hostPin);
       const previousHost = sameIdentity ? networkConfig.hostUrl : undefined;
-      await upgradePendingSaleTransport(hostUrl, previousHost);
-      await upgradePendingWithdrawalTransport(hostUrl, previousHost);
-      if (previousHost) await rebindPendingOperation(previousHost, hostUrl);
+      await upgradePendingSaleTransport(
+        hostUrl,
+        !networkConfig.hostPin && pending?.hostPin === hostPin ? pending.hostUrl : previousHost,
+      );
+      await upgradePendingWithdrawalTransport(
+        hostUrl,
+        !networkConfig.hostPin && withdrawal?.hostPin === hostPin
+          ? withdrawal.authority
+          : previousHost,
+      );
+      const operationHost =
+        !networkConfig.hostPin && operation?.hostPin === hostPin ? operation.hostUrl : previousHost;
+      if (operationHost) await rebindPendingOperation(operationHost, hostUrl);
       await configureNetwork({
         ...networkConfig,
         mode: 'client',

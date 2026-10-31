@@ -1,5 +1,6 @@
 import { createPendingStore } from '@/lib/network/pending-store';
 import { assertSaleCommand } from '@/lib/network/validation';
+import { validateHostPin } from '@/lib/network/qr';
 import * as Crypto from 'expo-crypto';
 import { HostRejection, registerHostSale } from '@/lib/network/client';
 import type { NetworkConfig, NetworkSaleCommand } from '@/lib/network/types';
@@ -7,6 +8,7 @@ import type { NetworkConfig, NetworkSaleCommand } from '@/lib/network/types';
 const KEY = 'mipypos.pendingLanSale.v2';
 export interface PendingSale {
   hostUrl: string;
+  hostPin?: string;
   username: string;
   command: Omit<NetworkSaleCommand, 'token'>;
 }
@@ -63,6 +65,8 @@ function parsePendingSale(stored: string): PendingSale {
   }
   if (!isPendingSale(pending))
     throw new Error('El formato de la venta pendiente no es válido. El registro se conserva.');
+  if ('hostPin' in pending)
+    validateHostPin(typeof pending.hostPin === 'string' ? pending.hostPin : '');
   assertSaleCommand({ ...pending.command, token: 'validation' });
   return pending;
 }
@@ -88,12 +92,13 @@ export async function sendPendingSale(config: NetworkConfig, username: string): 
     if (!pending) throw new Error('No hay una venta pendiente.');
     if (
       pending.hostUrl !== config.hostUrl ||
+      (pending.hostPin !== undefined && pending.hostPin !== config.hostPin) ||
       pending.command.clientId !== config.clientId ||
       pending.username !== username
     )
       throw new Error('Confirma la venta pendiente con el mismo usuario y administrador.');
     try {
-      const id = await registerHostSale(pending.hostUrl, pending.command);
+      const id = await registerHostSale(pending.hostUrl, pending.command, pending.hostPin);
       await store.clear();
       return id;
     } catch (error) {
@@ -116,6 +121,7 @@ export async function createPendingSale(
     if (await getPendingSale()) throw new Error('Confirma primero la venta pendiente.');
     const pending: PendingSale = {
       hostUrl: config.hostUrl,
+      ...(config.hostPin ? { hostPin: validateHostPin(config.hostPin) } : {}),
       username,
       command: { ...input, commandId: Crypto.randomUUID(), clientId: config.clientId },
     };
