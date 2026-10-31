@@ -212,17 +212,31 @@ export interface TaxCalculation {
   credits: number;
   explanation: string;
 }
-export interface FiscalRecord {
+export interface FiscalRecordMetadata {
   id: string;
   date: string;
   actor: string;
-  kind: string;
   taxpayerId: string;
-  value:
-    | FiscalRecordInput
-    | Obligation
-    | { recordId: string; reason: string }
-    | { filter: FiscalFilter; format: string; scope?: Obligation['scope'] };
+}
+export type FiscalRecord = FiscalRecordMetadata &
+  (
+    | {
+        [K in FiscalRecordInput['kind']]: { kind: K; value: FiscalRecordInput };
+      }[FiscalRecordInput['kind']]
+    | { kind: 'obligation'; value: Obligation }
+    | { kind: 'void'; value: { recordId: string; reason: string } }
+    | {
+        kind: 'export';
+        value: {
+          filter: FiscalFilter;
+          format: 'PDF' | 'Excel' | 'Impresión';
+          scope?: Obligation['scope'];
+        };
+      }
+  );
+export function isFiscalRecordKind<K extends FiscalRecord['kind']>(kind: K) {
+  return (record: FiscalRecord): record is Extract<FiscalRecord, { kind: K }> =>
+    record.kind === kind;
 }
 export interface Obligation {
   ruleId: string;
@@ -285,21 +299,38 @@ export const storedObligationSchema = z
     advancePaymentIds: z.array(id),
   })
   .strict();
-export function parseFiscalRecordValue(kind: string, value: unknown): FiscalRecord['value'] {
-  if (kind === 'obligation') return storedObligationSchema.parse(value);
-  if (kind === 'void') return z.object({ recordId: id, reason: required }).strict().parse(value);
+export function parseFiscalRecord(
+  metadata: FiscalRecordMetadata,
+  kind: string,
+  value: unknown,
+): FiscalRecord {
+  if (kind === 'obligation')
+    return { ...metadata, kind, value: storedObligationSchema.parse(value) };
+  if (kind === 'void')
+    return {
+      ...metadata,
+      kind,
+      value: z.object({ recordId: id, reason: required }).strict().parse(value),
+    };
   if (kind === 'export')
-    return z
-      .object({
-        filter: fiscalFilterSchema,
-        format: z.enum(['PDF', 'Excel', 'Impresión']),
-        scope: z.enum(['Empresa', 'Socio']).optional(),
-      })
-      .strict()
-      .parse(value);
+    return {
+      ...metadata,
+      kind,
+      value: z
+        .object({
+          filter: fiscalFilterSchema,
+          format: z.enum(['PDF', 'Excel', 'Impresión']),
+          scope: z.enum(['Empresa', 'Socio']).optional(),
+        })
+        .strict()
+        .parse(value),
+    };
   const record = recordSchema.parse(value);
   if (record.kind !== kind) throw new Error('El tipo del registro fiscal no coincide.');
-  return record;
+  return { ...metadata, kind: record.kind, value: record };
+}
+export function parseFiscalRecordValue(kind: string, value: unknown): FiscalRecord['value'] {
+  return parseFiscalRecord({ id: '', date: '', actor: '', taxpayerId: '' }, kind, value).value;
 }
 export const LEGAL_REFERENCE = {
   title: 'Ley 113/2012 concordada · Gaceta Oficial especial n.º 1, 12 de enero de 2026',

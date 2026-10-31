@@ -3,10 +3,16 @@ import {
   withAndroidManifest,
   withDangerousMod,
   withMainApplication,
+  AndroidConfig,
   type ConfigPlugin,
 } from 'expo/config-plugins';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  androidLegacyBackupRules,
+  androidDataExtractionRules,
+  applyAndroidPrivateBackupPolicy,
+} from '../android-backup-policy';
 
 const withLocalHotspot: ConfigPlugin = (config) => {
   config = withAndroidManifest(config, (mod) => {
@@ -30,6 +36,8 @@ const withLocalHotspot: ConfigPlugin = (config) => {
         });
     }
     mod.modResults.manifest['uses-permission'] = permissions;
+    const application = AndroidConfig.Manifest.getMainApplicationOrThrow(mod.modResults);
+    application.$ = applyAndroidPrivateBackupPolicy(application.$);
     return mod;
   });
   config = withAppBuildGradle(config, (mod) => {
@@ -75,6 +83,13 @@ const withLocalHotspot: ConfigPlugin = (config) => {
   return withDangerousMod(config, [
     'android',
     async (mod) => {
+      const resources = join(mod.modRequest.platformProjectRoot, 'app/src/main/res/xml');
+      mkdirSync(resources, { recursive: true });
+      writeFileSync(join(resources, 'mipypos_private_backup_rules.xml'), androidLegacyBackupRules);
+      writeFileSync(
+        join(resources, 'mipypos_private_data_extraction_rules.xml'),
+        androidDataExtractionRules,
+      );
       const directory = join(
         mod.modRequest.platformProjectRoot,
         'app/src/main/java/com/mipypos/lan',

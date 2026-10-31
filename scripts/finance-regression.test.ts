@@ -9,6 +9,10 @@ import type { FinanceFilter } from '../lib/finance-models';
 import { periodRange } from '../lib/finance-periods';
 import { canAccess } from '../lib/permissions';
 import { inventoryByCategory } from '../lib/finance-calculations';
+import * as saleDraft from '../lib/sale-draft';
+const testModules: { '@/lib/sale-draft': typeof import('../lib/sale-draft') } = {
+  '@/lib/sale-draft': saleDraft,
+};
 let passed = 0,
   failed = 0;
 before(prepareHarness);
@@ -35,8 +39,8 @@ function check(name: string, action: () => Promise<void> | void) {
   });
 }
 const all: FinanceFilter = { start: '2000-01-01T00:00:00.000Z', end: '2099-12-31T23:59:59.999Z' };
-async function fixture(cost: number | null = 40) {
-  const h = createHarness();
+async function fixture(cost: number | null = 40, modules: Record<string, unknown> = {}) {
+  const h = createHarness(modules);
   const db = h.load('@/lib/database');
   await db.initializeDatabase();
   const id = await db.saveProduct(
@@ -456,8 +460,8 @@ check('descuentos subcentavo rechazados sin alterar informes', async () => {
   assert.equal((await f.db.getFinanceReport(all, 'admin')).totals.net, 200);
 });
 check('retiro bloquea productos del carrito sin cobrar sin tocar stock ni caja', async () => {
-  const f = await fixture();
-  const tracker = f.load('@/lib/sale-draft') as typeof import('../lib/sale-draft');
+  const f = await fixture(40, testModules);
+  const tracker = testModules['@/lib/sale-draft'];
   tracker.trackSaleDraft('terminal:admin', [{ productId: f.id }]);
   const input = f.consume();
   const initialCash = (await f.db.getCashSummary(1)).expectedCash;
@@ -472,6 +476,7 @@ check('retiro bloquea productos del carrito sin cobrar sin tocar stock ni caja',
   tracker.trackSaleDraft('terminal:admin', [{ productId: f.id }]);
   await f.db.registerConsumption(input, 'admin');
   assert.equal((await f.db.getProduct(f.id))?.stock, 18);
+  tracker.clearSaleDraft('terminal:admin');
 });
 check('categorías marcan costos incompletos sin valorar desconocidos a cero', () => {
   const categories = inventoryByCategory([
@@ -545,18 +550,17 @@ check('archivo legado v5 migra sin inventar costos ni identidad de vendedor', as
   const f = await fixture(null);
   await f.sale();
   const archive = await closeFinanceFixture(f);
-  const legacy = JSON.parse(JSON.stringify(archive)) as typeof archive;
+  const legacy = structuredClone(archive);
   legacy.schemaVersion = 5;
-  const omitted: Record<string, string[]> = {
-    users: ['can_authorize_consumption'],
-    products: ['unit_cost'],
-    sales: ['seller_id'],
-    sale_lines: ['unit_cost', 'category'],
-  };
+  const omitted = [
+    { rows: legacy.tables.users, columns: ['can_authorize_consumption'] },
+    { rows: legacy.tables.products, columns: ['unit_cost'] },
+    { rows: legacy.tables.sales, columns: ['seller_id'] },
+    { rows: legacy.tables.sale_lines, columns: ['unit_cost', 'category'] },
+  ];
+  for (const { rows, columns } of Object.values(omitted))
+    for (const row of rows) for (const column of columns) delete row[column];
   const tables: Record<string, unknown> = legacy.tables;
-  for (const [table, columns] of Object.entries(omitted))
-    for (const row of tables[table] as Record<string, unknown>[])
-      for (const column of columns) delete row[column];
   for (const table of [
     'cost_history',
     'internal_consumptions',
@@ -577,6 +581,84 @@ check('archivo legado v5 migra sin inventar costos ni identidad de vendedor', as
   assert.equal((await db.getSale(1))!.sale.seller_id, null);
   assert.equal((await db.getInvestmentData('admin')).history.length, 0);
 });
+const financeMutationCommand = (action: string) => ({
+  commandId: randomUUID(),
+  clientId: 'terminal-finance',
+  action,
+  username: 'admin',
+  fingerprint: 'finance-cache-test',
+});
+check(
+  'recibos LAN financieros validan número y string sin repetir acción ni tocar caja',
+  async () => {
+    const f = await fixture();
+    const cost = { commandId: randomUUID(), productId: f.id, cost: 45, reason: 'Costo cacheado' };
+    const numericCommand = financeMutationCommand('setProductCost');
+    const id = await f.db.setProductCost(cost, 'admin', numericCommand);
+    const consumption = f.consume(1);
+    const recordCommand = financeMutationCommand('registerConsumption');
+    const record = await f.db.registerConsumption(consumption, 'admin', recordCommand);
+    const initial = f.database.export();
+    assert.equal(await f.db.setProductCost(cost, 'admin', numericCommand), id);
+    assert.equal(await f.db.registerConsumption(consumption, 'admin', recordCommand), record);
+    assert.deepEqual(f.database.export(), initial);
+    for (const value of [null, {}, '1', 0, -1]) {
+      f.database.run('UPDATE network_commands SET response=? WHERE command_id=?', [
+        JSON.stringify({ value }),
+        numericCommand.commandId,
+      ]);
+      const bytesBefore = f.database.export();
+      await assert.rejects(f.db.setProductCost(cost, 'admin', numericCommand));
+      assert.deepEqual(f.database.export(), bytesBefore);
+    }
+    for (const value of [null, {}, 1, '']) {
+      f.database.run('UPDATE network_commands SET response=? WHERE command_id=?', [
+        JSON.stringify({ value }),
+        recordCommand.commandId,
+      ]);
+      const bytesBefore = f.database.export();
+      await assert.rejects(f.db.registerConsumption(consumption, 'admin', recordCommand));
+      assert.deepEqual(f.database.export(), bytesBefore);
+    }
+  },
+);
+check(
+  'settlement histórico usa schema shared y corrupción no escribe ni borra tarjeta',
+  async () => {
+    const f = await fixture();
+    const saleId = await f.sale();
+    const settlement = { cashReceived: null, transferReceipt: null, changeDue: 0 };
+    // Seed a migrated historical row; ordinary card edits remain prohibited by the trigger.
+    f.database.run('UPDATE sales SET legacy_card=1 WHERE id=?', [saleId]);
+    f.database.run('UPDATE sales SET method=?,payments=?,settlement=? WHERE id=?', [
+      'card',
+      JSON.stringify([{ type: 'card', amount: 200 }]),
+      JSON.stringify(settlement),
+      saleId,
+    ]);
+    const initial = f.database.export();
+    const sale = await f.db.getSale(saleId);
+    assert.equal(sale?.sale.method, 'card');
+    assert.deepEqual(sale?.sale.payments, [{ type: 'card', amount: 200 }]);
+    assert.deepEqual(sale?.sale.settlement, settlement);
+    assert.deepEqual(f.database.export(), initial);
+    for (const corrupted of [
+      '{broken',
+      '{}',
+      'null',
+      '[]',
+      JSON.stringify({ ...settlement, changeDue: '0' }),
+      JSON.stringify({ ...settlement, transferReceipt: {} }),
+    ]) {
+      f.database.run('UPDATE sales SET settlement=? WHERE id=?', [corrupted, saleId]);
+      const bytesBefore = f.database.export();
+      await assert.rejects(f.db.getSale(saleId));
+      assert.deepEqual(f.database.export(), bytesBefore);
+    }
+    f.database.run('UPDATE sales SET settlement=NULL WHERE id=?', [saleId]);
+    assert.equal((await f.db.getSale(saleId))?.sale.settlement, null);
+  },
+);
 check('períodos calendario usan lunes y límites completos inclusivos', () => {
   const date = new Date(2026, 9, 15, 12);
   const week = periodRange('Semana actual', date, date, date);

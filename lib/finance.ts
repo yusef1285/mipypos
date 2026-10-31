@@ -1,4 +1,5 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
+import { z } from 'zod';
 import type { Producto, Usuario, LineaVenta, LegacyPayment } from '@/lib/models';
 import type {
   AuthorizationProof,
@@ -112,11 +113,15 @@ async function authorize(db: SQLiteDatabase, proof: AuthorizationProof, consumpt
     throw new Error('La autorización no es válida. Revisa las credenciales y el permiso.');
   return user;
 }
+export const parseFinanceNumericResult = (value: unknown) =>
+  z.number().int().positive().parse(value);
+export const parseFinanceRecordResult = (value: unknown) => z.string().min(1).max(128).parse(value);
 export async function financeCommand<T>(
   db: SQLiteDatabase,
   id: string,
   fingerprint: string,
   action: () => Promise<T>,
+  parseResult: (value: unknown) => T,
 ): Promise<T> {
   if (!id || id.length > 128) throw new Error('La operación necesita un identificador válido.');
   const previous = await db.getFirstAsync<{ fingerprint: string; result: string }>(
@@ -126,9 +131,9 @@ export async function financeCommand<T>(
   if (previous) {
     if (previous.fingerprint !== fingerprint)
       throw new Error('El identificador pertenece a otra operación.');
-    return JSON.parse(previous.result) as T;
+    return parseResult(JSON.parse(previous.result));
   }
-  const result = await action();
+  const result = parseResult(await action());
   await db.runAsync(
     'INSERT INTO finance_commands(id,fingerprint,result) VALUES(?,?,?)',
     id,
@@ -409,7 +414,14 @@ export async function adjustSale(db: SQLiteDatabase, input: SaleAdjustmentInput,
   );
   const selected = input.kind === 'anulacion' ? lines : lines.filter((l) => l.id === input.lineId);
   if (!selected.length) throw new Error('Selecciona una línea de venta.');
-  const originalPayments = JSON.parse(sale.payments) as LegacyPayment[];
+  const originalPayments = z
+    .array(
+      z.object({
+        type: z.enum(['cash', 'transfer', 'card']),
+        amount: z.number().finite().nonnegative(),
+      }),
+    )
+    .parse(JSON.parse(sale.payments));
   let totalRefund = 0;
   const date = new Date().toISOString();
   for (const line of selected) {

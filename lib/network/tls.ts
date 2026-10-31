@@ -79,28 +79,30 @@ export async function pinnedRequest(
     pin,
   );
 }
-type Handler = (request: { data: never }) => Promise<unknown>;
+type Handler = (request: { data: unknown }) => Promise<unknown>;
 export class SecureLanServer {
   private routes = new Map<string, Handler>();
   private subscription: ReturnType<NativeEventEmitter['addListener']> | null = null;
   get(path: string, handler: Handler) {
     this.routes.set(`GET ${path}`, handler);
   }
-  post<T>(path: string, handler: (request: { data: T }) => Promise<unknown>) {
+  post(path: string, handler: Handler) {
     this.routes.set(`POST ${path}`, handler);
   }
   private native: TlsModule | null = null;
+  private requests = new Set<Promise<void>>();
   async listen(ip: string, port: number) {
     const native = nativeTls();
     this.native = native;
     this.subscription = new NativeEventEmitter<{ MipyTlsRequest: [TlsRequest] }>(
       native,
     ).addListener('MipyTlsRequest', (request: TlsRequest) => {
-      void (async () => {
+      const handling = (async () => {
         try {
           const handler = this.routes.get(`${request.method} ${request.path}`);
+          const data: unknown = JSON.parse(request.body);
           const result = handler
-            ? await handler({ data: JSON.parse(request.body) as never })
+            ? await handler({ data })
             : { ok: false, code: 'REJECTED', error: 'Ruta o método no válido.' };
           native.respond(request.id, JSON.stringify(result));
         } catch {
@@ -110,6 +112,8 @@ export class SecureLanServer {
           );
         }
       })();
+      this.requests.add(handling);
+      void handling.finally(() => this.requests.delete(handling)).catch(() => undefined);
     });
     try {
       hostPin = await native.start(ip, port);
@@ -118,6 +122,19 @@ export class SecureLanServer {
       this.subscription.remove();
       this.subscription = null;
       throw error;
+    }
+  }
+  async stopAndDrain() {
+    this.subscription?.remove();
+    this.subscription = null;
+    hostPin = '';
+    hostUrl = '';
+    const native = this.native;
+    this.native = null;
+    try {
+      if (native) await native.stopServer();
+    } finally {
+      await Promise.allSettled(this.requests);
     }
   }
   stop() {

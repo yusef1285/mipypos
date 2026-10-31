@@ -271,20 +271,21 @@ export async function startLanHost(): Promise<string> {
   ip ??= await Network.getIpAddressAsync();
   if (!ip || ip === '0.0.0.0' || ip === '127.0.0.1')
     throw new Error('Conecta el Wi-Fi o activa el hotspot antes de iniciar el host.');
-  if (server) {
-    server.stop();
-    server = null;
-    sessions.clear();
-  }
+  if (server) await stopLanHostAndDrain();
   if (!NativeModules.MipyTls)
     throw new Error(
       'Esta instalación no incluye el servidor LAN. Instala una compilación Android con el módulo de red.',
     );
   const nextServer = new SecureLanServer();
   nextServer.get('/v1/health', async () => success({ name: 'MipyPOS', protocol: 4, ready: true }));
-  nextServer.post<{ username?: string; password?: string }>('/v1/login', async (request) => {
+  nextServer.post('/v1/login', async (request) => {
     try {
-      const { username = '', password = '' } = request.data;
+      const { username, password } = z
+        .object({
+          username: z.string().max(240).default(''),
+          password: z.string().max(1024).default(''),
+        })
+        .parse(request.data);
       const user = await DB.authenticateForLogin(username, password);
       if (!user) throw new Error('Usuario o contraseña incorrectos.');
       const token = Crypto.randomUUID();
@@ -303,40 +304,47 @@ export async function startLanHost(): Promise<string> {
       return failure(error, requestIdentity(request.data));
     }
   });
-  nextServer.post<{ token?: string }>('/v1/logout', async (request) => {
-    sessions.delete(request.data.token ?? '');
-    return success(null);
-  });
-  nextServer.post<{ token?: string; knownRevision?: number; authorityId?: string }>(
-    '/v1/snapshot',
-    async (request) => {
-      try {
-        const user = await authorized(request.data.token ?? '', 'home');
-        if (Number.isInteger(request.data.knownRevision) && request.data.authorityId) {
-          const current = await DB.getSharedRevision();
-          if (
-            current.revision === request.data.knownRevision &&
-            current.authorityId === request.data.authorityId
-          )
-            return success({ unchanged: true, ...current });
-        }
-        const snapshot = await buildSnapshot();
-        return success(user.role === 'admin' ? snapshot : redactCosts(snapshot));
-      } catch (error) {
-        return failure(error, requestIdentity(request.data));
-      }
-    },
-  );
-  nextServer.post<{ token?: string }>('/v1/report', async (request) => {
+  nextServer.post('/v1/logout', async (request) => {
     try {
-      const user = await authorized(request.data.token ?? '', 'reports');
+      const input = z.object({ token: z.string().max(512).default('') }).parse(request.data);
+      sessions.delete(input.token);
+      return success(null);
+    } catch (error) {
+      return failure(error, requestIdentity(request.data));
+    }
+  });
+  nextServer.post('/v1/snapshot', async (request) => {
+    try {
+      const input = z
+        .object({
+          token: z.string().max(512).default(''),
+          knownRevision: z.number().int().nonnegative().optional(),
+          authorityId: z.string().min(1).optional(),
+        })
+        .parse(request.data);
+      const user = await authorized(input.token, 'home');
+      if (input.knownRevision !== undefined && input.authorityId) {
+        const current = await DB.getSharedRevision();
+        if (current.revision === input.knownRevision && current.authorityId === input.authorityId)
+          return success({ unchanged: true, ...current });
+      }
+      const snapshot = await buildSnapshot();
+      return success(user.role === 'admin' ? snapshot : redactCosts(snapshot));
+    } catch (error) {
+      return failure(error, requestIdentity(request.data));
+    }
+  });
+  nextServer.post('/v1/report', async (request) => {
+    try {
+      const input = z.object({ token: z.string().max(512).default('') }).parse(request.data);
+      const user = await authorized(input.token, 'reports');
       const report = await DB.getDailyReport();
       return success(user.role === 'admin' ? report : redactCosts(report));
     } catch (error) {
       return failure(error, requestIdentity(request.data));
     }
   });
-  nextServer.post<OperationRequest>('/v1/receipt', async (request) => {
+  nextServer.post('/v1/receipt', async (request) => {
     try {
       const input = request.data;
       assertOperationRequest(input);
@@ -366,20 +374,25 @@ export async function startLanHost(): Promise<string> {
       return failure(error, requestIdentity(request.data));
     }
   });
-  nextServer.post<OperationRequest>('/v1/operation', async (request) => {
+  nextServer.post('/v1/operation', async (request) => {
     try {
-      const input: OperationRequest = request.data;
-      if (!input || !Object.hasOwn(operationPermissions, input.operation))
+      const input = request.data;
+      // Authorize the minimally validated envelope before inspecting command arguments.
+      const envelope = z
+        .object({ operation: z.string(), token: z.string(), args: z.array(z.unknown()) })
+        .parse(input);
+      const operation = Object.keys(operationPermissions).find(
+        (key): key is keyof typeof operationPermissions => key === envelope.operation,
+      );
+      if (!operation)
         throw new ProtocolError(
           'UNKNOWN_OPERATION',
           'Esta operación no está disponible. Actualiza ambos dispositivos.',
         );
-      if (!Array.isArray(input.args))
-        throw new ProtocolError('INVALID_ARGUMENTS', 'Revisa los datos de la solicitud.');
       const module =
-        input.operation === 'getExportRows' && input.args[0] === 'inventory'
+        operation === 'getExportRows' && envelope.args[0] === 'inventory'
           ? 'products'
-          : operationPermissions[input.operation];
+          : operationPermissions[operation];
       const auditReads = new Set([
         'listProducts',
         'listAreas',
@@ -394,7 +407,7 @@ export async function startLanHost(): Promise<string> {
         'getDemoUsage',
         'getAuditSnapshot',
       ]);
-      const user = await authorized(input.token, module, auditReads.has(input.operation));
+      const user = await authorized(envelope.token, module, auditReads.has(operation));
       assertOperationRequest(input);
       const result = (await handleOperation(input, user)) ?? null;
       return success(user.role === 'admin' || module === 'onat' ? result : redactCosts(result));
@@ -402,10 +415,10 @@ export async function startLanHost(): Promise<string> {
       return failure(error, requestIdentity(request.data));
     }
   });
-  nextServer.post<NetworkSaleCommand>('/v1/sale-receipt', async (request) => {
+  nextServer.post('/v1/sale-receipt', async (request) => {
     try {
-      const user = await authorized(request.data?.token ?? '', 'home');
       assertSaleCommand(request.data);
+      const user = await authorized(request.data.token, 'home');
       const saleId = await DB.getNetworkSaleReceipt(
         request.data.commandId,
         request.data.clientId,
@@ -417,23 +430,18 @@ export async function startLanHost(): Promise<string> {
       return failure(error, requestIdentity(request.data));
     }
   });
-  nextServer.post<{
-    token?: string;
-    sessionId?: number;
-    commandId?: string;
-    amount?: number;
-    reason?: string;
-  }>('/v1/withdrawal-receipt', async (request) => {
+  nextServer.post('/v1/withdrawal-receipt', async (request) => {
     try {
-      const user = await authorized(request.data?.token ?? '', 'home');
       const input = z
         .object({
+          token: z.string().max(512).default(''),
           sessionId: z.number().int().positive(),
           commandId: z.string().min(1).max(128),
           amount: z.number().finite().positive(),
           reason: z.string().min(1).max(2000),
         })
         .parse(request.data);
+      const user = await authorized(input.token, 'home');
       return success({
         withdrawalId: await DB.findCashWithdrawalReceipt(input.sessionId, input, user.username),
       });
@@ -441,9 +449,10 @@ export async function startLanHost(): Promise<string> {
       return failure(error, requestIdentity(request.data));
     }
   });
-  nextServer.post<NetworkSaleCommand>('/v1/sale', async (request) => {
+  nextServer.post('/v1/sale', async (request) => {
     try {
-      const user = await authorized(request.data?.token ?? '', 'sales');
+      const { token } = z.object({ token: z.string().max(512).default('') }).parse(request.data);
+      const user = await authorized(token, 'sales');
       assertSaleCommand(request.data);
       return success({ saleId: await handleNetworkSale(request.data, user) });
     } catch (error) {
@@ -465,6 +474,13 @@ export async function startLanHost(): Promise<string> {
   const identity = await DB.getSharedRevision();
   await advertiseLanHost(identity.authorityId, LAN_PORT);
   return address;
+}
+export async function stopLanHostAndDrain() {
+  stopLanAdvertisement();
+  const active = server;
+  server = null;
+  sessions.clear();
+  if (active) await active.stopAndDrain();
 }
 export function stopLanHost() {
   stopLanAdvertisement();

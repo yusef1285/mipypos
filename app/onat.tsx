@@ -27,7 +27,7 @@ import { scheduleFiscalReminder, cancelFiscalReminder } from '@/lib/onat-notific
 import {
   LEGAL_REFERENCE,
   ONAT_DISCLAIMER,
-  type FiscalRecordInput,
+  isFiscalRecordKind,
   type Obligation,
   type FiscalRecord,
 } from '@/lib/onat-models';
@@ -79,20 +79,17 @@ export default function OnatScreen() {
         b.value.effectiveFrom.localeCompare(a.value.effectiveFrom) || b.date.localeCompare(a.date),
     )[0];
   const all = activeRecords(data?.records ?? []);
-  const payments = all.filter((r) => r.kind === 'payment');
+  const payments = all.filter(isFiscalRecordKind('payment'));
   const paidFor = (id: string) =>
-    payments
-      .filter((r) => (r.value as FiscalRecordInput).obligationId === id)
-      .reduce((s, r) => s + (r.value as FiscalRecordInput).amount, 0);
+    payments.filter((r) => r.value.obligationId === id).reduce((s, r) => s + r.value.amount, 0);
   const obligations = all
-    .filter((r) => r.kind === 'obligation' && r.taxpayerId === taxpayer)
+    .filter(isFiscalRecordKind('obligation'))
+    .filter((r) => r.taxpayerId === taxpayer)
     .map((r) => ({
       id: r.id,
-      value: r.value as Obligation,
+      value: r.value,
       paid: paidFor(r.id),
-      declared: all.some(
-        (d) => d.kind === 'declaration' && (d.value as FiscalRecordInput).obligationId === r.id,
-      ),
+      declared: all.some((d) => d.kind === 'declaration' && d.value.obligationId === r.id),
     }));
   const filtered = obligations.filter(
     (o) => o.value.scope === scope && o.value.start <= range.end && o.value.end >= range.start,
@@ -101,16 +98,12 @@ export default function OnatScreen() {
     paid = filtered.reduce((s, o) => s + o.paid, 0),
     pending = filtered.reduce((s, o) => s + Math.max(0, o.value.calculation.tax - o.paid), 0);
   const provisions = all
-    .filter(
-      (r) =>
-        r.kind === 'provision' &&
-        r.taxpayerId === taxpayer &&
-        (r.value as FiscalRecordInput).date <= range.end,
-    )
-    .reduce((s, r) => s + (r.value as FiscalRecordInput).amount, 0);
+    .filter(isFiscalRecordKind('provision'))
+    .filter((r) => r.taxpayerId === taxpayer && r.value.date <= range.end)
+    .reduce((s, r) => s + r.value.amount, 0);
   const paidToDate = payments
-    .filter((r) => r.taxpayerId === taxpayer && (r.value as FiscalRecordInput).date <= range.end)
-    .reduce((s, r) => s + (r.value as FiscalRecordInput).amount, 0);
+    .filter((r) => r.taxpayerId === taxpayer && r.value.date <= range.end)
+    .reduce((s, r) => s + r.value.amount, 0);
   const available = Math.max(0, provisions - paidToDate);
   const rule = data?.rules.find((r) => r.id === ruleId);
   const calendarObligations = obligations.filter((o) => o.value.scope === scope);
@@ -151,15 +144,9 @@ export default function OnatScreen() {
         ? []
         : section === 'Calendario'
           ? all
-              .filter(
-                (r) =>
-                  r.kind === 'obligation' &&
-                  r.taxpayerId === taxpayer &&
-                  (r.value as Obligation).scope === scope,
-              )
-              .sort((a, b) =>
-                (a.value as Obligation).due.localeCompare((b.value as Obligation).due),
-              )
+              .filter(isFiscalRecordKind('obligation'))
+              .filter((r) => r.taxpayerId === taxpayer && r.value.scope === scope)
+              .sort((a, b) => a.value.due.localeCompare(b.value.due))
           : [];
   const previousStart = new Date(
     Date.parse(`${range.start}T12:00:00Z`) -
@@ -705,28 +692,28 @@ export default function OnatScreen() {
           ) : undefined
         }
         renderItem={({ item: r }) => {
-          const o = r.kind === 'obligation' ? (r.value as Obligation) : null;
-          const v = r.value as FiscalRecordInput;
+          const o = r.kind === 'obligation' ? r.value : null;
+          const v = 'amount' in r.value ? r.value : null;
           const cancelled = (data?.records ?? []).some(
-            (a) => a.kind === 'void' && (a.value as { recordId: string }).recordId === r.id,
+            (a) => a.kind === 'void' && a.value.recordId === r.id,
           );
           const p = obligations.find((a) => a.id === r.id);
           const status = o ? fiscalStatus(o.due, p ? fulfilled(p) : false) : '';
           return (
             <Card className="gap-3 p-4">
               <Typography.Heading type="h4">
-                {o?.name ??
-                  {
-                    payment: 'Pago tributario',
-                    provision: 'Reserva',
-                    expense: 'Gasto',
-                    payroll: 'Salario',
-                    dividend: 'Dividendo',
-                    declaration: 'Constancia',
-                    void: 'Anulación',
-                    export: 'Exportación',
-                  }[r.kind] ??
-                  r.kind}
+                {r.kind === 'obligation'
+                  ? r.value.name
+                  : {
+                      payment: 'Pago tributario',
+                      provision: 'Reserva',
+                      expense: 'Gasto',
+                      payroll: 'Salario',
+                      dividend: 'Dividendo',
+                      declaration: 'Constancia',
+                      void: 'Anulación',
+                      export: 'Exportación',
+                    }[r.kind]}
               </Typography.Heading>
               <Typography.Paragraph color="muted" type="body-sm">
                 {r.date.slice(0, 10)} · {r.actor}
@@ -776,12 +763,10 @@ export default function OnatScreen() {
                   </Button>
                 </>
               ) : r.kind === 'void' ? (
-                <Typography.Paragraph>
-                  {(r.value as { reason: string }).reason}
-                </Typography.Paragraph>
+                <Typography.Paragraph>{r.value.reason}</Typography.Paragraph>
               ) : r.kind === 'export' ? (
                 <Typography.Paragraph>Solicitud de preparación registrada.</Typography.Paragraph>
-              ) : (
+              ) : v ? (
                 <>
                   <Typography.Paragraph>
                     {money(v.amount)} · {v.method}
@@ -802,7 +787,7 @@ export default function OnatScreen() {
                     </Button>
                   ) : null}
                 </>
-              )}
+              ) : null}
               {!cancelled && !['void', 'export'].includes(r.kind) ? (
                 <Button
                   variant="ghost"

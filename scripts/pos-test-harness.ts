@@ -27,6 +27,9 @@ function values(args: unknown[]): SqlValue[] {
 }
 
 type HarnessModules = {
+  '@/lib/recovery-selector': typeof import('../lib/recovery-selector');
+  '@/lib/recovery-reconciliation': typeof import('../lib/recovery-reconciliation');
+  '@/lib/database-maintenance': typeof import('../lib/database-maintenance');
   '@/lib/database': typeof import('../lib/database');
   '@/lib/network/qr': typeof import('../lib/network/qr');
   '@/lib/network/operations': typeof import('../lib/network/operations');
@@ -54,6 +57,20 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
   const database: Database = new sql.Database();
   const storage = new Map<string, string>();
   let failSql = '';
+  let recoveryFault:
+    | 'close-active'
+    | 'candidate-reopen'
+    | 'candidate-copy'
+    | 'selector-prepared'
+    | 'selector-committed'
+    | 'selector-committed-readback'
+    | null = null;
+  function injectRecoveryFault(stage: typeof recoveryFault) {
+    if (stage !== null && recoveryFault === stage) {
+      recoveryFault = null;
+      throw new Error(`Injected recovery failure: ${stage}`);
+    }
+  }
   const all = (query: string, args: unknown[] = []) => {
     const statement = database.prepare(query);
     try {
@@ -66,6 +83,10 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
     }
   };
   const adapter = {
+    fixtureDatabase: database,
+    closeAsync: async () => {
+      injectRecoveryFault('close-active');
+    },
     execAsync: async (query: string) => {
       database.run(query);
     },
@@ -114,54 +135,91 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
   const mocks: Record<string, unknown> = {
     'expo-sqlite': {
       defaultDatabaseDirectory: 'file:///private/SQLite',
-      openDatabaseAsync: async (name: string) =>
-        name === 'mipypos.db'
-          ? adapter
-          : {
-              name,
-              execAsync: async (query: string) => {
-                // Separate connections have a connection-local query_only flag.
-                // sql.js retains one object per fixture file, so enforce only
-                // non-query-only statements here, without changing that object.
-                if (query !== 'PRAGMA query_only=ON') backups.get(name)?.run(query);
-              },
-              getFirstAsync: async (query: string) => {
-                const copy = backups.get(name);
-                if (!copy) return null;
-                const statement = copy.prepare(query);
-                try {
-                  return statement.step() ? statement.getAsObject() : null;
-                } finally {
-                  statement.free();
-                }
-              },
-              getAllAsync: async (query: string) => {
-                const copy = backups.get(name);
-                if (!copy) return [];
-                const statement = copy.prepare(query);
-                try {
-                  const rows: Record<string, SqlValue>[] = [];
-                  while (statement.step()) rows.push(statement.getAsObject());
-                  return rows;
-                } finally {
-                  statement.free();
-                }
-              },
-              closeAsync: async () => undefined,
-            },
-      backupDatabaseAsync: async ({ destDatabase }: { destDatabase: { name: string } }) => {
+      openDatabaseAsync: async (name: string) => {
+        if (name === 'mipypos.db') return adapter;
+        if (name.startsWith('mipypos.restored.') && backups.has(name))
+          injectRecoveryFault('candidate-reopen');
+        let queryOnly = false;
+        const queryRows = (query: string, args: unknown[] = []) => {
+          const copy = backups.get(name);
+          if (!copy) return [];
+          const statement = copy.prepare(query);
+          try {
+            statement.bind(values(args));
+            const rows: Record<string, SqlValue>[] = [];
+            while (statement.step()) rows.push(statement.getAsObject());
+            return rows;
+          } finally {
+            statement.free();
+          }
+        };
+        const write = (query: string, args: unknown[] = []) => {
+          if (queryOnly) throw new Error('Read-only fixture connection');
+          if (failSql && query.includes(failSql)) throw new Error('Injected write failure');
+          const copy = backups.get(name);
+          if (!copy) throw new Error('Missing fixture database');
+          copy.run(query, values(args));
+          return {
+            changes: copy.getRowsModified(),
+            lastInsertRowId: Number(queryRows('SELECT last_insert_rowid() AS id')[0]?.id ?? 0),
+          };
+        };
+        return {
+          name,
+          get fixtureDatabase() {
+            return backups.get(name);
+          },
+          execAsync: async (query: string) => {
+            if (query === 'PRAGMA query_only=ON') {
+              queryOnly = true;
+              return;
+            }
+            if (backups.has(name)) write(query);
+          },
+          runAsync: async (query: string, ...args: unknown[]) => write(query, args),
+          getFirstAsync: async (query: string, ...args: unknown[]) =>
+            queryRows(query, args)[0] ?? null,
+          getAllAsync: async (query: string, ...args: unknown[]) => queryRows(query, args),
+          withTransactionAsync: async (action: () => Promise<void>) => {
+            write('BEGIN IMMEDIATE');
+            try {
+              await action();
+              write('COMMIT');
+            } catch (error) {
+              write('ROLLBACK');
+              throw error;
+            }
+          },
+          closeAsync: async () => undefined,
+        };
+      },
+      backupDatabaseAsync: async ({
+        sourceDatabase,
+        destDatabase,
+      }: {
+        sourceDatabase: { fixtureDatabase: Database };
+        destDatabase: { name: string };
+      }) => {
         if (failSql === 'BACKUP') throw new Error('Injected backup failure');
-        backups.set(destDatabase.name, new sql.Database(database.export()));
+        if (destDatabase.name.startsWith('mipypos.restored.'))
+          injectRecoveryFault('candidate-copy');
+        backups.set(destDatabase.name, new sql.Database(sourceDatabase.fixtureDatabase.export()));
       },
     },
     'expo-file-system': {
+      Directory: class {
+        readonly exists = true;
+        list() {
+          return Array.from(backups.keys(), (name) => ({ name }));
+        }
+      },
       File: class {
         readonly name: string;
         constructor(_directory: string, name: string) {
           this.name = name;
         }
         get exists() {
-          return backups.has(this.name);
+          return this.name === 'mipypos.db' || backups.has(this.name);
         }
       },
     },
@@ -197,8 +255,17 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
     '@react-native-async-storage/async-storage': {
       __esModule: true,
       default: {
-        getItem: async (key: string) => storage.get(key) ?? null,
+        getItem: async (key: string) => {
+          const value = storage.get(key) ?? null;
+          if (key === 'mipypos.recovery.selector.v1' && value?.includes('"phase":"committed"'))
+            injectRecoveryFault('selector-committed-readback');
+          return value;
+        },
         setItem: async (key: string, value: string) => {
+          if (key === 'mipypos.recovery.selector.v1') {
+            if (value.includes('"phase":"prepared"')) injectRecoveryFault('selector-prepared');
+            if (value.includes('"phase":"committed"')) injectRecoveryFault('selector-committed');
+          }
           storage.set(key, value);
         },
         removeItem: async (key: string) => {
@@ -251,6 +318,9 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
     load,
     failWritesContaining: (query: string) => {
       failSql = query;
+    },
+    failRecoveryStageOnce: (stage: NonNullable<typeof recoveryFault>) => {
+      recoveryFault = stage;
     },
   };
 }

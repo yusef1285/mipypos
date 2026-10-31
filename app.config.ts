@@ -30,6 +30,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       bundleIdentifier: process.env.BILT_IOS_BUNDLE_ID ?? 'me.bilt.mipypos',
     },
     android: {
+      allowBackup: false,
       permissions: [
         'android.permission.INTERNET',
         'android.permission.ACCESS_NETWORK_STATE',

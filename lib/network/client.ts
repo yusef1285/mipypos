@@ -11,7 +11,13 @@ import {
   loadNetworkConfig,
 } from '@/lib/network/config';
 import { flushRevocations, revokeOrDefer } from '@/lib/network/revocations';
-import type { NetworkSaleCommand, NetworkSession, NetworkSnapshot } from '@/lib/network/types';
+import {
+  operationArgs,
+  parseOperationResult,
+  networkSessionSchema,
+  dailyReportSchema,
+} from '@/lib/network/validation';
+import type { NetworkSaleCommand, NetworkSnapshot } from '@/lib/network/types';
 
 import {
   mutationOperations,
@@ -30,16 +36,12 @@ async function resolvePendingOperation<T>(
   hostUrl: string,
   pending: PendingOperation,
   token: string,
+  parseResult: (value: unknown) => T,
 ): Promise<T> {
   if (pending.hostPin && pending.hostPin !== (await loadNetworkConfig()).hostPin)
     throw new Error('Confirma la operación pendiente con el administrador original.');
   const lookup = async () => {
-    const raw = await request<unknown>(
-      hostUrl,
-      '/v1/receipt',
-      { ...pending, token },
-      pending.hostPin,
-    );
+    const raw = await request(hostUrl, '/v1/receipt', { ...pending, token }, pending.hostPin);
     const parsed = z
       .discriminatedUnion('found', [
         z.object({ found: z.literal(false) }),
@@ -55,18 +57,22 @@ async function resolvePendingOperation<T>(
   // A failed receipt lookup is never evidence of a failed mutation.
   const previous = await lookup();
   if (previous.found) {
+    const result = parseResult(previous.value);
     await clearPendingOperation();
-    return previous.value as T;
+    return result;
   }
   let result: T;
   try {
-    result = await request<T>(hostUrl, '/v1/operation', { ...pending, token }, pending.hostPin);
+    result = parseResult(
+      await request(hostUrl, '/v1/operation', { ...pending, token }, pending.hostPin),
+    );
   } catch (error) {
     if (!(error instanceof HostRejection) || error.code !== 'REJECTED') throw error;
     const confirmed = await lookup();
     if (confirmed.found) {
+      const receiptResult = parseResult(confirmed.value);
       await clearPendingOperation();
-      return confirmed.value as T;
+      return receiptResult;
     }
     await clearPendingOperation();
     throw new HostRejection(error.message, 'NOT_COMMITTED');
@@ -90,9 +96,9 @@ export async function requestHostOperation<K extends PosOperation>(
       throw new HostRejection('Inicia sesión en el teléfono administrador.', 'AUTH_EXPIRED');
     if (operation === 'registerCashWithdrawal') {
       const { hostPin } = await loadNetworkConfig();
-      const input = args as PosArgs<'registerCashWithdrawal'>;
+      const input = operationArgs.registerCashWithdrawal.parse(args);
       const receipt = async () => {
-        const value = await request<unknown>(
+        const value = await request(
           hostUrl,
           '/v1/withdrawal-receipt',
           {
@@ -111,23 +117,24 @@ export async function requestHostOperation<K extends PosOperation>(
         return parsed.data.withdrawalId;
       };
       const existing = await receipt();
-      if (existing !== null) return existing as PosResult<K>;
+      if (existing !== null) return parseOperationResult(operation, existing);
       try {
-        return await request<PosResult<K>>(
-          hostUrl,
-          '/v1/operation',
-          { operation, args, token },
-          hostPin,
+        return parseOperationResult(
+          operation,
+          await request(hostUrl, '/v1/operation', { operation, args, token }, hostPin),
         );
       } catch (error) {
         if (!(error instanceof HostRejection) || error.code !== 'REJECTED') throw error;
         const confirmed = await receipt();
-        if (confirmed !== null) return confirmed as PosResult<K>;
+        if (confirmed !== null) return parseOperationResult(operation, confirmed);
         throw new HostRejection(error.message, 'NOT_COMMITTED');
       }
     }
     if (!mutationOperations.has(operation))
-      return request<PosResult<K>>(hostUrl, '/v1/operation', { operation, args, token });
+      return parseOperationResult(
+        operation,
+        await request(hostUrl, '/v1/operation', { operation, args, token }),
+      );
     const { hostPin } = await loadNetworkConfig();
     const pending = await prepareOperation({
       hostUrl,
@@ -137,7 +144,9 @@ export async function requestHostOperation<K extends PosOperation>(
       args,
       ...(hostPin ? { hostPin } : {}),
     });
-    return resolvePendingOperation<PosResult<K>>(hostUrl, pending, token);
+    return resolvePendingOperation(hostUrl, pending, token, (value) =>
+      parseOperationResult(operation, value),
+    );
   };
   if (!mutationOperations.has(operation)) return run();
   const running = operationQueue.then(run);
@@ -169,7 +178,12 @@ export class HostRejection extends Error {
   }
 }
 
-async function request<T>(hostUrl: string, path: string, body: object, pin?: string): Promise<T> {
+async function request(
+  hostUrl: string,
+  path: string,
+  body: object,
+  pin?: string,
+): Promise<unknown> {
   const result: unknown = JSON.parse(await pinnedRequest(hostUrl, path, body, pin));
   const envelope = z
     .discriminatedUnion('ok', [
@@ -200,7 +214,7 @@ async function request<T>(hostUrl: string, path: string, body: object, pin?: str
   }
   if (confirmed.data === undefined)
     throw new Error('No se pudo confirmar la respuesta del administrador.');
-  return confirmed.data as T;
+  return confirmed.data;
 }
 
 let authenticationQueue: Promise<unknown> = Promise.resolve();
@@ -213,11 +227,15 @@ function withAuthentication<T>(action: () => Promise<T>): Promise<T> {
 export function loginToHost(hostUrl: string, username: string, password: string) {
   return withAuthentication(async () => {
     await flushRevocations(hostUrl);
-    const session = await request<NetworkSession>(hostUrl, '/v1/login', { username, password });
+    const session = networkSessionSchema.parse(
+      await request(hostUrl, '/v1/login', { username, password }),
+    );
     await saveNetworkToken(session.token);
     const pending = await getPendingOperation();
     if (pending && pending.hostUrl === hostUrl && pending.username === session.user.username) {
-      await resolvePendingOperation(hostUrl, pending, session.token);
+      await resolvePendingOperation(hostUrl, pending, session.token, (value) =>
+        parseOperationResult(pending.operation, value),
+      );
     }
     return session.user;
   });
@@ -266,7 +284,7 @@ export async function getHostSnapshot(hostUrl: string): Promise<NetworkSnapshot>
         cached = null;
       }
     }
-    const response = await request<unknown>(hostUrl, '/v1/snapshot', {
+    const response = await request(hostUrl, '/v1/snapshot', {
       token,
       ...(cached?.authorityId
         ? { knownRevision: cached.revision, authorityId: cached.authorityId }
@@ -313,7 +331,7 @@ export async function registerHostSale(
   const receipt = async () => {
     const parsed = z
       .object({ saleId: z.number().int().positive().nullable() })
-      .safeParse(await request<unknown>(hostUrl, '/v1/sale-receipt', { ...input, token }, hostPin));
+      .safeParse(await request(hostUrl, '/v1/sale-receipt', { ...input, token }, hostPin));
     if (!parsed.success) throw new Error('No se pudo confirmar la venta pendiente.');
     return parsed.data.saleId;
   };
@@ -321,7 +339,7 @@ export async function registerHostSale(
   if (previous !== null) return previous;
   let result: unknown;
   try {
-    result = await request<unknown>(hostUrl, '/v1/sale', { ...input, token }, hostPin);
+    result = await request(hostUrl, '/v1/sale', { ...input, token }, hostPin);
   } catch (error) {
     if (!(error instanceof HostRejection) || error.code !== 'REJECTED') throw error;
     const confirmed = await receipt();
@@ -353,7 +371,7 @@ export async function getHostReport(hostUrl: string): Promise<DailyReport> {
       'Inicia sesión nuevamente en el teléfono administrador.',
       'AUTH_EXPIRED',
     );
-  return request<DailyReport>(hostUrl, '/v1/report', { token });
+  return dailyReportSchema.parse(await request(hostUrl, '/v1/report', { token }));
 }
 
 export type HostSessionState = SesionCaja | null;

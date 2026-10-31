@@ -85,7 +85,7 @@ void test('todas las mutaciones generales recuperan el mismo resultado sin repet
   assert.equal(await f.db.saveProduct(base, 'admin', command('saveProduct')), id);
   assert.equal((await f.db.getDemoUsage()).products, 1);
   assert.equal(await f.db.addArea('Mostrador', command('addArea')), undefined);
-  assert.equal(await f.db.addArea('Mostrador', command('addArea')), null);
+  assert.equal(await f.db.addArea('Mostrador', command('addArea')), undefined);
   assert.equal((await f.db.listAreas()).filter((a) => a.name === 'Mostrador').length, 1);
   const movement = {
     productId: id,
@@ -136,6 +136,127 @@ void test('todas las mutaciones generales recuperan el mismo resultado sin repet
   await f.db.deleteProduct(unused, command('deleteProduct'));
   await f.db.deleteProduct(unused, command('deleteProduct'));
   assert.equal(await f.db.getProduct(unused), null);
+});
+void test('cache numérico valida id y sobre value sin repetir escrituras', async () => {
+  const f = await fixture();
+  const c = command('saveProduct');
+  const id = await f.db.saveProduct(base, 'admin', c);
+  const initial = f.database.export();
+  assert.equal(await f.db.saveProduct(base, 'admin', c), id);
+  assert.deepEqual(f.database.export(), initial);
+  for (const response of [
+    '{}',
+    'null',
+    '[]',
+    '{"value":"1"}',
+    '{"value":null}',
+    '{"value":0}',
+    '{"value":-1}',
+    '{"value":1.5}',
+    '{"value":1e999}',
+    '{broken',
+  ]) {
+    f.database.run('UPDATE network_commands SET response=? WHERE command_id=?', [
+      response,
+      c.commandId,
+    ]);
+    const bytesBefore = f.database.export();
+    await assert.rejects(f.db.saveProduct(base, 'admin', c));
+    if (['{broken', '{}', 'null', '[]'].includes(response))
+      await assert.rejects(f.db.findMutationReceipt(c));
+    assert.deepEqual(f.database.export(), bytesBefore);
+  }
+});
+void test('cache de conteo admite cero y rechaza forma distinta', async () => {
+  const f = await fixture();
+  const c = command('importProducts');
+  assert.equal(await f.db.importProducts([], 'admin', c), 0);
+  assert.equal(await f.db.importProducts([], 'admin', c), 0);
+  for (const value of [null, '0', -1, 0.5, {}]) {
+    f.database.run('UPDATE network_commands SET response=? WHERE command_id=?', [
+      JSON.stringify({ value }),
+      c.commandId,
+    ]);
+    const bytesBefore = f.database.export();
+    await assert.rejects(f.db.importProducts([], 'admin', c));
+    assert.deepEqual(f.database.export(), bytesBefore);
+  }
+});
+void test('cache void normaliza null a undefined y falla cerrado ante corrupción', async () => {
+  const f = await fixture();
+  const c = command('addArea');
+  assert.equal(await f.db.addArea('Cache void', c), undefined);
+  const initial = f.database.export();
+  assert.equal(await f.db.addArea('Cache void', c), undefined);
+  assert.deepEqual(f.database.export(), initial);
+  assert.deepEqual(await f.db.findMutationReceipt(c), { found: true, value: null });
+  for (const response of [
+    '{}',
+    '{"value":0}',
+    '{"value":{}}',
+    '{"value":"undefined"}',
+    '{broken',
+  ]) {
+    f.database.run('UPDATE network_commands SET response=? WHERE command_id=?', [
+      response,
+      c.commandId,
+    ]);
+    const bytesBefore = f.database.export();
+    await assert.rejects(f.db.addArea('Cache void', c));
+    assert.deepEqual(f.database.export(), bytesBefore);
+  }
+});
+void test('cache objeto de cierre valida campos y nunca vuelve a cerrar', async () => {
+  const f = await fixture();
+  const sid = await f.db.openCashSession(0, 'admin');
+  const c = command('closeCashSession');
+  const input = {
+    denominations: [],
+    withdrawalCount: 0,
+    transferCount: 0,
+    products: [],
+    adminUsername: 'admin',
+    adminPassword: 'admin123',
+  };
+  const result = await f.db.closeCashSession(sid, input, c);
+  const initial = f.database.export();
+  assert.deepEqual(await f.db.closeCashSession(sid, input, c), result);
+  assert.deepEqual(f.database.export(), initial);
+  for (const value of [null, {}, { ...result, cashCount: '0' }, { ...result, products: [{}] }]) {
+    f.database.run('UPDATE network_commands SET response=? WHERE command_id=?', [
+      JSON.stringify({ value }),
+      c.commandId,
+    ]);
+    const bytesBefore = f.database.export();
+    await assert.rejects(f.db.closeCashSession(sid, input, c));
+    assert.deepEqual(f.database.export(), bytesBefore);
+  }
+});
+void test('cache objeto de aprobación valida id y autorización sin otra auditoría', async () => {
+  const f = await fixture();
+  const sid = await f.db.openCashSession(100, 'admin');
+  const c = command('authorizeCashDifference');
+  const input = {
+    kind: 'money' as const,
+    counted: 90,
+    transferCount: 0,
+    reason: 'Conteo',
+    adminUsername: 'admin',
+    adminPassword: 'admin123',
+  };
+  const result = await f.db.authorizeCashDifference(sid, input, c);
+  const initial = f.database.export();
+  assert.deepEqual(await f.db.authorizeCashDifference(sid, input, c), result);
+  assert.deepEqual(f.database.export(), initial);
+  for (const value of [null, {}, { ...result, id: -1 }, { ...result, authorized_by: null }]) {
+    f.database.run('UPDATE network_commands SET response=? WHERE command_id=?', [
+      JSON.stringify({ value }),
+      c.commandId,
+    ]);
+    const bytesBefore = f.database.export();
+    await assert.rejects(f.db.authorizeCashDifference(sid, input, c));
+    assert.deepEqual(f.database.export(), bytesBefore);
+  }
 });
 void test('mismo UUID no admite otro usuario, terminal o contenido; recibo no expone ajenos', async () => {
   const f = await fixture();
@@ -753,9 +874,9 @@ void test('dispatcher JS escucha el bridge TLS, devuelve resultados y libera sus
   });
   const tls = h.load('@/lib/network/tls');
   const server = new tls.SecureLanServer();
-  server.post<{ value: string }>('/v1/test', async (request) => ({
+  server.post('/v1/test', async (request) => ({
     ok: true,
-    data: request.data.value,
+    data: z.object({ value: z.string() }).parse(request.data).value,
   }));
   await server.listen('192.168.43.1', 8787);
   assert.equal(tls.getHostPin(), pin);
@@ -1904,7 +2025,16 @@ void test('logout pendiente termina antes del nuevo login sin borrar su token', 
         logins += 1;
         return JSON.stringify({
           ok: true,
-          data: { token: 'sesion-nueva', user: { username: 'admin', role: 'admin' } },
+          data: {
+            token: 'sesion-nueva',
+            user: {
+              id: 1,
+              username: 'admin',
+              role: 'admin',
+              can_authorize_consumption: 1,
+              can_manage_fiscal: 1,
+            },
+          },
         });
       },
     },
@@ -1959,4 +2089,178 @@ void test('crear areas exige admin tambien en repositorio local sin impedir movi
     (await db.listAreas()).some((area) => area.name === 'Autorizada'),
     true,
   );
+});
+
+void test('resultado de operación de tipo prohibido conserva journal y UUID hasta ACK válido', async () => {
+  const f = await lanFixture();
+  const handler = f.routes.get('/v1/operation');
+  assert.ok(handler);
+  f.routes.set('/v1/operation', async (request) => {
+    await handler(request); // Commit happened; the returned result must still be validated.
+    return { ok: true, data: { unexpected: 1 } };
+  });
+  const pending = f.load('@/lib/network/pending-operation');
+  await assert.rejects(
+    f.client.requestHostOperation(url, 'addArea', ['ACK inválido'], 'admin', 'terminal-a'),
+  );
+  const saved = await pending.getPendingOperation();
+  assert.ok(saved);
+  assert.equal((await f.db.listAreas()).filter((a) => a.name === 'ACK inválido').length, 1);
+  f.routes.set('/v1/operation', handler);
+  assert.equal(
+    await f.client.requestHostOperation(url, 'addArea', ['ACK inválido'], 'admin', 'terminal-a'),
+    null,
+  );
+  assert.equal(await pending.getPendingOperation(), null);
+  assert.equal(f.calls.filter((c) => c.path === '/v1/operation').length, 1);
+  assert.equal((await f.db.listAreas()).filter((a) => a.name === 'ACK inválido').length, 1);
+});
+
+void test('valor de recibo de tipo prohibido no borra journal antes ni después de rechazo', async () => {
+  for (const rejectFirst of [false, true]) {
+    const f = await lanFixture();
+    let lookups = 0;
+    f.routes.set('/v1/receipt', async () => ({
+      ok: true,
+      data: rejectFirst && lookups++ === 0 ? { found: false } : { found: true, value: 123 },
+    }));
+    f.routes.set('/v1/operation', async () => ({
+      ok: false,
+      code: 'REJECTED',
+      error: 'Rechazada',
+    }));
+    const pending = f.load('@/lib/network/pending-operation');
+    await assert.rejects(
+      f.client.requestHostOperation(url, 'addArea', ['Recibo inválido'], 'admin', 'terminal-a'),
+    );
+    const saved = await pending.getPendingOperation();
+    assert.ok(saved);
+    await assert.rejects(
+      f.client.requestHostOperation(url, 'addArea', ['Recibo inválido'], 'admin', 'terminal-a'),
+    );
+    assert.equal((await pending.getPendingOperation())?.commandId, saved.commandId);
+  }
+});
+
+void test('login malformado conserva token, replica y journal previos', async () => {
+  const f = await lanFixture();
+  const token = await f.config.getNetworkToken();
+  await f.client.getHostSnapshot(url);
+  const previousReplica = await (
+    await f.db.getDatabase()
+  ).getAllAsync('SELECT * FROM network_replica');
+  const pending = f.load('@/lib/network/pending-operation');
+  const saved = await pending.prepareOperation({
+    hostUrl: url,
+    hostPin: pin,
+    username: 'admin',
+    clientId: 'terminal-a',
+    operation: 'addArea',
+    args: ['Login inválido'],
+  });
+  for (const user of [
+    { username: 'admin', role: 'admin' },
+    { id: 1, username: 'admin', role: 'root', can_authorize_consumption: 1 },
+  ]) {
+    f.routes.set('/v1/login', async () => ({ ok: true, data: { token: 'no-guardar', user } }));
+    await assert.rejects(f.client.loginToHost(url, 'admin', 'clave'));
+    assert.equal(await f.config.getNetworkToken(), token);
+    assert.equal((await pending.getPendingOperation())?.commandId, saved.commandId);
+    assert.deepEqual(
+      await (await f.db.getDatabase()).getAllAsync('SELECT * FROM network_replica'),
+      previousReplica,
+    );
+  }
+});
+
+void test('transport 500 y readerror conservan journal de operación y venta', async () => {
+  for (const message of ['HTTP 500', 'readerror']) {
+    for (const failPath of ['/v1/receipt', '/v1/operation', '/v1/sale-receipt', '/v1/sale']) {
+      const h = createHarness({
+        '@/lib/network/tls': {
+          pinnedRequest: async (_url: string, path: string) => {
+            if (path === failPath) throw new Error(message);
+            return JSON.stringify({
+              ok: true,
+              data: path === '/v1/receipt' ? { found: false } : { saleId: null },
+            });
+          },
+        },
+      });
+      const config = h.load('@/lib/network/config');
+      await config.saveNetworkToken('token-previo');
+      const network = { mode: 'client' as const, hostUrl: url, clientId: 'terminal-a' };
+      if (failPath.startsWith('/v1/sale')) {
+        const pending = h.load('@/lib/network/pending-sale');
+        await assert.rejects(
+          pending.createPendingSale(network, 'admin', {
+            method: 'cash',
+            sessionId: 1,
+            items: [{ productId: 1, areaId: 1, quantity: 1 }],
+            payments: [{ type: 'cash', amount: 100 }],
+          }),
+          { message },
+        );
+        const saved = await pending.getPendingSale();
+        assert.ok(saved);
+        await assert.rejects(pending.sendPendingSale(network, 'admin'), { message });
+        assert.equal((await pending.getPendingSale())?.command.commandId, saved.command.commandId);
+      } else {
+        const client = h.load('@/lib/network/client');
+        const pending = h.load('@/lib/network/pending-operation');
+        await assert.rejects(
+          client.requestHostOperation(
+            url,
+            'addArea',
+            ['Transport incierto'],
+            'admin',
+            'terminal-a',
+          ),
+          { message },
+        );
+        const saved = await pending.getPendingOperation();
+        assert.ok(saved);
+        await assert.rejects(
+          client.requestHostOperation(
+            url,
+            'addArea',
+            ['Transport incierto'],
+            'admin',
+            'terminal-a',
+          ),
+          { message },
+        );
+        assert.equal((await pending.getPendingOperation())?.commandId, saved.commandId);
+      }
+      assert.equal(await config.getNetworkToken(), 'token-previo');
+    }
+  }
+});
+
+void test('missing saleId en recibo o respuesta conserva el mismo journal al reintentar', async () => {
+  for (const malformedPath of ['/v1/sale-receipt', '/v1/sale']) {
+    const h = createHarness({
+      '@/lib/network/tls': {
+        pinnedRequest: async (_url: string, path: string) =>
+          JSON.stringify({ ok: true, data: path === malformedPath ? {} : { saleId: null } }),
+      },
+    });
+    const config = h.load('@/lib/network/config');
+    await config.saveNetworkToken('token-valid');
+    const pending = h.load('@/lib/network/pending-sale');
+    const network = { mode: 'client' as const, hostUrl: url, clientId: 'terminal-a' };
+    await assert.rejects(
+      pending.createPendingSale(network, 'admin', {
+        method: 'cash',
+        sessionId: 1,
+        items: [{ productId: 1, areaId: 1, quantity: 1 }],
+        payments: [{ type: 'cash', amount: 100 }],
+      }),
+      /confirmar/,
+    );
+    const saved = await pending.getPendingSale();
+    assert.ok(saved);
+    await assert.rejects(pending.sendPendingSale(network, 'admin'), /confirmar/);
+    assert.equal((await pending.getPendingSale())?.command.commandId, saved.command.commandId);
+  }
 });

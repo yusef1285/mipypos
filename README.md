@@ -1,6 +1,33 @@
-# Welcome to your Bilt project
+# MipyPOS Pro Max
 
-## Resultado de cierre e integración — 31 de octubre de 2026
+## Continuación de la misión prioritaria — 31 de octubre de 2026
+
+**Entrega parcial; producción NO APROBADA.** Se continuó sobre SQLite v8 sin reiniciar datos, alterar licencias ni añadir dependencia de Internet. Esta ejecución implementa protecciones de recuperación y contratos; no implementa los módulos empresariales restantes ni autonomía LAN.
+
+### Recuperación implementada
+
+- `lib/database-maintenance.ts` bloquea operaciones y drena conexiones durante mantenimiento. La restauración exige administrador reautenticado, confirmación expresa y modo independiente; detiene/drena el host y rechaza journals pendientes sin borrarlos.
+- `restorePrivateRecoveryBackup` comprueba copia privada, estructura e igualdad del estado empresarial y de recibos confirmados. Si una copia antigua difiere, conserva ambas y bloquea la restauración: **no fusiona ni concilia automáticamente operaciones divergentes**.
+- Crea copia previa, nueva generación SQLite y auditoría; verifica integridad, claves foráneas, versión v8, autoridad y revisión antes de activar. Conserva original y archivos auxiliares; no sustituye un archivo abierto.
+- `lib/recovery-selector.ts` persiste intención antes de copiar y confirma después de reabrir. Fallos de copia/cierre/reapertura/confirmación y pérdida/corrupción del selector están cubiertos por regresiones. Si hay generaciones recuperadas y se pierde el selector, impide volver silenciosamente a la base original.
+- Al activarse la generación se invalida la sesión aunque falle la actualización visual. Las copias privadas permanecen en el dispositivo, contienen cuentas y **no son un archivo portátil cifrado ni protegen frente a desinstalación/pérdida del teléfono**.
+- `android.allowBackup=false` y reglas XML legacy/cloud/device-transfer generadas por `withLocalHotspot` excluyen SQLite y preferencias del respaldo automático Android. Exige regenerar y recompilar el manifiesto y comprobarlo en Android real.
+
+### Contratos y calidad
+
+Se validan resultados locales/LAN antes de retirar pendientes; un recibo inválido no confirma una operación. Se sustituyeron assertions inseguras por contratos comprobados de mutaciones, finanzas, TLS, descubrimiento y fiscalidad, conservando pagos históricos y compatibilidad de archivos.
+
+**264/264 regresiones:** 116 POS, 77 LAN, 24 finanzas y 47 ONAT. Artefactos `.expo/*-results.json` del 31 de octubre de 2026, 21:36:57–21:37:23 UTC. TypeScript y CSS limpios; lint **0 errores / 4 advertencias**, frente a las 77 iniciales, sin supresión global. Las cuatro advertencias restantes son dependencias de efectos de actualización: `revision` en inversión/consumo/panel financiero y contexto de red en `LanConnection`; se conservan para recargar tras cambios. Se ejecutó el formateador, no una comprobación independiente `format:check`. Expo Doctor 20/20 y alineación de dependencias corresponden a la comprobación anterior, no a una nueva prueba Android.
+
+Las pruebas utilizan `sql.js`, transporte y APIs nativas simulados. La captura actual de `/settings` a 320pt muestra login: **no verifica los controles autenticados de recuperación**. No se generó ni instaló APK, ni se probó pérdida de energía/WAL/SHM, respaldo del sistema, OCR, impresión o LAN entre teléfonos físicos. Las instrucciones de compilación y aceptación externa siguen más abajo.
+
+### Pendiente real del encargo
+
+Recuperación de versiones divergentes o base original perdida; multinegocio/multisucursal; traslados con recepción; clientes/proveedores/créditos; personal/nómina; multidivisa; socios/aportes; integración fiscal empresarial; tickets por establecimiento y consolidación; réplica bidireccional/autonomía LAN; aceptación Android y compilación instalable. La matriz `lib/offline-acceptance.md` separa implementado, integrado, prueba automática, prueba Android, validación externa y pendiente. No se presenta esta entrega como finalización total.
+
+## Resultado anterior de cierre e integración — 31 de octubre de 2026
+
+Los resultados siguientes registran la entrega anterior de 221 pruebas; la sección de continuación anterior contiene la evidencia vigente.
 
 **Salida a producción: NO APROBADA. MipyPOS Pro Max no está terminado.** La aprobación automatizada de los módulos existentes no demuestra que todos los módulos solicitados existan ni sustituye una validación Android real. No se generó ni instaló un APK en esta ejecución.
 
@@ -16,17 +43,19 @@
 
 Las pruebas usan SQLite `sql.js`, transporte simulado y dobles de APIs nativas. Las capturas de `/onat` (320pt) y `/onat-edit?mode=record` (402pt) muestran login, no los controles autenticados. No hay comprobación visual completa ni prueba física Android de notificaciones, OCR, archivos, impresora, TLS, NSD, Wi-Fi Direct o recuperación WAL/SHM.
 
-### Bloqueos de producción todavía abiertos
+### Bloqueos de la entrega anterior (histórico)
 
-| Área | Problema real y consecuencia |
-| --- | --- |
+La restauración conservadora y la calidad evolucionaron en la continuación documentada al inicio; los módulos empresariales de esta tabla siguen pendientes.
+
+| Área                 | Problema real y consecuencia                                                                                                                                                                                                                                                                                                                              |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | A30/A32 recuperación | Falta restauración privada asistida con barrera global, drenaje LAN, cierre/reapertura y reconciliación de recibos. Restaurar una copia antigua sin eso puede perder confirmaciones y provocar reenvíos ambiguos; la app no habilita esa sustitución insegura. Legado sin ancla, corrupción doble o pérdida de clave siguen bloqueados conservadoramente. |
-| A31 réplica | El cliente no tiene réplica integral de ventas, movimientos, finanzas o fiscalidad; no actúa como segunda autoridad desconectada. |
-| A33/A34 | No existen multinegocio/multisucursal ni traslados empresariales con recepción parcial y compensaciones. Las áreas actuales no son sucursales. |
-| A35–A38 | No existen módulos operativos de personal/nómina, crédito/abonos, clientes/proveedores ni multidivisa histórica con caja por moneda. Los complementos ONAT no los sustituyen. |
-| A39–A41 | Faltan tickets con identidad histórica por establecimiento, consolidación empresarial local y gestión de aportes/participaciones de inversores. La inversión en inventario existente no es ese módulo. |
-| F02/F08 | No hay paquete de reglas fiscales certificado para cada régimen ni integración automática con nómina/gastos/bancos/multisucursal. Las tasas de prueba no son tasas legales. |
-| Aceptación | Pendientes compilación/instalación y recorridos autenticados Android, dos dispositivos sin internet, interrupción/reinicio, restauración de datos anonimizados y apertura/compartición/impresión reales. |
+| A31 réplica          | El cliente no tiene réplica integral de ventas, movimientos, finanzas o fiscalidad; no actúa como segunda autoridad desconectada.                                                                                                                                                                                                                         |
+| A33/A34              | No existen multinegocio/multisucursal ni traslados empresariales con recepción parcial y compensaciones. Las áreas actuales no son sucursales.                                                                                                                                                                                                            |
+| A35–A38              | No existen módulos operativos de personal/nómina, crédito/abonos, clientes/proveedores ni multidivisa histórica con caja por moneda. Los complementos ONAT no los sustituyen.                                                                                                                                                                             |
+| A39–A41              | Faltan tickets con identidad histórica por establecimiento, consolidación empresarial local y gestión de aportes/participaciones de inversores. La inversión en inventario existente no es ese módulo.                                                                                                                                                    |
+| F02/F08              | No hay paquete de reglas fiscales certificado para cada régimen ni integración automática con nómina/gastos/bancos/multisucursal. Las tasas de prueba no son tasas legales.                                                                                                                                                                               |
+| Aceptación           | Pendientes compilación/instalación y recorridos autenticados Android, dos dispositivos sin internet, interrupción/reinicio, restauración de datos anonimizados y apertura/compartición/impresión reales.                                                                                                                                                  |
 
 SQLite permanece **v8**; no se cambia la licencia, contraseñas, cuotas ni identidad de publicación; no se utiliza una base de producción. Se conserva la matriz `lib/offline-acceptance.md` como fuente de pendientes. Este avance corrige fallos concretos, **no concluye todos los módulos solicitados ni certifica producción**.
 

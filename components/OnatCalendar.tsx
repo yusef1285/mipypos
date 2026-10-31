@@ -5,12 +5,24 @@ import { CalendarDays } from 'lucide-react-native';
 import { fiscalStatus } from '@/lib/onat-engine';
 import type { Obligation } from '@/lib/onat-models';
 
+type CalendarObligation = { id: string; value: Obligation; paid: number; declared: boolean };
+const fulfilled = (o: CalendarObligation) =>
+  o.value.name === 'Declaración jurada' ? o.declared : o.paid >= o.value.calculation.tax;
+const color = (status: string) =>
+  status === 'Cumplida'
+    ? 'bg-success-soft text-success'
+    : status === 'Vencida'
+      ? 'bg-danger-soft text-danger'
+      : status === 'Próxima'
+        ? 'bg-warning-soft text-warning'
+        : 'bg-default text-muted';
+
 export function OnatCalendar({
   month,
   obligations,
 }: {
   month: string;
-  obligations: Array<{ id: string; value: Obligation; paid: number; declared: boolean }>;
+  obligations: CalendarObligation[];
 }) {
   const [selected, setSelected] = useState('');
   const [accent] = useThemeColor(['accent']);
@@ -18,19 +30,9 @@ export function OnatCalendar({
     m = Number(month.slice(5, 7));
   const days = new Date(year, m, 0).getDate();
   const offset = (new Date(year, m - 1, 1).getDay() + 6) % 7;
-  const rows = Array.from({ length: Math.ceil((days + offset) / 7) }, (_, row) =>
-    Array.from({ length: 7 }, (_, col) => row * 7 + col - offset + 1),
+  const rows = Array.from({ length: Math.ceil((days + offset) / 7) }, (_week, row) =>
+    Array.from({ length: 7 }, (_day, col) => row * 7 + col - offset + 1),
   );
-  const fulfilled = (o: (typeof obligations)[number]) =>
-    o.value.name === 'Declaración jurada' ? o.declared : o.paid >= o.value.calculation.tax;
-  const color = (status: string) =>
-    status === 'Cumplida'
-      ? 'bg-success-soft text-success'
-      : status === 'Vencida'
-        ? 'bg-danger-soft text-danger'
-        : status === 'Próxima'
-          ? 'bg-warning-soft text-warning'
-          : 'bg-default text-muted';
   return (
     <Card className="gap-3 p-4">
       <View className="flex-row items-center gap-2">
@@ -44,10 +46,11 @@ export function OnatCalendar({
           </View>
         ))}
       </View>
-      {rows.map((row, i) => (
-        <View key={i} className="flex-row gap-1">
-          {row.map((day, j) => {
-            if (day < 1 || day > days) return <View key={j} className="h-10 flex-1" />;
+      {rows.map((row) => (
+        <View key={`${month}:${row[0]}`} className="flex-row gap-1">
+          {row.map((day) => {
+            if (day < 1 || day > days)
+              return <View key={`${month}:${day}`} className="h-10 flex-1" />;
             const date = `${month}-${String(day).padStart(2, '0')}`;
             const items = obligations.filter((o) => o.value.due === date);
             const state = items.some((o) => fiscalStatus(date, fulfilled(o)) === 'Vencida')
@@ -59,7 +62,7 @@ export function OnatCalendar({
                   : 'Futura';
             return (
               <Button
-                key={j}
+                key={date}
                 size="sm"
                 variant="ghost"
                 className={`h-10 min-w-0 flex-1 px-0 ${color(state)}`}

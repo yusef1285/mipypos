@@ -1,4 +1,5 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
+import { z } from 'zod';
 import * as Crypto from 'expo-crypto';
 import type { Usuario } from '@/lib/models';
 import { reportFinance, financeCommand } from '@/lib/finance';
@@ -6,7 +7,7 @@ import { roundMoney } from '@/lib/units';
 import { calculateTax, dueDate, ruleWarnings, validateFiscalPeriod } from '@/lib/onat-engine';
 import {
   fiscalFilterSchema,
-  parseFiscalRecordValue,
+  parseFiscalRecord,
   onatCommandSchema,
   profileSchema,
   ruleSchema,
@@ -14,7 +15,6 @@ import {
   type FiscalEconomy,
   type FiscalFilter,
   type FiscalRecord,
-  type FiscalRecordInput,
   type Obligation,
   type OnatCommand,
   type ProfileVersion,
@@ -89,14 +89,13 @@ async function versions(db: SQLiteDatabase) {
       kind: string;
       payload: string;
     }>('SELECT * FROM fiscal_records ORDER BY rowid DESC')
-  ).map((r) => ({
-    id: r.id,
-    date: r.date,
-    actor: r.actor,
-    taxpayerId: r.taxpayer_id,
-    kind: r.kind,
-    value: parseFiscalRecordValue(r.kind, JSON.parse(r.payload)),
-  }));
+  ).map((r) =>
+    parseFiscalRecord(
+      { id: r.id, date: r.date, actor: r.actor, taxpayerId: r.taxpayer_id },
+      r.kind,
+      JSON.parse(r.payload),
+    ),
+  );
   return { profiles, rules, records };
 }
 // JSON object member order is not meaningful; array order and every value are.
@@ -218,9 +217,7 @@ export async function validateFiscalStorage(db: SQLiteDatabase) {
   }
 }
 export function activeRecords(records: FiscalRecord[]) {
-  const voided = new Set(
-    records.filter((r) => r.kind === 'void').map((r) => (r.value as { recordId: string }).recordId),
-  );
+  const voided = new Set(records.filter((r) => r.kind === 'void').map((r) => r.value.recordId));
   return records.filter((r) => r.kind !== 'void' && !voided.has(r.id));
 }
 function profileFor(profiles: ProfileVersion[], filter: FiscalFilter) {
@@ -273,11 +270,11 @@ async function economyFor(
   }
   for (const record of activeRecords(records)) {
     if (
-      !['expense', 'payroll', 'dividend'].includes(record.kind) ||
+      (record.kind !== 'expense' && record.kind !== 'payroll' && record.kind !== 'dividend') ||
       record.taxpayerId !== filter.taxpayerId
     )
       continue;
-    const v = record.value as FiscalRecordInput;
+    const v = record.value;
     if (v.date < filter.start || v.date > filter.end) continue;
     if (record.kind === 'payroll') e.payroll += v.amount;
     if (record.kind === 'dividend' && (!beneficiary || v.beneficiary === beneficiary))
@@ -389,283 +386,289 @@ export async function executeFiscalCommand(db: SQLiteDatabase, raw: OnatCommand,
     throw new Error(parsed.error.issues[0]?.message ?? 'Revisa los datos fiscales.');
   const input = parsed.data;
   const actor = await fiscalActor(db, username);
-  return financeCommand(db, input.commandId, JSON.stringify([username, input]), async () => {
-    const data = await versions(db);
-    const date = new Date().toISOString();
-    const recordId = Crypto.randomUUID();
-    let taxpayerId = '',
-      kind = input.action === 'estimate' ? 'obligation' : input.action;
-    let payload: unknown = input;
-    if (input.action === 'profile') {
-      const v = input.value;
-      const latest = data.profiles.find((p) => p.value.taxpayerId === v.taxpayerId);
-      if (latest && v.effectiveFrom < latest.value.effectiveFrom)
-        throw new Error('No puedes alterar perfiles anteriores. Crea una versión posterior.');
-      if (latest && v.nit !== latest.value.nit)
-        throw new Error('Un NIT diferente requiere un contribuyente independiente.');
-      const current = data.profiles.filter(
-        (p, i, list) => list.findIndex((x) => x.value.taxpayerId === p.value.taxpayerId) === i,
-      );
-      if (
-        v.source === 'POS' &&
-        current.some((p) => p.value.source === 'POS' && p.value.taxpayerId !== v.taxpayerId)
-      )
-        throw new Error(
-          'Las ventas del POS ya pertenecen a otro contribuyente. No se duplican ingresos.',
+  return financeCommand(
+    db,
+    input.commandId,
+    JSON.stringify([username, input]),
+    async () => {
+      const data = await versions(db);
+      const date = new Date().toISOString();
+      const recordId = Crypto.randomUUID();
+      let taxpayerId = '',
+        kind = input.action === 'estimate' ? 'obligation' : input.action;
+      let payload: unknown = input;
+      if (input.action === 'profile') {
+        const v = input.value;
+        const latest = data.profiles.find((p) => p.value.taxpayerId === v.taxpayerId);
+        if (latest && v.effectiveFrom < latest.value.effectiveFrom)
+          throw new Error('No puedes alterar perfiles anteriores. Crea una versión posterior.');
+        if (latest && v.nit !== latest.value.nit)
+          throw new Error('Un NIT diferente requiere un contribuyente independiente.');
+        const current = data.profiles.filter(
+          (p, i, list) => list.findIndex((x) => x.value.taxpayerId === p.value.taxpayerId) === i,
         );
-      if (
-        data.records.some(
-          (r) =>
-            r.kind === 'obligation' &&
-            r.taxpayerId === v.taxpayerId &&
-            (r.value as Obligation).end >= v.effectiveFrom,
+        if (
+          v.source === 'POS' &&
+          current.some((p) => p.value.source === 'POS' && p.value.taxpayerId !== v.taxpayerId)
         )
-      )
-        throw new Error(
-          'La configuración afectaría cálculos confirmados. Usa una vigencia posterior.',
-        );
-      await db.runAsync(
-        'INSERT INTO fiscal_profiles VALUES(?,?,?,?,?)',
-        recordId,
-        v.taxpayerId,
-        date,
-        actor.username,
-        JSON.stringify(v),
-      );
-    } else if (input.action === 'rule') {
-      if ((input.value.advanceRuleKeys ?? []).includes(input.value.ruleKey))
-        throw new Error('Una regla no puede descontar sus propios pagos como anticipos.');
-      for (const key of input.value.advanceRuleKeys ?? [])
-        if (!data.rules.some((r) => r.value.ruleKey === key))
-          throw new Error('Selecciona un impuesto anticipado existente.');
-      const prior = input.replacesId ? data.rules.find((r) => r.id === input.replacesId) : null;
-      if (input.replacesId && !prior) throw new Error('La regla anterior no existe.');
-      if (
-        prior &&
-        (prior.value.ruleKey !== input.value.ruleKey ||
-          input.value.effectiveFrom <= prior.value.effectiveFrom)
-      )
-        throw new Error('Una actualización necesita el mismo impuesto y una vigencia posterior.');
-      if (
-        data.rules.some(
-          (r) =>
-            r.value.ruleKey === input.value.ruleKey &&
-            (!prior || r.value.effectiveFrom >= input.value.effectiveFrom),
+          throw new Error(
+            'Las ventas del POS ya pertenecen a otro contribuyente. No se duplican ingresos.',
+          );
+        if (
+          data.records.some(
+            (r) =>
+              r.kind === 'obligation' &&
+              r.taxpayerId === v.taxpayerId &&
+              r.value.end >= v.effectiveFrom,
+          )
         )
-      )
-        throw new Error(
-          'Ya existe una versión de este impuesto. Selecciona la regla que actualizarás.',
+          throw new Error(
+            'La configuración afectaría cálculos confirmados. Usa una vigencia posterior.',
+          );
+        await db.runAsync(
+          'INSERT INTO fiscal_profiles VALUES(?,?,?,?,?)',
+          recordId,
+          v.taxpayerId,
+          date,
+          actor.username,
+          JSON.stringify(v),
         );
-      if (
-        data.records.some(
-          (r) =>
-            r.kind === 'obligation' &&
-            (r.value as Obligation).rule.ruleKey === input.value.ruleKey &&
-            (r.value as Obligation).end >= input.value.effectiveFrom,
+      } else if (input.action === 'rule') {
+        if ((input.value.advanceRuleKeys ?? []).includes(input.value.ruleKey))
+          throw new Error('Una regla no puede descontar sus propios pagos como anticipos.');
+        for (const key of input.value.advanceRuleKeys ?? [])
+          if (!data.rules.some((r) => r.value.ruleKey === key))
+            throw new Error('Selecciona un impuesto anticipado existente.');
+        const prior = input.replacesId ? data.rules.find((r) => r.id === input.replacesId) : null;
+        if (input.replacesId && !prior) throw new Error('La regla anterior no existe.');
+        if (
+          prior &&
+          (prior.value.ruleKey !== input.value.ruleKey ||
+            input.value.effectiveFrom <= prior.value.effectiveFrom)
         )
-      )
-        throw new Error(
-          'La nueva regla afectaría períodos confirmados. Usa una vigencia posterior.',
-        );
-      await db.runAsync(
-        'INSERT INTO fiscal_rules VALUES(?,?,?,?,?,?)',
-        recordId,
-        input.value.ruleKey,
-        date,
-        actor.username,
-        input.replacesId,
-        JSON.stringify(input.value),
-      );
-    } else {
-      if (input.action === 'estimate') {
-        const p = profileFor(data.profiles, input.filter);
-        const rule = data.rules.find((r) => r.id === input.ruleId);
-        if (!rule) throw new Error('Selecciona una regla fiscal.');
-        const warnings = ruleWarnings(rule.value, input.filter, p.value);
-        if (warnings.length) throw new Error(warnings.join(' '));
+          throw new Error('Una actualización necesita el mismo impuesto y una vigencia posterior.');
         if (
           data.rules.some(
             (r) =>
-              r.value.ruleKey === rule.value.ruleKey &&
-              r.value.effectiveFrom > rule.value.effectiveFrom &&
-              r.value.effectiveFrom <= input.filter.end,
+              r.value.ruleKey === input.value.ruleKey &&
+              (!prior || r.value.effectiveFrom >= input.value.effectiveFrom),
           )
         )
-          throw new Error('Hay otra versión aplicable. Divide el período por vigencia.');
-        validateFiscalPeriod(rule.value, input.filter);
-        if (rule.value.scope === 'Socio' && !input.beneficiary)
-          throw new Error('Identifica al socio: sus obligaciones son independientes.');
+          throw new Error(
+            'Ya existe una versión de este impuesto. Selecciona la regla que actualizarás.',
+          );
         if (
-          p.value.source === 'Manual' &&
-          !['Dividendos', 'Salarios', 'Base manual'].includes(rule.value.base)
-        )
-          throw new Error('Este contribuyente necesita una regla con base manual.');
-        if (
-          activeRecords(data.records).some(
+          data.records.some(
             (r) =>
               r.kind === 'obligation' &&
+              r.value.rule.ruleKey === input.value.ruleKey &&
+              r.value.end >= input.value.effectiveFrom,
+          )
+        )
+          throw new Error(
+            'La nueva regla afectaría períodos confirmados. Usa una vigencia posterior.',
+          );
+        await db.runAsync(
+          'INSERT INTO fiscal_rules VALUES(?,?,?,?,?,?)',
+          recordId,
+          input.value.ruleKey,
+          date,
+          actor.username,
+          input.replacesId,
+          JSON.stringify(input.value),
+        );
+      } else {
+        if (input.action === 'estimate') {
+          const p = profileFor(data.profiles, input.filter);
+          const rule = data.rules.find((r) => r.id === input.ruleId);
+          if (!rule) throw new Error('Selecciona una regla fiscal.');
+          const warnings = ruleWarnings(rule.value, input.filter, p.value);
+          if (warnings.length) throw new Error(warnings.join(' '));
+          if (
+            data.rules.some(
+              (r) =>
+                r.value.ruleKey === rule.value.ruleKey &&
+                r.value.effectiveFrom > rule.value.effectiveFrom &&
+                r.value.effectiveFrom <= input.filter.end,
+            )
+          )
+            throw new Error('Hay otra versión aplicable. Divide el período por vigencia.');
+          validateFiscalPeriod(rule.value, input.filter);
+          if (rule.value.scope === 'Socio' && !input.beneficiary)
+            throw new Error('Identifica al socio: sus obligaciones son independientes.');
+          if (
+            p.value.source === 'Manual' &&
+            !['Dividendos', 'Salarios', 'Base manual'].includes(rule.value.base)
+          )
+            throw new Error('Este contribuyente necesita una regla con base manual.');
+          if (
+            activeRecords(data.records).some(
+              (r) =>
+                r.kind === 'obligation' &&
+                r.taxpayerId === input.filter.taxpayerId &&
+                r.value.rule.ruleKey === rule.value.ruleKey &&
+                r.value.beneficiary === input.beneficiary &&
+                r.value.start <= input.filter.end &&
+                r.value.end >= input.filter.start,
+            )
+          )
+            throw new Error(
+              'Ya existe una obligación para este impuesto y período. Anúlala con motivo antes de corregirla.',
+            );
+          const economy = await economyFor(
+            db,
+            p,
+            data.records,
+            data.rules,
+            input.filter,
+            rule.id,
+            input.beneficiary,
+          );
+          economy.manualBase = input.manualBase;
+          const advanceObligations = activeRecords(data.records).filter(
+            (r) =>
+              r.kind === 'obligation' &&
+              'rule' in r.value &&
               r.taxpayerId === input.filter.taxpayerId &&
-              (r.value as Obligation).rule.ruleKey === rule.value.ruleKey &&
-              (r.value as Obligation).beneficiary === input.beneficiary &&
-              (r.value as Obligation).start <= input.filter.end &&
-              (r.value as Obligation).end >= input.filter.start,
-          )
-        )
-          throw new Error(
-            'Ya existe una obligación para este impuesto y período. Anúlala con motivo antes de corregirla.',
+              (rule.value.advanceRuleKeys ?? []).includes(r.value.rule.ruleKey) &&
+              r.value.scope === rule.value.scope &&
+              r.value.beneficiary === input.beneficiary &&
+              r.value.start >= input.filter.start &&
+              r.value.end <= input.filter.end,
           );
-        const economy = await economyFor(
-          db,
-          p,
-          data.records,
-          data.rules,
-          input.filter,
-          rule.id,
-          input.beneficiary,
-        );
-        economy.manualBase = input.manualBase;
-        const advanceObligations = activeRecords(data.records).filter(
-          (r) =>
-            r.kind === 'obligation' &&
-            'rule' in r.value &&
-            r.taxpayerId === input.filter.taxpayerId &&
-            (rule.value.advanceRuleKeys ?? []).includes(r.value.rule.ruleKey) &&
-            r.value.scope === rule.value.scope &&
-            r.value.beneficiary === input.beneficiary &&
-            r.value.start >= input.filter.start &&
-            r.value.end <= input.filter.end,
-        );
-        const advanceIds = new Set(advanceObligations.map((r) => r.id));
-        const usedAdvanceIds = new Set(
-          activeRecords(data.records)
-            .filter((r) => r.kind === 'obligation' && 'advancePaymentIds' in r.value)
-            .flatMap((r) => ('advancePaymentIds' in r.value ? r.value.advancePaymentIds : [])),
-        );
-        const advancePayments = activeRecords(data.records).filter(
-          (r) =>
-            !usedAdvanceIds.has(r.id) &&
-            r.kind === 'payment' &&
-            'obligationId' in r.value &&
-            r.value.obligationId !== null &&
-            advanceIds.has(r.value.obligationId),
-        );
-        const credits = advancePayments.reduce(
-          (sum, r) => sum + ('amount' in r.value ? r.value.amount : 0),
-          0,
-        );
-        const calculation = calculateTax(rule.value, economy, credits);
-        const due = dueDate(rule.value, input.filter.end);
-        if (due < input.filter.end)
-          throw new Error('El vencimiento configurado precede al fin del período.');
-        payload = {
-          ruleId: rule.id,
-          profileId: p.id,
-          taxpayerId: p.value.taxpayerId,
-          start: input.filter.start,
-          end: input.filter.end,
-          due,
-          beneficiary: input.beneficiary,
-          scope: rule.value.scope,
-          name: rule.value.name,
-          economy,
-          calculation,
-          advancePaymentIds: advancePayments.map((r) => r.id),
-          rule: rule.value,
-          profile: p.value,
-        } satisfies Obligation;
-        taxpayerId = p.value.taxpayerId;
-      } else if (input.action === 'record') {
-        const v = input.value;
-        if (!data.profiles.some((p) => p.value.taxpayerId === v.taxpayerId))
-          throw new Error('El contribuyente no existe.');
-        if (v.amount <= 0 && v.kind !== 'declaration')
-          throw new Error('El importe debe ser mayor que cero.');
-        const obligation = activeRecords(data.records).find(
-          (r) =>
-            r.id === v.obligationId && r.kind === 'obligation' && r.taxpayerId === v.taxpayerId,
-        );
-        if (['payment', 'declaration'].includes(v.kind) && !obligation)
-          throw new Error('Selecciona una obligación vigente de este contribuyente.');
-        if (v.kind === 'payment' && !v.reference && !v.operationCode)
-          throw new Error('Registra una referencia o código de operación.');
-        if (
-          v.kind === 'payment' &&
-          activeRecords(data.records).some(
+          const advanceIds = new Set(advanceObligations.map((r) => r.id));
+          const usedAdvanceIds = new Set(
+            activeRecords(data.records)
+              .filter((r) => r.kind === 'obligation' && 'advancePaymentIds' in r.value)
+              .flatMap((r) => ('advancePaymentIds' in r.value ? r.value.advancePaymentIds : [])),
+          );
+          const advancePayments = activeRecords(data.records).filter(
             (r) =>
+              !usedAdvanceIds.has(r.id) &&
               r.kind === 'payment' &&
-              r.taxpayerId === v.taxpayerId &&
-              (r.value as FiscalRecordInput).reference === v.reference &&
-              (r.value as FiscalRecordInput).operationCode === v.operationCode &&
-              (r.value as FiscalRecordInput).method === v.method,
-          )
-        )
-          throw new Error('Ya existe un pago con esta referencia y código.');
-        if (v.kind === 'dividend' && !v.beneficiary)
-          throw new Error('Identifica al socio receptor.');
-        if (v.deductionRuleId && !data.rules.some((r) => r.id === v.deductionRuleId))
-          throw new Error('La regla de deducibilidad no existe.');
-        if (
-          v.attachment &&
-          !/^data:(image\/(jpeg|png)|application\/pdf);base64,[A-Za-z0-9+/=]+$/.test(v.attachment)
-        )
-          throw new Error('Adjunta una imagen PNG/JPEG o un PDF válido.');
-        taxpayerId = v.taxpayerId;
-        kind = v.kind;
-        payload = v;
-      } else if (input.action === 'void') {
-        const record = activeRecords(data.records).find((r) => r.id === input.recordId);
-        if (!record || ['export'].includes(record.kind))
-          throw new Error('El registro no se puede anular o ya está anulado.');
-        if (
-          record.kind === 'payment' &&
-          activeRecords(data.records).some(
-            (r) =>
-              r.kind === 'obligation' &&
-              'advancePaymentIds' in r.value &&
-              r.value.advancePaymentIds.includes(record.id),
-          )
-        )
-          throw new Error(
-            'Este anticipo forma parte de una liquidación confirmada. Anula primero esa liquidación.',
+              'obligationId' in r.value &&
+              r.value.obligationId !== null &&
+              advanceIds.has(r.value.obligationId),
           );
-        if (
-          record.kind === 'obligation' &&
-          activeRecords(data.records).some(
+          const credits = advancePayments.reduce(
+            (sum, r) => sum + ('amount' in r.value ? r.value.amount : 0),
+            0,
+          );
+          const calculation = calculateTax(rule.value, economy, credits);
+          const due = dueDate(rule.value, input.filter.end);
+          if (due < input.filter.end)
+            throw new Error('El vencimiento configurado precede al fin del período.');
+          payload = {
+            ruleId: rule.id,
+            profileId: p.id,
+            taxpayerId: p.value.taxpayerId,
+            start: input.filter.start,
+            end: input.filter.end,
+            due,
+            beneficiary: input.beneficiary,
+            scope: rule.value.scope,
+            name: rule.value.name,
+            economy,
+            calculation,
+            advancePaymentIds: advancePayments.map((r) => r.id),
+            rule: rule.value,
+            profile: p.value,
+          } satisfies Obligation;
+          taxpayerId = p.value.taxpayerId;
+        } else if (input.action === 'record') {
+          const v = input.value;
+          if (!data.profiles.some((p) => p.value.taxpayerId === v.taxpayerId))
+            throw new Error('El contribuyente no existe.');
+          if (v.amount <= 0 && v.kind !== 'declaration')
+            throw new Error('El importe debe ser mayor que cero.');
+          const obligation = activeRecords(data.records).find(
             (r) =>
-              ['payment', 'declaration'].includes(r.kind) &&
-              (r.value as FiscalRecordInput).obligationId === record.id,
+              r.id === v.obligationId && r.kind === 'obligation' && r.taxpayerId === v.taxpayerId,
+          );
+          if (['payment', 'declaration'].includes(v.kind) && !obligation)
+            throw new Error('Selecciona una obligación vigente de este contribuyente.');
+          if (v.kind === 'payment' && !v.reference && !v.operationCode)
+            throw new Error('Registra una referencia o código de operación.');
+          if (
+            v.kind === 'payment' &&
+            activeRecords(data.records).some(
+              (r) =>
+                r.kind === 'payment' &&
+                r.taxpayerId === v.taxpayerId &&
+                r.value.reference === v.reference &&
+                r.value.operationCode === v.operationCode &&
+                r.value.method === v.method,
+            )
           )
-        )
-          throw new Error('Anula primero los pagos y constancias asociados.');
-        taxpayerId = record.taxpayerId;
-        payload = { recordId: record.id, reason: input.reason };
-      } else if (input.action === 'export') {
-        profileFor(data.profiles, input.filter);
-        taxpayerId = input.filter.taxpayerId;
-        payload = {
-          filter: input.filter,
-          format: input.format,
-          ...(input.scope ? { scope: input.scope } : {}),
-        };
+            throw new Error('Ya existe un pago con esta referencia y código.');
+          if (v.kind === 'dividend' && !v.beneficiary)
+            throw new Error('Identifica al socio receptor.');
+          if (v.deductionRuleId && !data.rules.some((r) => r.id === v.deductionRuleId))
+            throw new Error('La regla de deducibilidad no existe.');
+          if (
+            v.attachment &&
+            !/^data:(image\/(jpeg|png)|application\/pdf);base64,[A-Za-z0-9+/=]+$/.test(v.attachment)
+          )
+            throw new Error('Adjunta una imagen PNG/JPEG o un PDF válido.');
+          taxpayerId = v.taxpayerId;
+          kind = v.kind;
+          payload = v;
+        } else if (input.action === 'void') {
+          const record = activeRecords(data.records).find((r) => r.id === input.recordId);
+          if (!record || ['export'].includes(record.kind))
+            throw new Error('El registro no se puede anular o ya está anulado.');
+          if (
+            record.kind === 'payment' &&
+            activeRecords(data.records).some(
+              (r) =>
+                r.kind === 'obligation' &&
+                'advancePaymentIds' in r.value &&
+                r.value.advancePaymentIds.includes(record.id),
+            )
+          )
+            throw new Error(
+              'Este anticipo forma parte de una liquidación confirmada. Anula primero esa liquidación.',
+            );
+          if (
+            record.kind === 'obligation' &&
+            activeRecords(data.records).some(
+              (r) =>
+                (r.kind === 'payment' || r.kind === 'declaration') &&
+                r.value.obligationId === record.id,
+            )
+          )
+            throw new Error('Anula primero los pagos y constancias asociados.');
+          taxpayerId = record.taxpayerId;
+          payload = { recordId: record.id, reason: input.reason };
+        } else if (input.action === 'export') {
+          profileFor(data.profiles, input.filter);
+          taxpayerId = input.filter.taxpayerId;
+          payload = {
+            filter: input.filter,
+            format: input.format,
+            ...(input.scope ? { scope: input.scope } : {}),
+          };
+        }
+        await db.runAsync(
+          'INSERT INTO fiscal_records VALUES(?,?,?,?,?,?)',
+          recordId,
+          taxpayerId,
+          kind,
+          date,
+          actor.username,
+          JSON.stringify(payload),
+        );
       }
-      await db.runAsync(
-        'INSERT INTO fiscal_records VALUES(?,?,?,?,?,?)',
-        recordId,
+      await log(db, actor, input.action, {
+        id: recordId,
+        commandId: input.commandId,
         taxpayerId,
-        kind,
-        date,
-        actor.username,
-        JSON.stringify(payload),
-      );
-    }
-    await log(db, actor, input.action, {
-      id: recordId,
-      commandId: input.commandId,
-      taxpayerId,
-      ...(input.action === 'void' ? { reason: input.reason, recordId: input.recordId } : {}),
-    });
-    return recordId;
-  });
+        ...(input.action === 'void' ? { reason: input.reason, recordId: input.recordId } : {}),
+      });
+      return recordId;
+    },
+    (value) => z.string().uuid().parse(value),
+  );
 }
 export async function grantFiscalPermission(
   db: SQLiteDatabase,

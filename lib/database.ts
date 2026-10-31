@@ -18,6 +18,13 @@ import { dayRange } from '@/lib/format';
 import { fractionalUnit, validateQuantity, roundMoney, roundQuantity } from '@/lib/units';
 import { CASH_DENOMINATIONS, type SaleSettlement } from '@/lib/models';
 import { validateSettlement } from '@/lib/settlement';
+import {
+  mutationIdSchema,
+  mutationCountSchema,
+  mutationVoidSchema,
+  storedSettlementSchema,
+  parseOperationResult,
+} from '@/lib/network/validation';
 import { saleUnitPrice } from '@/lib/sale-pricing';
 import { saleFingerprint } from '@/lib/sale-identity';
 import { canAccess } from '@/lib/permissions';
@@ -30,6 +37,26 @@ import {
   type RecoveryBackupInspection,
 } from '@/lib/recovery-backup';
 import { loadNetworkConfig } from '@/lib/network/config';
+import {
+  assertDatabaseAvailable,
+  beginDatabaseMaintenance,
+  endDatabaseMaintenance,
+  DatabaseConnectionGate,
+} from '@/lib/database-maintenance';
+import {
+  resolveDatabaseFile,
+  saveRecoverySelector,
+  type RecoverySelector,
+} from '@/lib/recovery-selector';
+import {
+  reconcileRecoveryDatabases,
+  preserveRecoveryRuntime,
+  verifyRecoveryDatabase,
+  type RecoveryReconciliation,
+} from '@/lib/recovery-reconciliation';
+import { getPendingOperation } from '@/lib/network/pending-operation';
+import { getPendingSale } from '@/lib/network/pending-sale';
+import { getPendingWithdrawal } from '@/lib/network/pending-withdrawal';
 import {
   BUSINESS_TABLES,
   archiveSchema,
@@ -68,6 +95,7 @@ import type {
 } from '@/lib/models';
 
 let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
+let connectionGate: DatabaseConnectionGate | null = null;
 let mutationQueue: Promise<void> = Promise.resolve();
 export interface MutationCommand {
   commandId: string;
@@ -80,7 +108,10 @@ async function transaction<T>(
   db: SQLite.SQLiteDatabase,
   action: () => Promise<T>,
   command?: MutationCommand,
+  parseResult?: (value: unknown) => T,
 ): Promise<T> {
+  assertDatabaseAvailable();
+  if (command && !parseResult) throw new Error('La operación no tiene un parser de recibo válido.');
   let result: T;
   const pending = mutationQueue.then(() =>
     db.withTransactionAsync(async () => {
@@ -103,8 +134,10 @@ async function transaction<T>(
             !previous.response
           )
             throw new Error('El identificador ya pertenece a otra operación.');
-          const cached = JSON.parse(previous.response) as { value: T };
-          result = cached.value;
+          const cached: unknown = JSON.parse(previous.response);
+          if (!isRecord(cached) || !Object.hasOwn(cached, 'value') || !parseResult)
+            throw new Error('El recibo de la operación no es válido.');
+          result = parseResult(cached.value);
           return;
         }
       }
@@ -356,9 +389,9 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
         'Este teléfono ya recibió un negocio. No vuelvas a importar el mismo cierre.',
       );
     const usage = await getDemoUsage();
-    const tables = Object.fromEntries(
-      BUSINESS_TABLES.map((table) => [table, archive.tables[table] ?? []]),
-    ) as Record<(typeof BUSINESS_TABLES)[number], ArchiveRow[]>;
+    const tables = archiveSchema.shape.tables.parse(
+      Object.fromEntries(BUSINESS_TABLES.map((table) => [table, archive.tables[table] ?? []])),
+    );
     // Re-enroll credentials without importing even the hashes in legacy v1 files.
     // The source administrator adopts the receiving administrator's existing password.
     const importedAdmin =
@@ -476,8 +509,21 @@ export async function hashPassword(password: string) {
 }
 
 export async function getDatabase() {
+  assertDatabaseAvailable();
   if (!databasePromise) {
-    const opening = SQLite.openDatabaseAsync('mipypos.db');
+    const opening = (async () => {
+      const selected = await resolveDatabaseFile();
+      const raw = await SQLite.openDatabaseAsync(selected.fileName);
+      try {
+        if (selected.authorityId) await verifyRecoveryDatabase(raw, selected.authorityId);
+        const gate = new DatabaseConnectionGate(raw);
+        connectionGate = gate;
+        return gate.database;
+      } catch (error) {
+        await raw.closeAsync();
+        throw error;
+      }
+    })();
     databasePromise = opening;
     void opening.catch(() => {
       if (databasePromise === opening) databasePromise = null;
@@ -918,6 +964,204 @@ export async function createPrivateRecoveryBackup(
   return pending;
 }
 
+export interface PrivateRecoveryResult {
+  restoreId: string;
+  backupId: string;
+  safetyCopy: RecoveryBackup;
+  reconciliation: RecoveryReconciliation;
+}
+
+export async function restorePrivateRecoveryBackup(
+  username: string,
+  password: string,
+  backupId: string,
+  confirmed: boolean,
+): Promise<PrivateRecoveryResult> {
+  if (!confirmed)
+    throw new Error('Confirma la conservación de los datos actuales antes de restaurar.');
+  const config = await loadNetworkConfig();
+  if (config.mode === 'client')
+    throw new Error('La restauración solo se realiza en el teléfono administrador.');
+  // Host restoration remains disabled until every remote terminal can prove its
+  // pending queue has drained. Stopping the listener alone is not that proof.
+  if (config.mode === 'host')
+    throw new Error('Detén la red local y concilia las terminales antes de restaurar.');
+  const authenticated = await authenticateForLogin(username, password);
+  if (authenticated?.role !== 'admin')
+    throw new Error('Confirma la contraseña de tu cuenta de administrador.');
+  if (initializationPromise) await initializationPromise;
+  await getDatabase();
+  const gate = connectionGate;
+  if (!gate) throw new Error('No se pudo preparar el acceso seguro a tus datos.');
+  beginDatabaseMaintenance();
+  let sealed = false;
+  let closeStarted = false;
+  let reopened = false;
+  let source: SQLite.SQLiteDatabase | null = null;
+  let candidate: SQLite.SQLiteDatabase | null = null;
+  try {
+    const { stopLanHostAndDrain } = await import('@/lib/network/host');
+    await stopLanHostAndDrain();
+    await mutationQueue;
+    await gate.sealAndDrain();
+    sealed = true;
+    const current = gate.raw;
+    if ((await loadNetworkConfig()).mode !== 'standalone')
+      throw new Error('Detén la red local antes de restaurar.');
+    if ((await getPendingOperation()) || (await getPendingSale()) || (await getPendingWithdrawal()))
+      throw new Error(
+        'Hay operaciones pendientes. Confirma su resultado antes de restaurar; no se borrarán.',
+      );
+    const administrator = await current.getFirstAsync<Usuario>(
+      'SELECT * FROM users WHERE id=?',
+      authenticated.id,
+    );
+    if (
+      administrator?.role !== 'admin' ||
+      administrator.password_hash !== authenticated.password_hash
+    )
+      throw new Error('La cuenta cambió. Inicia sesión de nuevo antes de restaurar.');
+    const identity = await current.getFirstAsync<{ authority_id: string }>(
+      'SELECT authority_id FROM sync_state WHERE id=1',
+    );
+    if (!identity?.authority_id) throw new Error('No se pudo comprobar la autoridad de tus datos.');
+    await verifyRecoveryDatabase(current, identity.authority_id);
+    const record = await current.getFirstAsync<{ value: string }>(
+      'SELECT value FROM settings WHERE key=?',
+      `private_backup:${backupId}`,
+    );
+    const backup = recoveryBackupSchema.parse(parseJson(record?.value ?? null));
+    if (backup.id !== backupId) throw new Error('El registro no corresponde a la copia elegida.');
+    await inspectRecoverySnapshot(backup, identity.authority_id);
+    source = await SQLite.openDatabaseAsync(backup.fileName, { useNewConnection: true });
+    await source.execAsync('PRAGMA query_only=ON');
+    const reconciliation = await reconcileRecoveryDatabases(current, source);
+    if (!reconciliation.canRestore) {
+      const changed = reconciliation.tables
+        .filter((table) => table.status === 'different')
+        .map((table) => table.table);
+      throw new Error(
+        `La copia difiere de tus datos actuales (${changed.join(', ')}). No se restaurará ni se perderán operaciones. Conserva ambas versiones para conciliarlas.`,
+      );
+    }
+    const safetyCopy = await createRecoverySnapshot(current);
+    await current.withTransactionAsync(async () => {
+      await current.runAsync(
+        'INSERT INTO settings(key,value) VALUES(?,?)',
+        `private_backup:${safetyCopy.id}`,
+        json(safetyCopy),
+      );
+      await current.runAsync(
+        'INSERT INTO audit_log(action,username,date,detail) VALUES(?,?,?,?)',
+        'recovery.backup',
+        administrator.username,
+        now(),
+        json({ backupId: safetyCopy.id, reason: 'pre-restore' }),
+      );
+    });
+    const selected = await resolveDatabaseFile();
+    const restoreId = Crypto.randomUUID();
+    const selector: RecoverySelector = {
+      version: 1,
+      phase: 'prepared',
+      previous: selected.fileName,
+      candidate: `mipypos.restored.${restoreId}.db`,
+      authorityId: identity.authority_id,
+      restoreId,
+      createdAt: now(),
+    };
+    // Persist intent before creating any generation. A crash during copying must
+    // leave the previous generation authoritative, never an untracked candidate.
+    await saveRecoverySelector(selector);
+    candidate = await SQLite.openDatabaseAsync(selector.candidate, { useNewConnection: true });
+    if (await candidate.getFirstAsync("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1"))
+      throw new Error(
+        'Ya existe un archivo de recuperación con ese identificador. No se sobrescribirá.',
+      );
+    await SQLite.backupDatabaseAsync({ sourceDatabase: source, destDatabase: candidate });
+    await candidate.withTransactionAsync(async () => {
+      await preserveRecoveryRuntime(current, candidate!);
+      await candidate!.runAsync(
+        'INSERT INTO audit_log(action,username,date,detail) VALUES(?,?,?,?)',
+        'recovery.restore',
+        administrator.username,
+        now(),
+        json({
+          restoreId,
+          backupId,
+          safetyBackupId: safetyCopy.id,
+          policy: 'equal-business-state',
+          confirmedReceipts: reconciliation.confirmedReceipts,
+        }),
+      );
+    });
+    await verifyRecoveryDatabase(candidate, identity.authority_id);
+    const verified = await reconcileRecoveryDatabases(current, candidate);
+    if (!verified.canRestore)
+      throw new Error('La conciliación final no coincide. Se conserva la base original.');
+    await candidate.closeAsync();
+    candidate = null;
+    await source.closeAsync();
+    source = null;
+    // Old files, committed WAL and SHM are retained as a generation. We never
+    // replace/rename an open SQLite file or delete evidence after an interruption.
+    closeStarted = true;
+    await current.closeAsync();
+    databasePromise = null;
+    connectionGate = null;
+    candidate = await SQLite.openDatabaseAsync(selector.candidate, { useNewConnection: true });
+    await candidate.execAsync('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
+    await verifyRecoveryDatabase(candidate, identity.authority_id);
+    await saveRecoverySelector({ ...selector, phase: 'committed' });
+    const replacement = new DatabaseConnectionGate(candidate);
+    connectionGate = replacement;
+    databasePromise = Promise.resolve(replacement.database);
+    candidate = null;
+    reopened = true;
+    return { restoreId, backupId, safetyCopy, reconciliation };
+  } catch (error) {
+    if (closeStarted) {
+      // A failure after closure must reopen the generation selected by the durable
+      // record. A corrupt/unreadable selector never falls back to an empty DB.
+      if (candidate) {
+        await candidate.closeAsync();
+        candidate = null;
+      }
+      const selected = await resolveDatabaseFile();
+      const restored = await SQLite.openDatabaseAsync(selected.fileName, {
+        useNewConnection: true,
+      });
+      try {
+        if (!selected.authorityId)
+          throw new Error('Falta la identidad de la recuperación.', { cause: error });
+        await verifyRecoveryDatabase(restored, selected.authorityId);
+        await restored.execAsync('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
+        const replacement = new DatabaseConnectionGate(restored);
+        connectionGate = replacement;
+        databasePromise = Promise.resolve(replacement.database);
+        reopened = true;
+      } catch (failure) {
+        await restored.closeAsync();
+        throw new Error(
+          'No se pudo confirmar la recuperación. Reinicia MipyPOS; las bases se conservan y las operaciones siguen bloqueadas.',
+          { cause: failure },
+        );
+      }
+    }
+    throw error;
+  } finally {
+    try {
+      if (source) await source.closeAsync();
+      if (candidate) await candidate.closeAsync();
+    } finally {
+      if (!closeStarted || reopened) {
+        if (sealed && !closeStarted) gate.resume();
+        endDatabaseMaintenance();
+      }
+    }
+  }
+}
+
 export async function listUsers() {
   return (await getDatabase()).getAllAsync<Usuario>(
     "SELECT id,username,role,can_authorize_consumption,can_manage_fiscal,'' AS password_hash FROM users ORDER BY username",
@@ -981,6 +1225,7 @@ export async function saveUser(
       return result.lastInsertRowId;
     },
     command,
+    (value) => mutationIdSchema.parse(value),
   );
 }
 export async function deleteUser(id: number, currentId: number, command?: MutationCommand) {
@@ -999,6 +1244,7 @@ export async function deleteUser(id: number, currentId: number, command?: Mutati
       await db.runAsync('DELETE FROM users WHERE id=?', id);
     },
     command,
+    (value) => mutationVoidSchema.parse(value),
   );
 }
 
@@ -1112,6 +1358,7 @@ export async function saveProduct(
         return productId;
       },
       command,
+      (value) => mutationIdSchema.parse(value),
     );
   } catch (error) {
     if (String(error).includes('UNIQUE'))
@@ -1138,6 +1385,7 @@ export async function deleteProduct(id: number, command?: MutationCommand) {
       await db.runAsync('DELETE FROM products WHERE id=?', id);
     },
     command,
+    (value) => mutationVoidSchema.parse(value),
   );
 }
 
@@ -1194,6 +1442,7 @@ export async function openCashSession(fund: number, username: string, command?: 
         return result.lastInsertRowId;
       },
       command,
+      (value) => mutationIdSchema.parse(value),
     );
   } catch (error) {
     if (String(error).includes('UNIQUE'))
@@ -1580,6 +1829,7 @@ export async function authorizeCashDifference(
       };
     },
     command,
+    (value) => parseOperationResult('authorizeCashDifference', value),
   );
 }
 export async function listCashClosures(): Promise<CashClosureRecord[]> {
@@ -1592,7 +1842,7 @@ export async function closeCashSession(
   sessionId: number,
   input: CashClosureInput,
   command?: MutationCommand,
-) {
+): Promise<CashClosureReconciliation> {
   const db = await getDatabase();
   return transaction(
     db,
@@ -1701,6 +1951,7 @@ export async function closeCashSession(
       return reconciliation;
     },
     command,
+    (value) => parseOperationResult('closeCashSession', value),
   );
 }
 
@@ -1964,9 +2215,7 @@ export async function getSale(id: number) {
     sale: {
       ...row,
       payments: parsePayments(row.payments),
-      settlement: row.settlement
-        ? (JSON.parse(row.settlement) as SaleSettlement & { changeDue: number })
-        : null,
+      settlement: row.settlement ? storedSettlementSchema.parse(JSON.parse(row.settlement)) : null,
     },
     lines,
   };
@@ -1990,6 +2239,7 @@ export async function addArea(name: string, command?: MutationCommand) {
       await db.runAsync('INSERT INTO areas(name) VALUES(?)', name.trim());
     },
     command,
+    (value) => mutationVoidSchema.parse(value),
   );
 }
 export async function registerMovement(
@@ -2110,6 +2360,7 @@ export async function registerMovement(
       );
     },
     command,
+    (value) => mutationVoidSchema.parse(value),
   );
 }
 export async function listMovements(
@@ -2359,6 +2610,7 @@ export async function importProducts(
       return imported;
     },
     command,
+    (value) => mutationCountSchema.parse(value),
   );
 }
 
@@ -2367,6 +2619,7 @@ async function runFinanceMutation<T>(
   username: string,
   adminOnly: boolean,
   action: (db: SQLite.SQLiteDatabase, actor: Usuario) => Promise<T>,
+  parseResult: (value: unknown) => T,
   command?: MutationCommand,
 ): Promise<T> {
   const db = await getDatabase();
@@ -2378,9 +2631,16 @@ async function runFinanceMutation<T>(
     db,
     async () => {
       const actor = await Finance.financeActor(db, username, adminOnly);
-      return Finance.financeCommand(db, input.commandId, fingerprint, () => action(db, actor));
+      return Finance.financeCommand(
+        db,
+        input.commandId,
+        fingerprint,
+        () => action(db, actor),
+        parseResult,
+      );
     },
     command,
+    parseResult,
   );
 }
 export function setProductCost(input: CostInput, username: string, command?: MutationCommand) {
@@ -2389,6 +2649,7 @@ export function setProductCost(input: CostInput, username: string, command?: Mut
     username,
     true,
     (db, actor) => Finance.setCost(db, input, actor),
+    Finance.parseFinanceNumericResult,
     command,
   );
 }
@@ -2402,6 +2663,7 @@ export function receiveCostedStock(
     username,
     true,
     (db, actor) => Finance.receivePurchase(db, input, actor),
+    Finance.parseFinanceNumericResult,
     command,
   );
 }
@@ -2418,6 +2680,7 @@ export function registerConsumption(
       assertProductNotInDraft(input.productId);
       return Finance.consume(db, input, actor);
     },
+    Finance.parseFinanceRecordResult,
     command,
   );
 }
@@ -2431,6 +2694,7 @@ export function cancelConsumption(
     username,
     false,
     (db, actor) => Finance.voidConsumption(db, input, actor),
+    Finance.parseFinanceRecordResult,
     command,
   );
 }
@@ -2444,6 +2708,7 @@ export function registerSaleAdjustment(
     username,
     true,
     (db, actor) => Finance.adjustSale(db, input, actor),
+    Finance.parseFinanceNumericResult,
     command,
   );
 }
@@ -2510,10 +2775,15 @@ export async function executeFiscalCommand(
   input: OnatCommand,
   username: string,
   command?: MutationCommand,
-) {
+): Promise<string> {
   const db = await getDatabase();
   await Onat.fiscalActor(db, username);
-  return transaction(db, () => Onat.executeFiscalCommand(db, input, username), command);
+  return transaction(
+    db,
+    () => Onat.executeFiscalCommand(db, input, username),
+    command,
+    (value) => parseOperationResult('executeFiscalCommand', value),
+  );
 }
 export async function setFiscalPermission(
   userId: number,
@@ -2523,7 +2793,12 @@ export async function setFiscalPermission(
 ) {
   const db = await getDatabase();
   await Onat.fiscalActor(db, username, true);
-  return transaction(db, () => Onat.grantFiscalPermission(db, userId, allowed, username), command);
+  return transaction(
+    db,
+    () => Onat.grantFiscalPermission(db, userId, allowed, username),
+    command,
+    (value) => mutationIdSchema.parse(value),
+  );
 }
 export function setConsumptionPermission(
   userId: number,
@@ -2556,6 +2831,7 @@ export function setConsumptionPermission(
         return userId;
       },
       command,
+      (value) => mutationIdSchema.parse(value),
     );
   })();
 }

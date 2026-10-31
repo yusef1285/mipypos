@@ -11,7 +11,8 @@ import { activeRecords } from '@/lib/onat';
 import {
   type FiscalData,
   type FiscalRecordInput,
-  type Obligation,
+  isFiscalRecordKind,
+  recordSchema,
   type OnatCommand,
 } from '@/lib/onat-models';
 import { todayFiscal } from '@/lib/use-onat';
@@ -56,26 +57,20 @@ export function OnatRecordForm({
   const [amount, setAmount] = useState(''),
     [error, setError] = useState(''),
     [attaching, setAttaching] = useState(false);
-  const obligations = activeRecords(data.records).filter(
-    (r) => r.kind === 'obligation' && r.taxpayerId === taxpayerId,
-  );
-  const obligation = obligations.find((o) => o.id === v.obligationId)?.value as
-    | Obligation
-    | undefined;
+  const obligations = activeRecords(data.records)
+    .filter(isFiscalRecordKind('obligation'))
+    .filter((r) => r.taxpayerId === taxpayerId);
+  const obligation = obligations.find((o) => o.id === v.obligationId)?.value;
   return (
     <View className="gap-4">
       <Typography.Heading type="h3">Registrar movimiento fiscal</Typography.Heading>
       <Choice
         values={Object.values(labels)}
         value={labels[v.kind]}
-        onChange={(label) =>
-          set({
-            ...v,
-            kind: (Object.keys(labels) as Array<keyof typeof labels>).find(
-              (k) => labels[k] === label,
-            )!,
-          })
-        }
+        onChange={(label) => {
+          const kind = recordSchema.shape.kind.options.find((k) => labels[k] === label);
+          if (kind) set({ ...v, kind });
+        }}
       />
       <Card className="gap-4 p-4">
         {['payment', 'declaration'].includes(v.kind) ? (
@@ -84,9 +79,9 @@ export function OnatRecordForm({
             value={v.obligationId ?? ''}
             options={obligations.map((r) => ({
               value: r.id,
-              label: `${(r.value as Obligation).name} · ${(r.value as Obligation).start} · ${(r.value as Obligation).beneficiary || 'Empresa'}`,
+              label: `${r.value.name} · ${r.value.start} · ${r.value.beneficiary || 'Empresa'}`,
             }))}
-            onChange={(obligationId) => set({ ...v, obligationId })}
+            onChange={(selectedObligationId) => set({ ...v, obligationId: selectedObligationId })}
           />
         ) : null}
         {obligation ? (

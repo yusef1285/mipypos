@@ -3,8 +3,8 @@ import {
   ONAT_DISCLAIMER,
   type FiscalData,
   type FiscalFilter,
+  isFiscalRecordKind,
   type FiscalRecord,
-  type FiscalRecordInput,
   type Obligation,
 } from '@/lib/onat-models';
 
@@ -20,19 +20,21 @@ export function fiscalExportRows(
   scope?: Obligation['scope'],
 ) {
   const active = activeRecords(data.records);
-  const rows = active.filter(
-    (r) =>
-      r.kind === 'obligation' &&
-      r.taxpayerId === filter.taxpayerId &&
-      (scope === undefined || (r.value as Obligation).scope === scope) &&
-      (r.value as Obligation).start <= filter.end &&
-      (r.value as Obligation).end >= filter.start,
-  );
+  const rows = active
+    .filter(isFiscalRecordKind('obligation'))
+    .filter(
+      (r) =>
+        r.taxpayerId === filter.taxpayerId &&
+        (scope === undefined || r.value.scope === scope) &&
+        r.value.start <= filter.end &&
+        r.value.end >= filter.start,
+    );
   return rows.map((r) => {
-    const o = r.value as Obligation;
+    const o = r.value;
     const paid = active
-      .filter((p) => p.kind === 'payment' && (p.value as FiscalRecordInput).obligationId === r.id)
-      .reduce((sum, p) => sum + (p.value as FiscalRecordInput).amount, 0);
+      .filter(isFiscalRecordKind('payment'))
+      .filter((p) => p.value.obligationId === r.id)
+      .reduce((sum, p) => sum + p.value.amount, 0);
     return {
       Contribuyente: o.profile.name,
       NIT: o.profile.nit,
@@ -83,17 +85,15 @@ export function inactiveFiscalObligationIds(records: FiscalRecord[]): string[] {
     .filter((r) => {
       if (r.kind !== 'obligation') return false;
       if (!activeIds.has(r.id)) return true;
-      const obligation = r.value as Obligation;
+      const obligation = r.value;
       const linked = active.filter(
-        (p) =>
-          ['payment', 'declaration'].includes(p.kind) &&
-          (p.value as FiscalRecordInput).obligationId === r.id,
+        (p) => (p.kind === 'payment' || p.kind === 'declaration') && p.value.obligationId === r.id,
       );
       if (obligation.name === 'Declaración jurada')
         return linked.some((p) => p.kind === 'declaration');
       const paid = linked
-        .filter((p) => p.kind === 'payment')
-        .reduce((sum, p) => sum + (p.value as FiscalRecordInput).amount, 0);
+        .filter(isFiscalRecordKind('payment'))
+        .reduce((sum, p) => sum + p.value.amount, 0);
       return paid >= obligation.calculation.tax;
     })
     .map((r) => r.id);

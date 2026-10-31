@@ -3,6 +3,13 @@ import { after, before as beforeAll, test } from 'node:test';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { XML } from 'expo/config-plugins';
+import {
+  androidLegacyBackupRules,
+  androidDataExtractionRules,
+  applyAndroidPrivateBackupPolicy,
+} from '../lib/android-backup-policy';
+import appConfig from '../app.config';
 let passed = 0;
 let failed = 0;
 const failures: Array<{ name: string; message: string }> = [];
@@ -42,8 +49,8 @@ import {
 
 const pay = (amount: number) => [{ type: 'transfer' as const, amount }];
 
-async function fixture() {
-  const harness = createHarness();
+async function fixture(overrides: Record<string, unknown> = {}) {
+  const harness = createHarness(overrides);
   const db = harness.load('@/lib/database');
   await db.initializeDatabase();
   const base = {
@@ -1379,6 +1386,7 @@ void regression('apertura SQLite rechazada no envenena los siguientes reintentos
   let attempts = 0;
   const h = createHarness({
     'expo-sqlite': {
+      defaultDatabaseDirectory: 'file:///private/SQLite',
       openDatabaseAsync: async () => {
         attempts += 1;
         if (attempts === 1) throw new Error('Apertura interrumpida');
@@ -1823,4 +1831,532 @@ void regression('CSV valido conserva comas, comillas escapadas y campos multilin
       subcategory: '',
     },
   ]);
+});
+
+const recoveryHost = { '@/lib/network/host': { stopLanHostAndDrain: async () => undefined } };
+
+void regression(
+  'restauración conserva negocio, credenciales, licencia y recibos en otra generación',
+  async () => {
+    const f = await fixture(recoveryHost);
+    await f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin');
+    const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    const products = await f.db.listProducts();
+    const sales = (await f.db.getAuditSnapshot()).sales;
+    const retained = await f.db.getDatabase();
+    const restored = await f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true);
+    assert.equal(restored.reconciliation.canRestore, true);
+    assert.deepEqual(await f.db.listProducts(), products);
+    assert.deepEqual((await f.db.getAuditSnapshot()).sales, sales);
+    assert.ok(await f.db.authenticate('admin', 'admin123'));
+    assert.equal(await f.db.getLicenseMode(), 'demo');
+    assert.equal((await f.db.listPrivateRecoveryBackups('admin')).length, 2);
+    const audit = await (
+      await f.db.getDatabase()
+    ).getAllAsync<{ action: string }>(
+      "SELECT action FROM audit_log WHERE action='recovery.restore'",
+    );
+    assert.equal(audit.length, 1);
+    assert.ok(f.backups.has(restored.safetyCopy.fileName));
+    assert.throws(() => retained.getAllAsync('SELECT * FROM sales'), /recuperación/);
+    const selector = await f.load('@/lib/recovery-selector').loadRecoverySelector();
+    assert.equal(selector?.phase, 'committed');
+    assert.equal(selector?.previous, 'mipypos.db');
+    assert.ok(selector?.candidate.startsWith('mipypos.restored.'));
+  },
+);
+
+void regression(
+  'una copia antigua no elimina una venta posterior ni vuelve a ejecutar sus efectos',
+  async () => {
+    const f = await fixture(recoveryHost);
+    const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    await f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin');
+    const before = await f.db.getAuditSnapshot();
+    const products = await f.db.listProducts();
+    await assert.rejects(
+      f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true),
+      /difiere/,
+    );
+    assert.deepEqual(await f.db.getAuditSnapshot(), before);
+    assert.deepEqual(await f.db.listProducts(), products);
+    assert.equal(f.storage.has('mipypos.recovery.selector.v1'), false);
+  },
+);
+
+void regression(
+  'mismos conteos no ocultan cambios de precio, permisos o configuración',
+  async () => {
+    const f = await fixture(recoveryHost);
+    const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    const product = await f.db.getProduct(f.product.id);
+    assert.ok(product);
+    await f.db.saveProduct({ ...product, price_cash: 125 }, 'admin');
+    await assert.rejects(
+      f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true),
+      /products/,
+    );
+    assert.equal((await f.db.getProduct(f.product.id))?.price_cash, 125);
+  },
+);
+
+void regression('no se restaura sin confirmación, administrador o desde host/cliente', async () => {
+  const f = await fixture(recoveryHost);
+  const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+  await assert.rejects(
+    f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, false),
+    /Confirma/,
+  );
+  await assert.rejects(
+    f.db.restorePrivateRecoveryBackup('admin', 'incorrecta', copy.id, true),
+    /contraseña/,
+  );
+  await f
+    .load('@/lib/network/config')
+    .saveNetworkConfig({ mode: 'host', hostUrl: '', clientId: 'host-1', transport: 'wifi' });
+  await assert.rejects(
+    f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true),
+    /terminales/,
+  );
+  assert.ok(await f.db.authenticate('admin', 'admin123'));
+});
+
+void regression(
+  'recibos posteriores se preservan aunque no cambien ventas ni conteos',
+  async () => {
+    const f = await fixture(recoveryHost);
+    const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    f.database.run(
+      "INSERT INTO network_commands(command_id,client_id,action,response,created_at) VALUES('confirmed-after','terminal','action','{\"value\":42}','2026-10-31T10:00:00.000Z')",
+    );
+    await assert.rejects(
+      f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true),
+      /network_commands/,
+    );
+    assert.equal(
+      (
+        await (
+          await f.db.getDatabase()
+        ).getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM network_commands')
+      )?.count,
+      1,
+    );
+  },
+);
+
+void regression(
+  'fallo de copia de seguridad bloquea la restauración y conserva acceso original',
+  async () => {
+    const f = await fixture(recoveryHost);
+    const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    f.failWritesContaining('BACKUP');
+    await assert.rejects(
+      f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true),
+      /backup failure/,
+    );
+    f.failWritesContaining('');
+    assert.ok(await f.db.getProduct(f.product.id));
+    assert.equal(f.storage.has('mipypos.recovery.selector.v1'), false);
+  },
+);
+
+void regression(
+  'una generación preparada interrumpida selecciona el original, no el candidato',
+  async () => {
+    const f = await fixture();
+    const selector = f.load('@/lib/recovery-selector');
+    const id = 'd71bc2be-1d42-4b56-92b9-e32eec097a8b';
+    const file = `mipypos.restored.${id}.db`;
+    const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    const fixtureCopy = f.backups.get(copy.fileName);
+    assert.ok(fixtureCopy);
+    // Presence of a corrupt/uncommitted candidate must not switch authority.
+    f.backups.set(file, fixtureCopy);
+    // The main file exists in the SQLite fixture, expose it to file existence checks.
+    f.backups.set('mipypos.db', f.database);
+    await selector.saveRecoverySelector({
+      version: 1,
+      phase: 'prepared',
+      previous: 'mipypos.db',
+      candidate: file,
+      restoreId: id,
+      authorityId: copy.authorityId,
+      createdAt: copy.createdAt,
+    });
+    assert.equal((await selector.resolveDatabaseFile()).fileName, 'mipypos.db');
+  },
+);
+
+void regression('registro corrupto o generación ausente no crea otra base vacía', async () => {
+  const h = createHarness();
+  const selector = h.load('@/lib/recovery-selector');
+  h.storage.set('mipypos.recovery.selector.v1', 'not-json');
+  await assert.rejects(selector.resolveDatabaseFile(), /registro/);
+  const id = 'd71bc2be-1d42-4b56-92b9-e32eec097a8b';
+  await selector.saveRecoverySelector({
+    version: 1,
+    phase: 'committed',
+    previous: 'mipypos.db',
+    candidate: `mipypos.restored.${id}.db`,
+    restoreId: id,
+    authorityId: 'authority',
+    createdAt: '2026-10-31T10:00:00.000Z',
+  });
+  await assert.rejects(selector.resolveDatabaseFile(), /No se encontró/);
+  assert.equal(h.backups.size, 0);
+});
+
+void regression(
+  'barrera de mantenimiento bloquea nuevas operaciones sin borrar pendientes',
+  async () => {
+    const f = await fixture();
+    const maintenance = f.load('@/lib/database-maintenance');
+    maintenance.beginDatabaseMaintenance();
+    await assert.rejects(f.db.listProducts(), /recuperación/);
+    await assert.rejects(f.db.setSetting('license_mode', 'pro'), /recuperación/);
+    maintenance.endDatabaseMaintenance();
+    assert.equal(await f.db.getLicenseMode(), 'demo');
+    assert.ok(await f.db.getProduct(f.product.id));
+  },
+);
+
+void regression(
+  'drenaje de conexión espera trabajo en vuelo e invalida manejadores retenidos',
+  async () => {
+    const f = await fixture();
+    const { DatabaseConnectionGate } = f.load('@/lib/database-maintenance');
+    const gate = new DatabaseConnectionGate(await f.db.getDatabase());
+    let finish: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const work = gate.database.withTransactionAsync(async () => {
+      await started;
+    });
+    let drained = false;
+    const drain = gate.sealAndDrain().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    assert.equal(drained, false);
+    assert.throws(() => gate.database.getAllAsync('SELECT * FROM users'), /recuperación/);
+    finish?.();
+    await work;
+    await drain;
+    assert.equal(drained, true);
+  },
+);
+
+for (const stage of [
+  'close-active',
+  'candidate-copy',
+  'candidate-reopen',
+  'selector-prepared',
+  'selector-committed',
+  'selector-committed-readback',
+] as const) {
+  void regression(
+    `fallo en ${stage} conserva datos y selecciona una generación comprobada`,
+    async () => {
+      const f = await fixture(recoveryHost);
+      await f.db.registerSale(f.cart(1), 'cash', [{ type: 'cash', amount: 100 }], 'admin');
+      const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+      const before = await f.db.getAuditSnapshot();
+      const products = await f.db.listProducts();
+      f.failRecoveryStageOnce(stage);
+      await assert.rejects(
+        f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true),
+        /Injected recovery failure/,
+      );
+      assert.deepEqual(await f.db.getAuditSnapshot(), before);
+      assert.deepEqual(await f.db.listProducts(), products);
+      assert.ok(await f.db.authenticate('admin', 'admin123'));
+      const record = await f.load('@/lib/recovery-selector').loadRecoverySelector();
+      const selected = await f.load('@/lib/recovery-selector').resolveDatabaseFile();
+      if (stage === 'selector-committed-readback') {
+        assert.equal(record?.phase, 'committed');
+        assert.equal(selected.fileName, record?.candidate);
+      } else {
+        assert.equal(selected.fileName, 'mipypos.db');
+        assert.ok(record === null || record.phase === 'prepared');
+      }
+      assert.ok(f.backups.has(copy.fileName));
+      assert.equal((await f.db.listPrivateRecoveryBackups('admin')).length, 2);
+    },
+  );
+}
+
+void regression(
+  'restauración con journal pendiente conserva UUID y bloquea sustitución',
+  async () => {
+    const f = await fixture(recoveryHost);
+    const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    const pending = f.load('@/lib/network/pending-operation');
+    const prepared = await pending.prepareOperation({
+      hostUrl: 'https://192.168.1.2:8765',
+      username: 'admin',
+      clientId: 'terminal-pendiente',
+      operation: 'addArea',
+      args: ['Almacén auxiliar'],
+    });
+    const stored = new Map(f.storage);
+    await assert.rejects(
+      f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true),
+      /operaciones pendientes/,
+    );
+    assert.equal((await pending.getPendingOperation())?.commandId, prepared.commandId);
+    assert.deepEqual(f.storage, stored);
+    assert.equal(await f.load('@/lib/recovery-selector').loadRecoverySelector(), null);
+  },
+);
+
+void regression(
+  'copia de otra autoridad y estructura alterada no sustituyen la base actual',
+  async () => {
+    const f = await fixture(recoveryHost);
+    const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    const source = f.backups.get(copy.fileName);
+    assert.ok(source);
+    source.run("UPDATE sync_state SET authority_id='otra-autoridad' WHERE id=1");
+    await assert.rejects(
+      f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal(
+          error.message,
+          'No se pudo verificar la copia. El archivo y su registro se conservan.',
+        );
+        assert.ok(error.cause instanceof Error);
+        assert.equal(
+          error.cause.message,
+          'La copia no superó la comprobación. Se conserva sin modificar.',
+        );
+        return true;
+      },
+    );
+    assert.ok(await f.db.getProduct(f.product.id));
+    const next = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    f.backups.get(next.fileName)?.run('CREATE TABLE unexpected_scope(id INTEGER PRIMARY KEY)');
+    await assert.rejects(
+      f.db.restorePrivateRecoveryBackup('admin', 'admin123', next.id, true),
+      /estructura/i,
+    );
+    assert.equal(await f.load('@/lib/recovery-selector').loadRecoverySelector(), null);
+  },
+);
+
+void regression(
+  'perder selector tras restaurar bloquea el retorno silencioso a la base original',
+  async () => {
+    const f = await fixture(recoveryHost);
+    const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    await f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true);
+    const active = await f.db.getDatabase();
+    const count = (
+      await active.getFirstAsync<{ total: number }>('SELECT COUNT(*) AS total FROM sales')
+    )?.total;
+    f.storage.delete('mipypos.recovery.selector.v1');
+    await assert.rejects(
+      f.load('@/lib/recovery-selector').resolveDatabaseFile(),
+      /Falta el registro/,
+    );
+    assert.equal(
+      (await active.getFirstAsync<{ total: number }>('SELECT COUNT(*) AS total FROM sales'))?.total,
+      count,
+    );
+    assert.ok(f.backups.has(copy.fileName));
+  },
+);
+
+void regression(
+  'instalación sin generaciones recuperadas conserva apertura compatible',
+  async () => {
+    const f = await fixture();
+    await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    assert.equal(
+      (await f.load('@/lib/recovery-selector').resolveDatabaseFile()).fileName,
+      'mipypos.db',
+    );
+  },
+);
+
+void regression(
+  'evidencia WAL huérfana sin selector también impide regresar al original',
+  async () => {
+    const f = await fixture();
+    const id = 'd71bc2be-1d42-4b56-92b9-e32eec097a8b';
+    f.backups.set(`mipypos.restored.${id}.db-wal`, f.database);
+    await assert.rejects(
+      f.load('@/lib/recovery-selector').resolveDatabaseFile(),
+      /Falta el registro/,
+    );
+    assert.ok(await f.db.getProduct(f.product.id));
+  },
+);
+
+void regression('selector con candidato ajeno a su UUID se rechaza sin guardar', async () => {
+  const f = await fixture();
+  const id = 'd71bc2be-1d42-4b56-92b9-e32eec097a8b';
+  const selector = f.load('@/lib/recovery-selector');
+  await assert.rejects(
+    selector.saveRecoverySelector({
+      version: 1,
+      phase: 'committed',
+      previous: 'mipypos.db',
+      candidate: 'mipypos.db',
+      restoreId: id,
+      authorityId: 'authority',
+      createdAt: '2026-10-31T10:00:00.000Z',
+    }),
+    /generación/,
+  );
+  assert.equal(await selector.loadRecoverySelector(), null);
+});
+
+void regression(
+  'registro preparado selecciona generación anterior restaurada, no base inicial',
+  async () => {
+    const f = await fixture(recoveryHost);
+    const copy = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
+    await f.db.restorePrivateRecoveryBackup('admin', 'admin123', copy.id, true);
+    const selector = f.load('@/lib/recovery-selector');
+    const active = await selector.loadRecoverySelector();
+    assert.ok(active);
+    const restoreId = 'd71bc2be-1d42-4b56-92b9-e32eec097a8b';
+    await selector.saveRecoverySelector({
+      ...active,
+      phase: 'prepared',
+      previous: active.candidate,
+      candidate: `mipypos.restored.${restoreId}.db`,
+      restoreId,
+    });
+    assert.equal((await selector.resolveDatabaseFile()).fileName, active.candidate);
+  },
+);
+
+const backupExclude = z.object({ $: z.object({ domain: z.string(), path: z.literal('.') }) });
+const backupBlock = z.object({
+  exclude: z.array(backupExclude).min(1),
+  include: z.never().optional(),
+});
+const backupDomains = ['root', 'file', 'database', 'sharedpref', 'external'];
+const extractionBackupDomains = [
+  ...backupDomains,
+  'device_root',
+  'device_file',
+  'device_database',
+  'device_sharedpref',
+];
+
+void regression('Android excluye todas las bases y preferencias del backup legado', async () => {
+  const result = z
+    .object({ 'full-backup-content': backupBlock })
+    .parse(await XML.parseXMLAsync(androidLegacyBackupRules));
+  assert.deepEqual(
+    result['full-backup-content'].exclude.map((entry) => entry.$.domain).sort(),
+    [...backupDomains].sort(),
+  );
+});
+
+void regression(
+  'Android moderno excluye datos privados de nube y traslado entre dispositivos',
+  async () => {
+    const result = z
+      .object({
+        'data-extraction-rules': z.object({
+          'cloud-backup': z.array(backupBlock).length(1),
+          'device-transfer': z.array(backupBlock).length(1),
+        }),
+      })
+      .parse(await XML.parseXMLAsync(androidDataExtractionRules));
+    for (const channel of ['cloud-backup', 'device-transfer'] as const) {
+      const entries = result['data-extraction-rules'][channel][0].exclude;
+      assert.deepEqual(
+        entries.map((entry) => entry.$.domain).sort(),
+        [...extractionBackupDomains].sort(),
+      );
+    }
+  },
+);
+
+void regression(
+  'política Android prevalece sobre backup previo sin cambiar atributos ajenos',
+  () => {
+    const previous = {
+      'android:name': '.MainApplication',
+      'android:allowBackup': 'true',
+      'android:label': 'MipyPOS',
+      'android:usesCleartextTraffic': 'false',
+    };
+    const updated = applyAndroidPrivateBackupPolicy(previous);
+    assert.equal(updated['android:allowBackup'], 'false');
+    assert.equal(updated['android:fullBackupContent'], '@xml/mipypos_private_backup_rules');
+    assert.equal(
+      updated['android:dataExtractionRules'],
+      '@xml/mipypos_private_data_extraction_rules',
+    );
+    assert.equal(updated['android:name'], previous['android:name']);
+    assert.equal(updated['android:usesCleartextTraffic'], 'false');
+    assert.equal(previous['android:allowBackup'], 'true');
+    assert.deepEqual(applyAndroidPrivateBackupPolicy(updated), updated);
+  },
+);
+
+for (const version of [7, 9]) {
+  void regression(
+    `recuperación rechaza versión SQLite ${version} al verificar una generación`,
+    async () => {
+      const f = await fixture();
+      const connection = await f.db.getDatabase();
+      const identity = await connection.getFirstAsync<{ authority_id: string }>(
+        'SELECT authority_id FROM sync_state WHERE id=1',
+      );
+      assert.ok(identity);
+      f.database.run(`PRAGMA user_version=${version}`);
+      const recovery = f.load('@/lib/recovery-reconciliation');
+      await assert.rejects(
+        recovery.verifyRecoveryDatabase(connection, identity.authority_id),
+        /no superó la verificación/,
+      );
+      assert.equal((await f.db.getProduct(f.product.id))?.stock, f.product.stock);
+    },
+  );
+}
+
+for (const revision of [-1, 0.5]) {
+  void regression(`recuperación rechaza revisión de autoridad inválida ${revision}`, async () => {
+    const f = await fixture();
+    const connection = await f.db.getDatabase();
+    const identity = await connection.getFirstAsync<{ authority_id: string }>(
+      'SELECT authority_id FROM sync_state WHERE id=1',
+    );
+    assert.ok(identity);
+    // Simulate a corrupted database without weakening the production schema.
+    f.database.run('PRAGMA ignore_check_constraints=ON');
+    try {
+      f.database.run('UPDATE sync_state SET revision=? WHERE id=1', [revision]);
+    } finally {
+      f.database.run('PRAGMA ignore_check_constraints=OFF');
+    }
+    const recovery = f.load('@/lib/recovery-reconciliation');
+    await assert.rejects(
+      recovery.verifyRecoveryDatabase(connection, identity.authority_id),
+      /no superó la verificación/,
+    );
+    assert.equal((await f.db.getProduct(f.product.id))?.stock, f.product.stock);
+  });
+}
+
+void regression('config Android deshabilita backup conservando identidad de publicación', () => {
+  const config = appConfig({
+    projectRoot: process.cwd(),
+    staticConfigPath: null,
+    packageJsonPath: null,
+    config: { name: 'MipyPOS', slug: 'mipypos' },
+  });
+  assert.equal(config.android?.allowBackup, false);
+  assert.equal(config.android?.package, process.env.BILT_ANDROID_PACKAGE ?? 'me.bilt.mipypos');
+  assert.equal(config.ios?.bundleIdentifier, process.env.BILT_IOS_BUNDLE_ID ?? 'me.bilt.mipypos');
+  assert.equal(config.version, process.env.BILT_APP_VERSION ?? '1.0.0');
+  assert.equal(config.extra?.appStoreAppId, process.env.BILT_APP_STORE_APP_ID);
 });

@@ -16,6 +16,12 @@ import {
 } from '@/lib/onat-models';
 import { todayFiscal } from '@/lib/use-onat';
 
+const split = (text: string) =>
+  text
+    .split(';')
+    .map((part) => part.trim())
+    .filter(Boolean);
+
 export function OnatRuleForm({
   initial,
   submit,
@@ -62,16 +68,15 @@ export function OnatRuleForm({
     [months, setMonths] = useState(String(v.dueMonths));
   const [activities, setActivities] = useState(v.activities.join('; ')),
     [municipalities, setMunicipalities] = useState(v.municipalities.join('; '));
-  const [bands, setBands] = useState(
-    v.bands.map((b) => ({ limit: b.upTo === null ? '' : String(b.upTo), rate: String(b.rate) })),
+  const [bands, setBands] = useState(() =>
+    v.bands.map((b) => ({
+      id: randomUUID(),
+      limit: b.upTo === null ? '' : String(b.upTo),
+      rate: String(b.rate),
+    })),
   );
   const [step, setStep] = useState('Aplicación');
   const [advanceKeys, setAdvanceKeys] = useState((v.advanceRuleKeys ?? []).join('; '));
-  const split = (s: string) =>
-    s
-      .split(';')
-      .map((s) => s.trim())
-      .filter(Boolean);
   return (
     <View className="gap-4">
       <Typography.Heading type="h3">
@@ -89,11 +94,7 @@ export function OnatRuleForm({
         <Card className="gap-4 p-4">
           <Choice
             values={TAX_NAMES}
-            value={
-              TAX_NAMES.includes(v.name as (typeof TAX_NAMES)[number])
-                ? (v.name as (typeof TAX_NAMES)[number])
-                : 'Otro tributo'
-            }
+            value={TAX_NAMES.find((name) => name === v.name) ?? 'Otro tributo'}
             onChange={(name) => set({ ...v, name })}
           />
           <FinanceField
@@ -161,7 +162,7 @@ export function OnatRuleForm({
                 Tramos marginales: último límite vacío = sin límite.
               </Typography.Paragraph>
               {bands.map((band, i) => (
-                <View key={i} className="gap-2">
+                <View key={band.id} className="gap-2">
                   <FinanceField
                     label={`Límite superior del tramo ${i + 1}`}
                     value={band.limit}
@@ -174,8 +175,8 @@ export function OnatRuleForm({
                     label="Porcentaje del tramo"
                     value={band.rate}
                     decimal
-                    onChange={(rate) =>
-                      setBands(bands.map((b, j) => (i === j ? { ...b, rate } : b)))
+                    onChange={(bandRate) =>
+                      setBands(bands.map((b, j) => (i === j ? { ...b, rate: bandRate } : b)))
                     }
                   />
                   <Button variant="ghost" onPress={() => setBands(bands.filter((_, j) => i !== j))}>
@@ -185,7 +186,7 @@ export function OnatRuleForm({
               ))}
               <Button
                 variant="secondary"
-                onPress={() => setBands([...bands, { limit: '', rate: '0' }])}
+                onPress={() => setBands([...bands, { id: randomUUID(), limit: '', rate: '0' }])}
               >
                 <Button.Label>Añadir tramo</Button.Label>
               </Button>

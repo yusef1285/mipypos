@@ -4,6 +4,7 @@ import * as Haptics from 'expo-haptics';
 import {
   Button,
   Card,
+  ControlField,
   Input,
   Label,
   Spinner,
@@ -16,6 +17,7 @@ import {
   createPrivateRecoveryBackup,
   inspectPrivateRecoveryBackup,
   listPrivateRecoveryBackups,
+  restorePrivateRecoveryBackup,
 } from '@/lib/database';
 import type { RecoveryBackup, RecoveryBackupInspection } from '@/lib/recovery-backup';
 
@@ -29,6 +31,7 @@ export function RecoveryBackupControls() {
 }
 
 function RecoveryBackupForm({ username }: { username: string }) {
+  const { refresh, logout, networkConfig } = useApp();
   const spinnerColor = useThemeColor('accent-foreground');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -38,6 +41,8 @@ function RecoveryBackupForm({ username }: { username: string }) {
   const [inspection, setInspection] = useState<RecoveryBackupInspection | null>(null);
   const [checking, setChecking] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -105,12 +110,44 @@ function RecoveryBackupForm({ username }: { username: string }) {
       setBusy(false);
     }
   };
+  const restore = async () => {
+    if (busy || !lastCopy || !confirmed) return;
+    setBusy(true);
+    setRestoring(true);
+    setError('');
+    setSuccess(false);
+    setInspection(null);
+    try {
+      await restorePrivateRecoveryBackup(username, password, lastCopy.id, confirmed);
+      setPassword('');
+      setConfirmed(false);
+      try {
+        await refresh();
+      } finally {
+        // A confirmed generation must invalidate the old session even when
+        // refreshing the displayed totals fails.
+        logout();
+      }
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : 'No se pudo confirmar la restauración. Tus archivos se conservan.',
+      );
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } finally {
+      setRestoring(false);
+      setBusy(false);
+    }
+  };
   return (
     <Card className="gap-3 p-4">
       <Typography.Heading type="h4">Copia privada de recuperación</Typography.Heading>
       <Typography.Paragraph type="body-sm" color="muted">
         Incluye tus datos y cuentas. Permanece en este teléfono; no protege contra pérdida o
-        desinstalación. La restauración aún requiere asistencia técnica.
+        desinstalación. Solo se restaura si conserva todas las operaciones actuales. Las copias
+        antiguas con diferencias se bloquean para evitar pérdidas.
       </Typography.Paragraph>
       {loading ? (
         <Spinner size="sm" />
@@ -151,8 +188,10 @@ function RecoveryBackupForm({ username }: { username: string }) {
         </Typography.Paragraph>
       ) : null}
       <Button isDisabled={busy || loading || !password} onPress={() => void save()}>
-        {busy && !checking ? <Spinner size="sm" color={spinnerColor} /> : null}
-        <Button.Label>{busy && !checking ? 'Creando copia…' : 'Crear copia privada'}</Button.Label>
+        {busy && !checking && !restoring ? <Spinner size="sm" color={spinnerColor} /> : null}
+        <Button.Label>
+          {busy && !checking && !restoring ? 'Creando copia…' : 'Crear copia privada'}
+        </Button.Label>
       </Button>
       {lastCopy ? (
         <Button
@@ -163,6 +202,31 @@ function RecoveryBackupForm({ username }: { username: string }) {
           {checking ? <Spinner size="sm" /> : null}
           <Button.Label>{checking ? 'Comprobando…' : 'Comprobar última copia'}</Button.Label>
         </Button>
+      ) : null}
+      {lastCopy && networkConfig.mode === 'standalone' ? (
+        <>
+          <ControlField
+            isSelected={confirmed}
+            isDisabled={busy}
+            onSelectedChange={(selected) => {
+              setConfirmed(selected);
+              void Haptics.selectionAsync();
+            }}
+          >
+            <Label className="flex-1">
+              Conservar la base actual y comprobar antes de restaurar
+            </Label>
+            <ControlField.Indicator />
+          </ControlField>
+          <Button
+            variant="secondary"
+            isDisabled={busy || loading || !password || !confirmed}
+            onPress={() => void restore()}
+          >
+            {restoring ? <Spinner size="sm" /> : null}
+            <Button.Label>{restoring ? 'Restaurando…' : 'Restaurar última copia'}</Button.Label>
+          </Button>
+        </>
       ) : null}
     </Card>
   );

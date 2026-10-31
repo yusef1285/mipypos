@@ -9,26 +9,29 @@ interface DiscoveryBridge {
   discover(): Promise<unknown>;
   cancelDiscovery(): Promise<void>;
 }
+function isDiscoveryBridge(value: unknown): value is DiscoveryBridge {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    'advertise' in value &&
+    typeof value.advertise === 'function' &&
+    'stopAdvertisement' in value &&
+    typeof value.stopAdvertisement === 'function' &&
+    'discover' in value &&
+    typeof value.discover === 'function' &&
+    'cancelDiscovery' in value &&
+    typeof value.cancelDiscovery === 'function'
+  );
+}
 function bridge(): DiscoveryBridge {
   if (Platform.OS !== 'android')
     throw new Error('Buscar administradores en la red requiere Android.');
   const value: unknown = NativeModules.MipyDiscovery;
-  if (
-    !value ||
-    typeof value !== 'object' ||
-    !('advertise' in value) ||
-    typeof value.advertise !== 'function' ||
-    !('stopAdvertisement' in value) ||
-    typeof value.stopAdvertisement !== 'function' ||
-    !('discover' in value) ||
-    typeof value.discover !== 'function' ||
-    !('cancelDiscovery' in value) ||
-    typeof value.cancelDiscovery !== 'function'
-  )
+  if (!isDiscoveryBridge(value))
     throw new Error(
       'Esta instalación no incluye búsqueda de administradores. Usa el QR o instala la nueva compilación Android.',
     );
-  return value as DiscoveryBridge;
+  return value;
 }
 let advertisementError = '';
 export const getAdvertisementError = () => advertisementError;

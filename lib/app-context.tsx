@@ -33,7 +33,7 @@ import {
   subscribeLanStatus,
 } from '@/lib/network/hotspot';
 import { disconnectDirect, getDirectInfo } from '@/lib/network/direct';
-import { startLanHost, stopLanHost } from '@/lib/network/host';
+import { startLanHost, stopLanHostAndDrain } from '@/lib/network/host';
 import { AppState, Platform } from 'react-native';
 import type { NetworkConfig } from '@/lib/network/types';
 import { validateLicenseKey } from '@/lib/license';
@@ -259,7 +259,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       );
       const normalized = await saveNetworkConfig(next);
       if (next.mode !== 'host') {
-        stopLanHost();
+        await stopLanHostAndDrain();
         if (await getLocalHotspot()) await stopLocalHotspot();
       }
       if (next.mode === 'standalone') {

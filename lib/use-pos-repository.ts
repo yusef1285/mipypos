@@ -3,6 +3,7 @@ import { useApp } from '@/lib/app-context';
 import * as Database from '@/lib/database';
 import { requestHostOperation } from '@/lib/network/client';
 import { redactCosts } from '@/lib/finance-privacy';
+import { parseOperationResult } from '@/lib/network/validation';
 import { operationPermissions } from '@/lib/network/operations';
 import { canAccess } from '@/lib/permissions';
 import { mutationOperations } from '@/lib/network/operations';
@@ -64,7 +65,7 @@ export function usePosRepository(): Repository {
         return handler(...args).then((result) =>
           user?.role === 'admin' || module === 'onat' || result == null
             ? result
-            : redactCosts(result),
+            : parseOperationResult(operation, redactCosts(result)),
         );
       };
     return {

@@ -1,10 +1,19 @@
 import { z } from 'zod';
-import { fiscalFilterSchema, onatCommandSchema } from '@/lib/onat-models';
+import {
+  fiscalFilterSchema,
+  onatCommandSchema,
+  profileSchema,
+  ruleSchema,
+  storedObligationSchema,
+  parseFiscalRecord,
+} from '@/lib/onat-models';
+import { snapshotSchema } from '@/lib/network/snapshot';
 import {
   operationPermissions,
   mutationOperations,
   type OperationRequest,
   type PosOperation,
+  type PosResult,
 } from '@/lib/network/operations';
 import type { NetworkSaleCommand } from '@/lib/network/types';
 
@@ -282,4 +291,300 @@ export function assertSaleCommand(value: unknown): asserts value is NetworkSaleC
       'INVALID_ARGUMENTS',
       'Los datos de la venta no son válidos. Actualiza el carrito y vuelve a intentarlo.',
     );
+}
+
+// Read models intentionally accept historical card payments. Command schemas above do not.
+const finite = z.number().finite();
+const count = finite.int().nonnegative();
+export const mutationIdSchema = id;
+export const mutationCountSchema = count;
+export const mutationVoidSchema = z.null().transform(() => undefined);
+export const storedSettlementSchema = z.object({
+  cashReceived: amount.nullable(),
+  transferReceipt: receipt.nullable(),
+  changeDue: finite,
+});
+const string = z.string();
+const flag = z.union([z.literal(0), z.literal(1)]);
+const role = z.enum(['admin', 'supervisor', 'seller', 'storekeeper', 'auditor']);
+const publicUser = z.object({
+  id,
+  username: string,
+  role,
+  can_authorize_consumption: flag,
+  can_manage_fiscal: flag.optional(),
+});
+export const networkSessionSchema = z.object({
+  token: z.string().min(1).max(512),
+  user: publicUser,
+});
+const legacyMethod = z.enum(['cash', 'transfer', 'mixed', 'card']);
+const movements = z.array(
+  z.object({
+    id,
+    type: z.enum([
+      'entrada',
+      'salida',
+      'traslado',
+      'CONSUMO_INTERNO',
+      'ANULACION_CONSUMO',
+      'DEVOLUCION',
+    ]),
+    product_id: id,
+    product_name: string,
+    from_area: string.nullable(),
+    to_area: string.nullable(),
+    quantity: finite,
+    user: string,
+    date: string,
+  }),
+);
+const closures = z.array(
+  z.object({
+    session_id: id,
+    authorized_by: string,
+    date: string,
+    detail: string,
+  }),
+);
+export const dailyReportSchema = z.object({
+  totalSales: finite,
+  salesCount: count,
+  cash: finite,
+  transfer: finite,
+  card: finite,
+  byUser: z.array(z.object({ user: string, total: finite, count })),
+  byProduct: z.array(z.object({ product: string, unit: string, quantity: finite, total: finite })),
+  movements,
+  inventory: snapshotSchema.shape.products,
+});
+const closureProduct = z.object({
+  productId: id,
+  productName: string,
+  unit: string,
+  openingStock: finite,
+  entries: finite,
+  exits: finite,
+  sold: finite,
+  expectedStock: finite,
+});
+const withdrawal = z.object({
+  id,
+  session_id: id,
+  command_id: string,
+  amount,
+  reason: string,
+  username: string,
+  authorized_by: string,
+  date: string,
+});
+const saleDetail = z
+  .object({
+    sale: z.object({
+      id,
+      session_id: id,
+      user: string,
+      seller_id: id.nullable(),
+      date: string,
+      total: finite,
+      method: legacyMethod,
+      payments: z.array(z.object({ type: z.enum(['cash', 'transfer', 'card']), amount: finite })),
+      settlement: storedSettlementSchema.nullable(),
+    }),
+    lines: z.array(
+      z.object({
+        id,
+        sale_id: id,
+        product_id: id,
+        name: string,
+        quantity: finite,
+        price: finite,
+        subtotal: finite,
+        area_id: id.nullable(),
+        unit: string,
+        // The host omits costs for non-admins; normalize only this documented redaction.
+        unit_cost: amount.nullable().default(null),
+        category: string,
+      }),
+    ),
+  })
+  .nullable();
+const totals = z.object({
+  gross: finite,
+  discounts: finite,
+  returns: finite,
+  net: finite,
+  knownCost: finite,
+  profit: finite.nullable(),
+  margin: finite.nullable(),
+  units: finite,
+  operations: count,
+  average: finite,
+  missingCostLines: count,
+});
+const groups = z.array(totals.extend({ key: string, name: string }));
+const financeReport = z.object({
+  currency: z.literal('CUP'),
+  filter: z.object({
+    start: string,
+    end: string,
+    sellerKey: string.optional(),
+    productId: id.optional(),
+    category: string.optional(),
+  }),
+  totals,
+  sellers: groups,
+  products: groups,
+  timeline: groups,
+  consumption: z.object({ quantity: finite, value: finite, knownCost: finite, missingCost: count }),
+  inventory: z.object({ knownValue: finite, missingCost: count, asOf: string }),
+});
+const consumptionRows = z.array(
+  z.object({
+    id: string,
+    date: string,
+    product_id: id,
+    product_name: string,
+    area_id: id,
+    quantity: finite,
+    price: finite,
+    unit_cost: amount.nullable().default(null),
+    value: finite,
+    cost: amount.nullable().default(null),
+    reason: string,
+    notes: string,
+    actor_id: id,
+    actor_name: string,
+    authorizer_id: id,
+    authorizer_name: string,
+    status: z.enum(['confirmado', 'anulado', 'rectificado']),
+    replaces_id: string.nullable(),
+  }),
+);
+const version = z.object({ id: string, date: string, actor: string });
+const fiscalRecord = version
+  .extend({ taxpayerId: string, kind: string, value: z.unknown() })
+  .transform(({ kind, value, ...metadata }) => parseFiscalRecord(metadata, kind, value));
+const fiscalData = z.object({
+  profiles: z.array(version.extend({ value: profileSchema })),
+  rules: z.array(version.extend({ replacesId: string.nullable(), value: ruleSchema })),
+  records: z.array(fiscalRecord),
+  economy: storedObligationSchema.shape.economy,
+  previousIncome: finite,
+  warnings: z.array(string),
+});
+
+// The mapped annotation checks every registered action against its actual DB return type.
+// Parsing (not a cast) also supplies nullable fields omitted by cost redaction.
+export const operationResultSchemas: { [K in PosOperation]: z.ZodType<PosResult<K>> } = {
+  getFiscalData: fiscalData,
+  executeFiscalCommand: z.string().uuid(),
+  setFiscalPermission: id,
+  getInvestmentData: z.object({
+    products: snapshotSchema.shape.products,
+    history: z.array(
+      z.object({
+        id,
+        product_id: id,
+        date: string,
+        old_cost: amount.nullable(),
+        new_cost: amount.nullable(),
+        method: string,
+        reason: string,
+        actor_name: string,
+        quantity: finite,
+        purchase_cost: amount.nullable(),
+      }),
+    ),
+  }),
+  getConsumptionData: z.object({
+    rows: consumptionRows,
+    events: z.array(
+      z.object({
+        consumption_id: string,
+        date: string,
+        action: string,
+        reason: string,
+        actor_name: string,
+        authorizer_name: string,
+      }),
+    ),
+  }),
+  setProductCost: id,
+  receiveCostedStock: id,
+  getFinanceReport: financeReport,
+  registerConsumption: z.string().min(1).max(128),
+  cancelConsumption: z.string().min(1).max(128),
+  registerSaleAdjustment: id,
+  setConsumptionPermission: id,
+  getAuditSnapshot: z.object({
+    sales: z.array(
+      z.object({ id, user: string, date: string, total: finite, method: legacyMethod }),
+    ),
+    products: snapshotSchema.shape.products,
+    areas: snapshotSchema.shape.areas,
+    stocks: snapshotSchema.shape.areaStock,
+    movements,
+    closures,
+  }),
+  getDemoUsage: z.object({
+    mode: z.enum(['demo', 'pro']),
+    sales: count,
+    products: count,
+    limit: count,
+  }),
+  listProducts: snapshotSchema.shape.products,
+  listAreas: snapshotSchema.shape.areas,
+  listAreaStock: snapshotSchema.shape.areaStock,
+  saveProduct: id,
+  deleteProduct: z.null(),
+  importProducts: count,
+  registerMovement: z.null(),
+  addArea: z.null(),
+  listMovements: movements,
+  listUsers: z.array(publicUser.extend({ password_hash: string })),
+  saveUser: id,
+  deleteUser: z.null(),
+  getCashClosurePreview: z.object({
+    sessionId: id,
+    fund: finite,
+    cashSales: finite,
+    transferSales: finite,
+    cardSales: finite,
+    salesTotal: finite,
+    withdrawalTotal: finite,
+    withdrawals: z.array(withdrawal),
+    products: z.array(closureProduct),
+  }),
+  openCashSession: id,
+  closeCashSession: z.object({
+    cashCount: finite,
+    expectedCash: finite,
+    cashDifference: finite,
+    transferDifference: finite,
+    withdrawalTotal: finite,
+    withdrawalDifference: finite,
+    totalDifference: finite,
+    products: z.array(closureProduct.extend({ physicalStock: finite, difference: finite })),
+  }),
+  registerCashWithdrawal: id,
+  authorizeCashDifference: z.object({
+    id,
+    detail: string,
+    reason: string,
+    authorized_by: string,
+    date: string,
+  }),
+  listCashClosures: closures,
+  getDailyReport: dailyReportSchema,
+  getHomeSummary: z.object({ totalSales: finite, salesCount: count }),
+  getExportRows: z.array(z.record(string, z.union([string, finite, z.boolean(), z.null()]))),
+  getSale: saleDetail,
+  findTransferTransaction: z.object({ id }).nullable(),
+};
+export function parseOperationResult<K extends PosOperation>(
+  operation: K,
+  value: unknown,
+): PosResult<K> {
+  return operationResultSchemas[operation].parse(value);
 }

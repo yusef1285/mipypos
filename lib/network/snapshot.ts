@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { NetworkSnapshot } from '@/lib/network/types';
 const number = z.number().finite();
-const snapshotSchema = z.object({
+export const snapshotSchema = z.object({
   revision: number.int().nonnegative(),
   authorityId: z.string().min(1).optional(),
   licenseMode: z.enum(['demo', 'pro']),
