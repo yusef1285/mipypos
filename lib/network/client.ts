@@ -162,10 +162,9 @@ async function request<T>(hostUrl: string, path: string, body: object): Promise<
       confirmed.code === 'AUTH_EXPIRED' &&
       'token' in body &&
       typeof body.token === 'string' &&
-      (await getNetworkToken()) === body.token
+      (await clearNetworkToken(body.token))
     ) {
       replicaSessionGeneration += 1;
-      await clearNetworkToken();
       await clearNetworkReplicas();
     }
     throw new HostRejection(
@@ -178,24 +177,35 @@ async function request<T>(hostUrl: string, path: string, body: object): Promise<
   return confirmed.data as T;
 }
 
-export async function loginToHost(hostUrl: string, username: string, password: string) {
-  await flushRevocations(hostUrl);
-  const session = await request<NetworkSession>(hostUrl, '/v1/login', { username, password });
-  await saveNetworkToken(session.token);
-  const pending = await getPendingOperation();
-  if (pending && pending.hostUrl === hostUrl && pending.username === session.user.username) {
-    await resolvePendingOperation(hostUrl, pending, session.token);
-  }
-  return session.user;
+let authenticationQueue: Promise<unknown> = Promise.resolve();
+function withAuthentication<T>(action: () => Promise<T>): Promise<T> {
+  const running = authenticationQueue.then(action);
+  authenticationQueue = running.catch(() => undefined);
+  return running;
 }
 
-export async function logoutFromHost(hostUrl?: string, hostPin?: string) {
-  const token = await getNetworkToken();
-  const config = await loadNetworkConfig();
-  replicaSessionGeneration += 1;
-  await clearNetworkToken();
-  await clearNetworkReplicas();
-  if (hostUrl && token) await revokeOrDefer(hostUrl, hostPin ?? config.hostPin ?? '', token);
+export function loginToHost(hostUrl: string, username: string, password: string) {
+  return withAuthentication(async () => {
+    await flushRevocations(hostUrl);
+    const session = await request<NetworkSession>(hostUrl, '/v1/login', { username, password });
+    await saveNetworkToken(session.token);
+    const pending = await getPendingOperation();
+    if (pending && pending.hostUrl === hostUrl && pending.username === session.user.username) {
+      await resolvePendingOperation(hostUrl, pending, session.token);
+    }
+    return session.user;
+  });
+}
+
+export function logoutFromHost(hostUrl?: string, hostPin?: string) {
+  return withAuthentication(async () => {
+    const token = await getNetworkToken();
+    const config = await loadNetworkConfig();
+    replicaSessionGeneration += 1;
+    await clearNetworkToken();
+    await clearNetworkReplicas();
+    if (hostUrl && token) await revokeOrDefer(hostUrl, hostPin ?? config.hostPin ?? '', token);
+  });
 }
 
 const snapshotRequests = new Map<string, Promise<NetworkSnapshot>>();

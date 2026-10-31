@@ -7,6 +7,7 @@ import QRCode from 'react-native-qrcode-svg';
 import { QrScanner } from '@/components/QrScanner';
 import { useApp } from '@/lib/app-context';
 import { checkLanHost } from '@/lib/network/client';
+import { assertPendingAuthority } from '@/lib/network/config';
 import { createLanQr, parseLanConnection, QR_COLORS } from '@/lib/network/qr';
 import {
   connectHotspot,
@@ -167,14 +168,13 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       const withdrawal = await getPendingWithdrawal();
       if (withdrawal && !retainsAuthority(withdrawal.authority))
         throw new Error('Confirma la extracción pendiente antes de cambiar de administrador.');
-      if (
-        (operation || pending || withdrawal) &&
-        networkConfig.hostPin &&
-        networkConfig.hostPin !== hostPin
-      )
-        throw new Error(
-          'Confirma las operaciones pendientes con el administrador original antes de escanear otro QR.',
-        );
+      assertPendingAuthority(
+        networkConfig,
+        { ...networkConfig, mode: 'client', hostUrl, hostPin },
+        [operation?.hostUrl, pending?.hostUrl, withdrawal?.authority].filter(
+          (authority): authority is string => authority !== undefined,
+        ),
+      );
       if (directAddress) {
         await disconnectHotspot();
         const current = await getDirectInfo();

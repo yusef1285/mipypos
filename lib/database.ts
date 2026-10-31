@@ -468,9 +468,11 @@ export async function getDatabase() {
 export async function initializeDatabase() {
   const db = await getDatabase();
   await prepareMigrationBackup(db);
-  await db.execAsync(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA foreign_keys = ON;
+  await db.execAsync('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+  // Schema, upgrades and initial rows form one atomic operation. Keep connection
+  // pragmas outside BEGIN: SQLite cannot enable foreign keys inside a transaction.
+  await transaction(db, async () => {
+    await db.execAsync(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -593,8 +595,6 @@ export async function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS movements_date_idx ON movements(date);
     CREATE INDEX IF NOT EXISTS movement_filters_idx ON movements(product_id, user, from_area, to_area);
   `);
-  // Keep upgrades atomic and never downgrade a newer installation.
-  await transaction(db, async () => {
     const userSchema = await db.getFirstAsync<{ sql: string }>(
       "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'",
     );
@@ -638,35 +638,34 @@ export async function initializeDatabase() {
       INSERT OR IGNORE INTO settings(key,value) SELECT 'usage_sales',CAST(MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='sales'),0),(SELECT COUNT(*) FROM sales)) AS TEXT);
     `);
     await migrateHardening(db);
-  });
-  const count = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM users');
-  if (!count?.count) {
-    await db.runAsync(
-      'INSERT INTO users(username,password_hash,role) VALUES(?,?,?)',
-      'admin',
-      await hashPassword('admin123'),
-      'admin',
-    );
-  }
-  const administratorCount = await db.getFirstAsync<{ count: number }>(
-    "SELECT COUNT(*) AS count FROM users WHERE role='admin'",
-  );
-  if (!administratorCount?.count) {
-    const existingDefaultAdmin = await db.getFirstAsync<{ id: number }>(
-      "SELECT id FROM users WHERE username='admin' COLLATE NOCASE",
-    );
-    if (existingDefaultAdmin)
-      await db.runAsync("UPDATE users SET role='admin' WHERE id=?", existingDefaultAdmin.id);
-    else
+    const count = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM users');
+    if (!count?.count) {
       await db.runAsync(
         'INSERT INTO users(username,password_hash,role) VALUES(?,?,?)',
         'admin',
         await hashPassword('admin123'),
         'admin',
       );
-  }
-  await db.runAsync("INSERT OR IGNORE INTO areas(name) VALUES('Almacén principal')");
-  await db.execAsync(`
+    }
+    const administratorCount = await db.getFirstAsync<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM users WHERE role='admin'",
+    );
+    if (!administratorCount?.count) {
+      const existingDefaultAdmin = await db.getFirstAsync<{ id: number }>(
+        "SELECT id FROM users WHERE username='admin' COLLATE NOCASE",
+      );
+      if (existingDefaultAdmin)
+        await db.runAsync("UPDATE users SET role='admin' WHERE id=?", existingDefaultAdmin.id);
+      else
+        await db.runAsync(
+          'INSERT INTO users(username,password_hash,role) VALUES(?,?,?)',
+          'admin',
+          await hashPassword('admin123'),
+          'admin',
+        );
+    }
+    await db.runAsync("INSERT OR IGNORE INTO areas(name) VALUES('Almacén principal')");
+    await db.execAsync(`
     INSERT OR IGNORE INTO area_stock(area_id,product_id,quantity)
     SELECT a.id,p.id,p.stock FROM products p
     CROSS JOIN areas a
@@ -674,7 +673,8 @@ export async function initializeDatabase() {
       AND p.stock>0
       AND NOT EXISTS (SELECT 1 FROM area_stock s WHERE s.product_id=p.id);
   `);
-  await db.runAsync("INSERT OR IGNORE INTO settings(key,value) VALUES('license_mode','demo')");
+    await db.runAsync("INSERT OR IGNORE INTO settings(key,value) VALUES('license_mode','demo')");
+  });
   return db;
 }
 

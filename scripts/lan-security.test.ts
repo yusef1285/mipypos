@@ -1535,3 +1535,151 @@ void test('recibo de retiro malformado muestra mensaje legible y conserva pendie
     assert.equal((await f.db.getCashSummary(sessionId)).withdrawalTotal, 0);
   }
 });
+
+void test('pin perdido bloquea QR de la misma IP y conserva el UUID pendiente', async () => {
+  const f = await lanFixture();
+  const p = f.load('@/lib/network/pending-operation');
+  const original = await p.prepareOperation({
+    hostUrl: url,
+    username: 'admin',
+    clientId: 'terminal-a',
+    operation: 'addArea',
+    args: ['Sin reenviar'],
+  });
+  f.storage.delete('secure:mipypos.network.pin');
+  const recovered = await f.config.loadNetworkConfig();
+  assert.ok(recovered.recoveryMessage);
+  for (const candidate of [pin, 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=']) {
+    assert.throws(
+      () =>
+        f.config.assertPendingAuthority(
+          recovered,
+          { mode: 'client', hostUrl: url, hostPin: candidate, clientId: 'terminal-a' },
+          [original.hostUrl],
+        ),
+      /identidad original/,
+    );
+  }
+  assert.equal((await p.getPendingOperation())?.commandId, original.commandId);
+  assert.equal(
+    (await f.db.listAreas()).some((area) => area.name === 'Sin reenviar'),
+    false,
+  );
+});
+
+void test('pendientes aceptan IP nueva solo con pin previo y rechazan autoridad distinta', async () => {
+  const h = createHarness();
+  const config = h.load('@/lib/network/config');
+  const current = { mode: 'client' as const, hostUrl: url, hostPin: pin, clientId: 'terminal-a' };
+  const next = { ...current, hostUrl: 'https://192.168.1.2:8787' };
+  assert.doesNotThrow(() => config.assertPendingAuthority(current, next, [url]));
+  assert.throws(
+    () => config.assertPendingAuthority(current, { ...next, hostPin: 'otro-pin' }, [url]),
+    /identidad original/,
+  );
+  assert.throws(
+    () => config.assertPendingAuthority(current, next, ['https://192.168.1.3:8787']),
+    /administrador original/,
+  );
+  assert.doesNotThrow(() => config.assertPendingAuthority(current, next, []));
+  assert.doesNotThrow(() => config.assertPendingAuthority(current, next, ['local']));
+  assert.throws(
+    () =>
+      config.assertPendingAuthority({ ...current, hostPin: undefined }, current, [
+        url.replace('https:', 'http:'),
+      ]),
+    /identidad original/,
+  );
+});
+
+void test('logout pendiente termina antes del nuevo login sin borrar su token', async () => {
+  let token: string | null = 'sesion-anterior';
+  let release!: () => void;
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let logins = 0;
+  const h = createHarness({
+    '@/lib/network/config': {
+      getNetworkToken: async () => token,
+      loadNetworkConfig: async () => ({ hostPin: pin }),
+      clearNetworkToken: async () => {
+        started();
+        await barrier;
+        token = null;
+      },
+      saveNetworkToken: async (value: string) => {
+        token = value;
+      },
+    },
+    '@/lib/database': { clearNetworkReplicas: async () => undefined },
+    '@/lib/network/revocations': {
+      flushRevocations: async () => undefined,
+      revokeOrDefer: async () => undefined,
+    },
+    '@/lib/network/pending-operation': { getPendingOperation: async () => null },
+    '@/lib/network/tls': {
+      pinnedRequest: async () => {
+        logins += 1;
+        return JSON.stringify({
+          ok: true,
+          data: { token: 'sesion-nueva', user: { username: 'admin', role: 'admin' } },
+        });
+      },
+    },
+  });
+  const client = h.load('@/lib/network/client');
+  const leaving = client.logoutFromHost(url, pin);
+  await begun;
+  const entering = client.loginToHost(url, 'admin', 'clave-de-prueba');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const earlyLogins = logins;
+  release();
+  await Promise.all([leaving, entering]);
+  assert.equal(earlyLogins, 0);
+  assert.equal(token, 'sesion-nueva');
+});
+
+void test('borrado condicional no elimina un token posterior y serializa escritura', async () => {
+  const h = createHarness();
+  const config = h.load('@/lib/network/config');
+  await config.saveNetworkToken('sesion-anterior');
+  const clearing = config.clearNetworkToken('sesion-anterior');
+  const saving = config.saveNetworkToken('sesion-nueva');
+  assert.equal(await clearing, true);
+  await saving;
+  assert.equal(await config.clearNetworkToken('sesion-anterior'), false);
+  assert.equal(await config.getNetworkToken(), 'sesion-nueva');
+});
+
+void test('crear areas exige admin tambien en repositorio local sin impedir movimientos', async () => {
+  let role: import('../lib/models').UserRole = 'storekeeper';
+  const h = createHarness({
+    react: { useMemo: (factory: () => unknown) => factory() },
+    '@/lib/app-context': {
+      useApp: () => ({
+        networkConfig: { mode: 'standalone' },
+        user: { username: 'encargado', role },
+      }),
+    },
+  });
+  const db = h.load('@/lib/database');
+  await db.initializeDatabase();
+  const hook = h.load('@/lib/use-pos-repository');
+  await assert.rejects(hook.usePosRepository().addArea('No autorizada'), /administrador/);
+  assert.equal(
+    (await db.listAreas()).some((area) => area.name === 'No autorizada'),
+    false,
+  );
+  assert.deepEqual(await hook.usePosRepository().listMovements(), []);
+  role = 'admin';
+  await hook.usePosRepository().addArea('Autorizada');
+  assert.equal(
+    (await db.listAreas()).some((area) => area.name === 'Autorizada'),
+    true,
+  );
+});

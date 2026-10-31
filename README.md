@@ -64,7 +64,7 @@ This project is built with:
 - React Native
 - Expo
 - TypeScript
-- AsyncStorage (local data persistence)
+- SQLite local mediante Expo SQLite (datos comerciales); AsyncStorage/SecureStore para estado auxiliar y secretos
 - Expo Router (navigation)
 
 All generated automatically by Bilt from your natural language instructions.
@@ -325,4 +325,37 @@ Se continúa el proyecto existente sin repetir la migración SDK 58 ni las corre
 
 La validación de esta continuación ejecutó **141/141 pruebas**: 65 POS, 54 LAN/seguridad y 22 finanzas. TypeScript y CSS sin errores; lint con 0 errores y 22 advertencias. Los informes se guardan en `.expo/*results.json`. Incluye recuperación por recibo con ACK perdido de venta/retiro, rechazo posterior a commit, comprobantes grandes cifrados, corrupción simple/doble, huella alterada, migración de pendientes, cambios de sesión con respuestas atrasadas, referencias inconsistentes y archivos v1/v2 sin reutilizar credenciales.
 
-No se operó sobre una base de producción ni se verificó conservación de datos reales. Las pruebas son con fixtures `sql.js`, transporte simulado y AES de Node como doble del puente Expo. La comprobación visual continúa bloqueada por el servidor de preview pendiente de reinicio tras SDK 58; no se afirma renderizado validado.
+No se operó sobre una base de producción ni se verificó conservación de datos reales. Las pruebas son con fixtures `sql.js`, transporte simulado y AES de Node como doble del puente Expo. La comprobación visual de aquella entrega quedó bloqueada por el servidor de preview pendiente de reinicio tras SDK 58; no se afirmó renderizado validado.
+
+## Estabilización offline actual — auditoría y correcciones prioritarias
+
+**Entrega parcial; no se declara listo todo Pro Max ni aceptada la LAN en Android real.** La [matriz de aceptación offline](lib/offline-acceptance.md) contiene 41 áreas, rutas, componentes/servicios, operaciones SQLite, estados, criterios y punto de continuación. Se distingue revisión de fuente, regresiones automatizadas y aceptación física. Los resultados anteriores de 141 pruebas son históricos; el último resultado de esta estabilización es **150/150**.
+
+### Defectos corregidos
+
+1. **Identidad de autoridad:** operaciones remotas pendientes exigen el pin previamente emparejado antes de aceptar QR o cambiar dirección. Si se pierde, no basta la misma IP para confiar en otro host: se conserva el pendiente para reconciliación técnica. Esto reemplaza la antigua actualización automática HTTP por coincidencia de IP cuando no hay identidad verificable.
+2. **Sesión:** login y logout LAN se serializan; lecturas/escrituras/borrado del token tienen su propia cola. Una respuesta AUTH_EXPIRED antigua solo borra el token que realmente le corresponde, sin eliminar el de un login posterior.
+3. **Permiso local:** crear áreas exige admin también en el repositorio local, igual que UI y host. Se conservan consultas/movimientos del almacenero. El listado de usuarios de Movimientos no se bloqueó indiscriminadamente: alimenta filtros y no devuelve hashes; la minimización del endpoint requiere revisión separada.
+4. **Arranque/migración:** creación de tablas/índices, actualización y semillas forman una sola transacción. Un fallo revierte también el esquema inicial y la versión; backup y PRAGMAs de conexión permanecen antes de BEGIN. Se verificó rollback de metadata y registros, además de reintento.
+5. **CSV:** se rechazan comillas incompletas/incorrectas, encabezados duplicados/vacíos y filas con cantidad de columnas distinta antes de importar. No se pierden celdas silenciosamente. CSV válido con BOM, comas, comillas escapadas y campos multilínea conserva compatibilidad.
+
+### Archivos y conservación
+
+Cambios funcionales: `lib/network/config.ts`, `lib/network/client.ts`, `lib/app-context.tsx`, `components/LanConnection.tsx`, `lib/use-pos-repository.ts`, `lib/database.ts`, `lib/csv.ts`. Regresiones/harness: `scripts/lan-security.test.ts`, `scripts/pos-regression.test.ts`, `scripts/pos-test-harness.ts`. Documentación: `README.md`, `lib/offline-acceptance.md`. El formateador recorrió el proyecto; no se usa ese recorrido como prueba de cambios funcionales en otros archivos.
+
+**SQLite sigue en v7; no nueva migración ni formato de negocio.** No se reconstruyó el POS ni se borró una base, ni se modificaron hashes existentes, algoritmo, licencia, cuotas o identidad de publicación. No se desarrolló PWA global, Desktop ni un backend obligatorio. Las dependencias y arquitectura actuales se conservan; no se actualizó SDK por rutina.
+
+### Pruebas ejecutadas y límites
+
+La verificación integrada ejecutó `lint:css` → `validate:pos` → `test:pos`, `test:lan`, `test:finance`. Últimos informes locales del 2026-10-31 UTC: **69 POS, 59 LAN y 22 finanzas, todas aprobadas**. Se añadieron nueve casos de regresión en esta estabilización. TypeScript limpio; oxlint **0 errores y 22 advertencias**, sin supresiones: 17 assertions inseguras, 4 dependencias extra de efectos y 1 parámetro genérico innecesario. La matriz explica su clasificación y los límites de la comparación histórica.
+
+No hubo ejecución aislada por filtro: no se dispone aquí de una consola para esos comandos. Se ejecutó formato en escritura (`npm run format`), pero **`npm run format:check` queda pendiente como comando separado**. El resultado del motor de lint no se presenta como salida independiente de una invocación literal `npm run lint`. En el entorno Android de aceptación ejecutar los comandos exactos listados en la matriz y registrar sus salidas.
+
+El preview ya renderiza `/movements` a 402 pt: mostró **Acceso restringido** sin sesión. Esto descarta un bloqueo total del preview en esa captura, pero no verifica Movimientos autenticado ni ventas/caja/paneles financieros. No se alteró el diseño.
+
+### Pendientes, riesgos y continuación
+
+- **Android:** no APK compilado/firmado ni pruebas físicas realizadas. LAN/TLS/Keystore, Java, hotspot/Direct/NSD, cámara/OCR, cierre forzado, archivos e impresión requieren dos dispositivos y evidencia. Preparación de compilación y registro de pruebas en la matriz; no usar la única base de producción.
+- **Datos/recuperación:** probar migraciones/restauración con copias reales anonimizadas v5/v6/v7; recuperación asistida de legado dañado, pin/clave perdido y réplica integral siguen pendientes. Nunca borrar ni reenviar a otra autoridad para resolver una incertidumbre. Archivo comercial JSON no cifrado; proteger datos personales y archivos v1 antiguos con hashes.
+- **Empresarial offline no implementado:** negocios/sucursales aislados, traslados con recepción, personal/nómina, crédito/abonos, clientes/proveedores, multidivisa/tasas históricas, tickets configurables y exportación consolidada. Inversión actual es inventario/costos, no aportes de inversores. La matriz identifica reglas comerciales que aún no están definidas suficientemente; no se inventaron cálculos ni pantallas aparentes.
+- **Punto exacto de continuación:** A30/A32 de la matriz (recuperación/conservación real), compilación y aceptación A26–A29; después A33/A34 (contexto autorizado de negocio/sucursal y recepción trazable). Mantener fuera servicios globales, sincronización internacional y Desktop independiente.

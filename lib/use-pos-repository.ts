@@ -42,6 +42,8 @@ export function usePosRepository(): Repository {
           !(user?.role === 'auditor' && auditReads.includes(operation))
         )
           return Promise.reject(new Error('Tu usuario no tiene permiso para esta operación.'));
+        if (operation === 'addArea' && user?.role !== 'admin')
+          return Promise.reject(new Error('Solo un administrador puede crear áreas.'));
         if (
           user?.role === 'auditor' &&
           (mutationOperations.has(operation) || operation === 'registerCashWithdrawal')

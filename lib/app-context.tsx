@@ -25,7 +25,7 @@ import { getPendingWithdrawal } from '@/lib/network/pending-withdrawal';
 import { getPendingOperation } from '@/lib/network/pending-operation';
 import { getPendingSale } from '@/lib/network/pending-sale';
 import { HostRejection, getHostSnapshot, loginToHost, logoutFromHost } from '@/lib/network/client';
-import { loadNetworkConfig, saveNetworkConfig } from '@/lib/network/config';
+import { assertPendingAuthority, loadNetworkConfig, saveNetworkConfig } from '@/lib/network/config';
 import {
   disconnectHotspot,
   getLocalHotspot,
@@ -242,14 +242,13 @@ export function AppProvider({ children }: PropsWithChildren) {
         throw new Error(
           'Confirma la extracción pendiente antes de cambiar de administrador o trabajar solo.',
         );
-      if (
-        (operation || pending || withdrawal) &&
-        networkConfig.hostPin &&
-        next.hostPin !== networkConfig.hostPin
-      )
-        throw new Error(
-          'Confirma las operaciones pendientes con la identidad original del administrador.',
-        );
+      assertPendingAuthority(
+        networkConfig,
+        next,
+        [operation?.hostUrl, pending?.hostUrl, withdrawal?.authority].filter(
+          (authority): authority is string => authority !== undefined,
+        ),
+      );
       if (next.mode === 'host' && user?.role !== 'admin')
         throw new Error('Solo un administrador puede iniciar el host.');
       const address = next.mode === 'host' ? await startLanHost() : '';
@@ -274,7 +273,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       setSession(next.mode === 'client' ? null : await getOpenSession());
       setHostAddress(address);
     },
-    [user, networkConfig.mode, networkConfig.hostUrl, networkConfig.hostPin],
+    [user, networkConfig],
   );
   const setLicense = useCallback(async (mode: LicenseMode, key?: string) => {
     if (mode === 'pro') {

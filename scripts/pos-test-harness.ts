@@ -35,6 +35,7 @@ type HarnessModules = {
   '@/lib/network/pending-operation': typeof import('../lib/network/pending-operation');
   '@/lib/network/client': typeof import('../lib/network/client');
   '@/lib/network/config': typeof import('../lib/network/config');
+  '@/lib/use-pos-repository': typeof import('../lib/use-pos-repository');
   '@/lib/csv': typeof import('../lib/csv');
   '@/lib/network/host': typeof import('../lib/network/host');
   '@/lib/network/validation': typeof import('../lib/network/validation');

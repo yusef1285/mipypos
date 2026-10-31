@@ -1276,6 +1276,44 @@ void regression(
     }
   },
 );
+void regression(
+  'fallo de migracion revierte tambien las tablas e indices de arranque',
+  async () => {
+    const f = await fixture();
+    f.database.run('DROP TABLE audit_log; PRAGMA user_version=6;');
+    const metadata = () =>
+      f.database.exec('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name');
+    const before = metadata();
+    const users = f.database.exec('SELECT * FROM users ORDER BY id');
+    const products = f.database.exec('SELECT * FROM products ORDER BY id');
+    f.failWritesContaining('INSERT OR IGNORE INTO sync_state');
+    await assert.rejects(f.db.initializeDatabase());
+    assert.deepEqual(metadata(), before);
+    assert.deepEqual(f.database.exec('SELECT * FROM users ORDER BY id'), users);
+    assert.deepEqual(f.database.exec('SELECT * FROM products ORDER BY id'), products);
+    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 6);
+    assert.ok(f.backups.get('mipypos.pre-v6.db'));
+    f.failWritesContaining('');
+    await f.db.initializeDatabase();
+    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 7);
+  },
+);
+void regression(
+  'fallo de inicializacion no deja esquema ni version parcialmente confirmados',
+  async () => {
+    const h = createHarness();
+    const db = h.load('@/lib/database');
+    h.failWritesContaining('INSERT OR IGNORE INTO areas(name)');
+    await assert.rejects(db.initializeDatabase());
+    assert.equal(h.database.exec('PRAGMA user_version')[0].values[0][0], 0);
+    assert.equal(h.database.exec("SELECT name FROM sqlite_master WHERE type='table'").length, 0);
+    h.failWritesContaining('');
+    await db.initializeDatabase();
+    assert.equal((await db.listUsers()).length, 1);
+    assert.equal(h.database.exec('PRAGMA foreign_key_check').length, 0);
+  },
+);
+
 void regression('permiso consumo persistente y usuarios no pueden autoautorizarse', async () => {
   const f = await fixture();
   const id = await f.db.saveUser({
@@ -1397,3 +1435,36 @@ void regression(
     assert.equal(await db.authenticate('receptor', 'clave-del-receptor'), null);
   },
 );
+
+void regression('CSV dañado se rechaza antes de modificar catalogo o cuotas', async () => {
+  const f = await fixture();
+  const csv = f.load('@/lib/csv');
+  const before = await f.db.listProducts();
+  const usage = await f.db.getDemoUsage();
+  for (const raw of [
+    'name,stock,price_cash\n"Producto sin cierre,2,10',
+    'name,stock,price_cash,stock\nProducto,2,10,3',
+    'name,stock,price_cash\nProducto,2,10,celda perdida',
+    'name,stock,price_cash\nProducto,2',
+    'name,stock,price_cash\nPro"ducto,2,10',
+    'name,stock,price_cash\n"Producto"otro,2,10',
+  ]) {
+    await assert.rejects(async () => f.db.importProducts(csv.parseCsv(raw), 'admin'), /CSV/);
+    assert.deepEqual(await f.db.listProducts(), before);
+    assert.deepEqual(await f.db.getDemoUsage(), usage);
+  }
+});
+void regression('CSV valido conserva comas, comillas escapadas y campos multilinea', () => {
+  const h = createHarness();
+  const csv = h.load('@/lib/csv');
+  const raw =
+    '\uFEFFname,stock,price_cash,subcategory\r\n"Café, ""especial""\nTueste oscuro",2,10,\r\n';
+  assert.deepEqual(csv.parseCsv(raw), [
+    {
+      name: 'Café, "especial"\nTueste oscuro',
+      stock: '2',
+      price_cash: '10',
+      subcategory: '',
+    },
+  ]);
+});

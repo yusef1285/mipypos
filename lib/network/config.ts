@@ -98,12 +98,36 @@ export async function saveNetworkConfig(config: NetworkConfig) {
   await AsyncStorage.setItem(CONFIG_KEY, JSON.stringify(publicConfig(normalized)));
   return normalized;
 }
-let tokenRead: Promise<string | null> | null = null;
+// Pending HTTPS commands must keep their previously paired TLS identity, not
+// merely an IP address. A missing secure pin requires assisted reconciliation.
+export function assertPendingAuthority(
+  current: NetworkConfig,
+  next: NetworkConfig,
+  authorities: readonly string[],
+) {
+  const remote = authorities.filter((authority) => authority !== 'local');
+  if (!remote.length) return;
+  if (
+    current.mode !== 'client' ||
+    !current.hostPin ||
+    next.mode !== 'client' ||
+    next.hostPin !== current.hostPin
+  )
+    throw new Error(
+      'No se puede verificar la identidad original del administrador. Las operaciones pendientes se conservan; revisa su confirmación antes de volver a emparejar.',
+    );
+  if (remote.some((authority) => authority !== current.hostUrl && authority !== next.hostUrl))
+    throw new Error('Confirma las operaciones pendientes con el administrador original.');
+}
+
+let tokenQueue: Promise<unknown> = Promise.resolve();
+function withTokenStorage<T>(action: () => Promise<T>): Promise<T> {
+  const running = tokenQueue.then(action);
+  tokenQueue = running.catch(() => undefined);
+  return running;
+}
 export function getNetworkToken(): Promise<string | null> {
-  tokenRead ??= readToken().finally(() => {
-    tokenRead = null;
-  });
-  return tokenRead;
+  return withTokenStorage(readToken);
 }
 async function readToken(): Promise<string | null> {
   const secure = await getSecret(TOKEN_KEY);
@@ -129,11 +153,19 @@ async function readToken(): Promise<string | null> {
   // whether the bearer is usable. It never creates a new authenticated session.
   return legacy;
 }
-export async function saveNetworkToken(token: string) {
-  if (!validToken(token)) throw new Error('La sesión recibida no es válida.');
-  await setSecret(TOKEN_KEY, token);
+export function saveNetworkToken(token: string) {
+  return withTokenStorage(async () => {
+    if (!validToken(token)) throw new Error('La sesión recibida no es válida.');
+    await setSecret(TOKEN_KEY, token);
+  });
 }
-export async function clearNetworkToken() {
-  await removeSecret(TOKEN_KEY);
-  await AsyncStorage.removeItem(TOKEN_KEY);
+export function clearNetworkToken(expectedToken?: string): Promise<boolean> {
+  return withTokenStorage(async () => {
+    // Compare and delete in the same storage queue: an old response cannot
+    // erase a bearer installed by a newer login between these two steps.
+    if (expectedToken !== undefined && (await readToken()) !== expectedToken) return false;
+    await removeSecret(TOKEN_KEY);
+    await AsyncStorage.removeItem(TOKEN_KEY);
+    return true;
+  });
 }
