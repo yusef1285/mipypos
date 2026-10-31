@@ -76,7 +76,10 @@ async function authorized(token: string, module: ModuleKey, auditRead = false) {
     sessions.delete(token);
     throw new ExpiredSession('Inicia sesión nuevamente.');
   }
-  if (!canAccess(current.role, module) && !(current.role === 'auditor' && auditRead))
+  if (
+    !canAccess(current.role, module, current.can_manage_fiscal) &&
+    !(current.role === 'auditor' && auditRead)
+  )
     throw new Error(
       'Tu rol no permite esta operación. Pide al administrador que revise tu acceso.',
     );
@@ -91,6 +94,7 @@ async function buildSnapshot(): Promise<NetworkSnapshot> {
 async function handleOperation(request: OperationRequest, user: Usuario): Promise<unknown> {
   if (
     user.role === 'auditor' &&
+    operationPermissions[request.operation] !== 'onat' &&
     (mutationOperations.has(request.operation) || request.operation === 'registerCashWithdrawal')
   )
     throw new Error('El auditor solo puede consultar.');
@@ -112,6 +116,12 @@ async function handleOperation(request: OperationRequest, user: Usuario): Promis
     };
   }
   switch (request.operation) {
+    case 'getFiscalData':
+      return DB.getFiscalData(request.args[0], user.username);
+    case 'executeFiscalCommand':
+      return DB.executeFiscalCommand(request.args[0], user.username, command);
+    case 'setFiscalPermission':
+      return DB.setFiscalPermission(request.args[0], request.args[1], user.username, command);
     case 'getInvestmentData':
       return DB.getInvestmentData(user.username);
     case 'setProductCost':
@@ -330,7 +340,12 @@ export async function startLanHost(): Promise<string> {
     try {
       const input = request.data;
       assertOperationRequest(input);
-      const user = await authorized(input.token, 'home');
+      // Receipt lookup never executes a mutation: match the authenticated owner,
+      // terminal and fingerprint even if the committed change revoked their role.
+      const user = await authorized(
+        input.token,
+        operationPermissions[input.operation] === 'onat' ? 'onat' : 'home',
+      );
       if (
         !input.commandId ||
         !input.clientId ||
@@ -382,7 +397,7 @@ export async function startLanHost(): Promise<string> {
       const user = await authorized(input.token, module, auditReads.has(input.operation));
       assertOperationRequest(input);
       const result = (await handleOperation(input, user)) ?? null;
-      return success(user.role === 'admin' ? result : redactCosts(result));
+      return success(user.role === 'admin' || module === 'onat' ? result : redactCosts(result));
     } catch (error) {
       return failure(error, requestIdentity(request.data));
     }

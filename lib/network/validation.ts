@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { fiscalFilterSchema, onatCommandSchema } from '@/lib/onat-models';
 import {
   operationPermissions,
   mutationOperations,
@@ -108,6 +109,9 @@ const closure = z.object({
 const noArgs = z.tuple([]);
 const actorRead = z.tuple([text.optional()]);
 export const operationArgs = {
+  getFiscalData: z.tuple([fiscalFilterSchema, text.optional()]),
+  executeFiscalCommand: z.tuple([onatCommandSchema, text.optional(), command]),
+  setFiscalPermission: z.tuple([id, z.boolean(), text.optional(), command]),
   getInvestmentData: actorRead,
   getConsumptionData: actorRead,
   setProductCost: z.tuple([cost, text.optional(), command]),

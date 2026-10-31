@@ -20,6 +20,9 @@ export const BUSINESS_TABLES = [
   'consumption_events',
   'sale_adjustments',
   'finance_commands',
+  'fiscal_profiles',
+  'fiscal_rules',
+  'fiscal_records',
 ] as const;
 export type BusinessTable = (typeof BUSINESS_TABLES)[number];
 export type ArchiveRow = Record<string, string | number | null>;
@@ -29,7 +32,7 @@ export const archiveSchema = z
     app: z.literal('MipyPOS'),
     format: z.literal('business-close'),
     version: z.union([z.literal(1), z.literal(2)]),
-    schemaVersion: z.union([z.literal(5), z.literal(6), z.literal(7)]),
+    schemaVersion: z.union([z.literal(5), z.literal(6), z.literal(7), z.literal(8)]),
     archiveId: z.string().uuid(),
     createdAt: z.string().datetime(),
     sourceUser: z.string().min(1),
@@ -65,6 +68,21 @@ export function parseBusinessArchive(value: unknown): BusinessArchive {
         finance_commands: [],
         ...value.tables,
       },
+    };
+  }
+  if (
+    normalized &&
+    typeof normalized === 'object' &&
+    'schemaVersion' in normalized &&
+    typeof normalized.schemaVersion === 'number' &&
+    normalized.schemaVersion < 8 &&
+    'tables' in normalized &&
+    normalized.tables &&
+    typeof normalized.tables === 'object'
+  ) {
+    normalized = {
+      ...normalized,
+      tables: { fiscal_profiles: [], fiscal_rules: [], fiscal_records: [], ...normalized.tables },
     };
   }
   const parsed = archiveSchema.safeParse(normalized);

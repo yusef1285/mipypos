@@ -313,6 +313,93 @@ async function lanFixture() {
     },
   };
 }
+void test('ONAT LAN reintenta un perfil confirmado sin duplicarlo', async () => {
+  const f = await lanFixture();
+  const fiscalProfile = {
+    taxpayerId: 'default',
+    name: 'Contribuyente de prueba',
+    nit: 'TEST-LAN',
+    category: 'TCP',
+    province: 'La Habana',
+    municipality: 'Plaza',
+    address: 'Prueba',
+    activity: 'Comercio',
+    secondaryActivities: '',
+    regime: 'Prueba',
+    startDate: '2020-01-01',
+    fiscalPeriod: 'Anual',
+    registration: '',
+    accountant: 'Prueba',
+    source: 'POS',
+    reservePercent: 0,
+    reserveBase: 'Ingresos',
+    effectiveFrom: '2020-01-01',
+  } as const;
+  const args: PosArgs<'executeFiscalCommand'> = [
+    { action: 'profile', commandId: 'onat-lan-profile', value: fiscalProfile },
+    'admin',
+  ];
+  f.loseNextResponse();
+  await assert.rejects(
+    f.client.requestHostOperation(url, 'executeFiscalCommand', args, 'admin', 'terminal-a'),
+    /perdida/,
+  );
+  await f.client.requestHostOperation(url, 'executeFiscalCommand', args, 'admin', 'terminal-a');
+  const data = await f.client.requestHostOperation(
+    url,
+    'getFiscalData',
+    [{ taxpayerId: 'default', start: '2026-01-01', end: '2026-01-31' }, 'admin'],
+    'admin',
+    'terminal-a',
+  );
+  assert.equal(data.profiles.length, 1);
+  f.host.stopLanHost();
+});
+void test('ONAT LAN rechaza consulta sin autorización expresa', async () => {
+  const f = await lanFixture();
+  await f.db.saveUser({ username: 'vendedor-fiscal', password: 'abc123', role: 'seller' });
+  await f.client.loginToHost(url, 'vendedor-fiscal', 'abc123');
+  await assert.rejects(
+    f.client.requestHostOperation(
+      url,
+      'getFiscalData',
+      [{ taxpayerId: 'default', start: '2026-01-01', end: '2026-01-31' }, 'admin'],
+      'vendedor-fiscal',
+      'terminal-a',
+    ),
+    /permite|permiso|autorización/,
+  );
+  f.host.stopLanHost();
+});
+void test('ONAT LAN contador autorizado accede; revocación impide nueva lectura', async () => {
+  const f = await lanFixture();
+  const id = await f.db.saveUser({
+    username: 'contador-fiscal',
+    password: 'abc123',
+    role: 'auditor',
+  });
+  await f.db.setFiscalPermission(id, true, 'admin');
+  await f.client.loginToHost(url, 'contador-fiscal', 'abc123');
+  const args: PosArgs<'getFiscalData'> = [
+    { taxpayerId: 'default', start: '2026-01-01', end: '2026-01-31' },
+    'admin',
+  ];
+  assert.ok(
+    await f.client.requestHostOperation(
+      url,
+      'getFiscalData',
+      args,
+      'contador-fiscal',
+      'terminal-a',
+    ),
+  );
+  await f.db.setFiscalPermission(id, false, 'admin');
+  await assert.rejects(
+    f.client.requestHostOperation(url, 'getFiscalData', args, 'contador-fiscal', 'terminal-a'),
+    /permite|permiso|autorización/,
+  );
+  f.host.stopLanHost();
+});
 void test('host/client reintentan después de commit y respuesta perdida sin duplicar', async () => {
   const f = await lanFixture();
   f.loseNextResponse();

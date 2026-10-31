@@ -1,6 +1,8 @@
 import * as Crypto from 'expo-crypto';
 import * as SQLite from 'expo-sqlite';
 import * as Finance from '@/lib/finance';
+import * as Onat from '@/lib/onat';
+import type { FiscalFilter, OnatCommand } from '@/lib/onat-models';
 import { assertProductNotInDraft } from '@/lib/sale-draft';
 import type {
   ConsumptionInput,
@@ -308,7 +310,7 @@ export async function createBusinessArchive(username: string): Promise<BusinessA
       app: 'MipyPOS',
       format: 'business-close',
       version: 2,
-      schemaVersion: 7,
+      schemaVersion: 8,
       archiveId: Crypto.randomUUID(),
       createdAt: now(),
       sourceUser: username,
@@ -339,7 +341,10 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
       `SELECT 1 FROM users WHERE username<>? COLLATE NOCASE
       UNION ALL SELECT 1 FROM areas WHERE name<>'Almacén principal' COLLATE NOCASE
       UNION ALL SELECT 1 FROM audit_log
-      UNION ALL SELECT 1 FROM network_commands LIMIT 1`,
+      UNION ALL SELECT 1 FROM network_commands
+      UNION ALL SELECT 1 FROM fiscal_profiles
+      UNION ALL SELECT 1 FROM fiscal_rules
+      UNION ALL SELECT 1 FROM fiscal_records LIMIT 1`,
       username,
     );
     if (auxiliaryData)
@@ -387,6 +392,7 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
               : 0;
           row.pricing_basis = null;
         }
+        if (table === 'users' && archive.schemaVersion < 8) row.can_manage_fiscal = 0;
         const keys = Object.keys(row);
         if (keys.length !== columns.length || keys.some((key) => !allowed.has(key)))
           throw new Error('El archivo contiene columnas incompatibles.');
@@ -396,6 +402,7 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
         );
       }
     }
+    await Onat.validateFiscalStorage(db);
     const foreignErrors = await db.getAllAsync('PRAGMA foreign_key_check');
     if (foreignErrors.length) throw new Error('El archivo contiene referencias incompletas.');
     const stockError = await db.getFirstAsync(
@@ -661,6 +668,7 @@ async function initializeDatabaseInternal() {
     if (!sessionColumns.some((column) => column.name === 'movement_start_id'))
       await db.execAsync('ALTER TABLE cash_sessions ADD COLUMN movement_start_id INTEGER');
     await Finance.migrateFinance(db);
+    await Onat.migrateOnat(db);
     await db.execAsync(`
       INSERT OR IGNORE INTO settings(key,value) SELECT 'usage_products',CAST(MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='products'),0),(SELECT COUNT(*) FROM products)) AS TEXT);
       INSERT OR IGNORE INTO settings(key,value) SELECT 'usage_sales',CAST(MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name='sales'),0),(SELECT COUNT(*) FROM sales)) AS TEXT);
@@ -912,7 +920,7 @@ export async function createPrivateRecoveryBackup(
 
 export async function listUsers() {
   return (await getDatabase()).getAllAsync<Usuario>(
-    "SELECT id,username,role,can_authorize_consumption,'' AS password_hash FROM users ORDER BY username",
+    "SELECT id,username,role,can_authorize_consumption,can_manage_fiscal,'' AS password_hash FROM users ORDER BY username",
   );
 }
 export async function saveUser(
@@ -2494,6 +2502,28 @@ export function getConsumptionData(username: string) {
       events: events.filter((e) => rows.some((r) => r.id === e.consumption_id)),
     };
   });
+}
+export function getFiscalData(filter: FiscalFilter, username: string) {
+  return consistentRead(async () => Onat.readFiscalData(await getDatabase(), filter, username));
+}
+export async function executeFiscalCommand(
+  input: OnatCommand,
+  username: string,
+  command?: MutationCommand,
+) {
+  const db = await getDatabase();
+  await Onat.fiscalActor(db, username);
+  return transaction(db, () => Onat.executeFiscalCommand(db, input, username), command);
+}
+export async function setFiscalPermission(
+  userId: number,
+  allowed: boolean,
+  username: string,
+  command?: MutationCommand,
+) {
+  const db = await getDatabase();
+  await Onat.fiscalActor(db, username, true);
+  return transaction(db, () => Onat.grantFiscalPermission(db, userId, allowed, username), command);
 }
 export function setConsumptionPermission(
   userId: number,

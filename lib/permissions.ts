@@ -15,7 +15,8 @@ export type ModuleKey =
   | 'consumption'
   | 'investment'
   | 'profitability'
-  | 'seller-performance';
+  | 'seller-performance'
+  | 'onat';
 
 const ROLE_MODULES: Record<UserRole, readonly ModuleKey[]> = {
   admin: [
@@ -34,6 +35,7 @@ const ROLE_MODULES: Record<UserRole, readonly ModuleKey[]> = {
     'investment',
     'profitability',
     'seller-performance',
+    'onat',
   ],
   auditor: ['home', 'reports', 'exports', 'settings', 'audit'],
   supervisor: ['home', 'cash', 'sales', 'reports', 'settings', 'consumption'],
@@ -41,7 +43,12 @@ const ROLE_MODULES: Record<UserRole, readonly ModuleKey[]> = {
   storekeeper: ['home', 'inventory', 'movements', 'products', 'settings', 'consumption'],
 };
 
-export function canAccess(role: UserRole | undefined, module: ModuleKey) {
+export function canAccess(
+  role: UserRole | undefined,
+  module: ModuleKey,
+  fiscalPermission?: number,
+) {
+  if (module === 'onat') return role === 'admin' || Boolean(role && fiscalPermission === 1);
   return Boolean(role && ROLE_MODULES[role].includes(module));
 }
 

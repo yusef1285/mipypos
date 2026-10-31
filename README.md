@@ -1,5 +1,38 @@
 # Welcome to your Bilt project
 
+## MipyPOS ONAT — integración del 31 de octubre de 2026
+
+Módulo independiente de preparación y control fiscal offline. Acceso en **Más → MipyPOS ONAT**, rutas `/onat` y `/onat-edit`. Conserva el diseño actual, SQLite local, licencias, credenciales e identidad de publicación; sin backend obligatorio, conexión ONAT ni ejecución de pagos.
+
+### Implementado
+
+- Asistente fiscal TCP/micro/pequeña/mediana/otro, datos de inscripción y contador, vigencias e historial inmutable. Perfiles por contribuyente/NIT independientes. Un solo contribuyente reutiliza ventas POS para evitar asignación duplicada; otros usan bases manuales.
+- Motor separado `lib/onat-engine.ts`: porcentaje, tramos marginales, cuota fija, mínimo exento y bonificación; bases de ingresos, ingresos menos deducciones, utilidad, salarios, dividendos o manual. Periodicidad diaria/mensual/trimestral/anual/personalizada; vencimiento configurable por día/mes, sin presumir calendarios legales.
+- Reglas con fuente, disposición/número/año/artículo, evidencia de revisión, actividades/municipios/categorías, ámbito empresa/socio e historial. Sin tasas precargadas. Se bloquea confirmación sin comprobación registrada, fuera de vigencia/categoría/actividad/municipio, en períodos incompletos o cuando faltan costos históricos deducibles. El simulador puede usar reglas no verificadas y lo advierte.
+- Obligaciones con snapshot del perfil, regla y economía, base e importe explicado; bloquea solapamientos por impuesto/período/beneficiario. Anticipos vinculados a claves de impuestos, pagos acreditados identificados, sin reutilización y sin devolución automática. Una anulación de anticipo acreditado exige primero anular la liquidación afectada.
+- Reutiliza ventas netas, devoluciones/descuentos y costos históricos del motor financiero. Los retiros no son gastos; la deducción de costo vendido es explícita por regla. Registros complementarios de gastos deducibles para una regla específica, salarios y dividendos por socio; no sustituyen los módulos empresariales ausentes.
+- Pagos tributarios ya realizados con referencia/código/cuenta/medio/fecha/observaciones y adjunto PNG/JPEG/PDF persistido en SQLite (máximo 700 KB). Detecta referencias repetidas; anulaciones justificadas sin borrar/editar confirmados. Declaraciones: constancia de una presentación realizada fuera de MipyPOS, nunca presentación desde la app.
+- Panel con estimados/pagados/pendientes, comparación de períodos, evolución y distribución; calendario con verde/amarillo/rojo/gris; provisiones acumuladas, cobertura y reserva sugerida configurable. Las provisiones no mueven caja ni representan saldo bancario; no hay conciliación bancaria automática ni reserva real de fondos.
+- Simulador no persistente; reportes de preparación PDF/Excel/impresión, advertencia explícita de no oficialidad y registro de solicitud de exportación (no confirma entrega del archivo). Excel conserva requisito Pro existente. Web usa impresión del navegador para PDF.
+- Autorización fiscal expresa en Usuarios para usuarios no administradores, incl. contador representado por usuario autorizado (sin nuevo rol contable). Comprobaciones en repositorio, servicio SQLite y host; revocación efectiva en solicitudes. Auditoría de configuración, reglas, registros, anulaciones, permisos y solicitudes de documentos.
+- Migración aditiva **v7 → v8**: `users.can_manage_fiscal` y `fiscal_profiles/fiscal_rules/fiscal_records`. Conserva snapshot previo privado, transacciones/WAL/FK; no reinicia base. Triggers impiden UPDATE/DELETE de registros fiscales. Traslado v2/esquema8 incorpora perfiles, reglas, registros y adjuntos; lee esquemas5/6/7 con fiscal vacío y permiso desactivado. Importación valida snapshots/cálculos/referencias/anticipos y revierte si son incoherentes. Copias privadas completas incluyen nuevas tablas; restauración asistida privada sigue pendiente del proyecto.
+- LAN: consultas y mutaciones fiscales específicas mediante TLS/pinning existente, autorización en host, idempotencia/journal/recibos. No se introducen datos fiscales en snapshot general de catálogo. La terminal cliente desconectada no tiene réplica fiscal integral: requiere el host LAN disponible, no internet.
+- Recordatorios de sistema locales Android/iOS opt-in, fecha elegida a las 09:00 y mensaje sin importes/NIT; web avisa que solo dispone de calendario interno. Requiere nueva compilación y pruebas de permisos/cierre/reinicio. No usa push remoto.
+
+### Referencia oficial consultada (no paquete de tasas certificado)
+
+Se consultó la **Gaceta Oficial especial n.º 1 del 12 de enero de 2026**, Ley113/2012 concordada, en el sitio oficial del Parlamento:
+<https://www.parlamentocubano.gob.cu/sites/default/files/documento/2026-02/goc-2026-es1.pdf>.
+La publicación enumera concordancias con Ley181/2025 (presupuesto2026) y Decreto-Ley93/2024, entre otras. Se identifican conceptos y artículos de bases/obligaciones: ingresos personales20/25/49–52; utilidades72/73/110; ventas135; servicios148; seguridad social289/299–300; contribución territorial305/308; socios26. No se incorporaron porcentajes ni escalas como vigentes: falta contrastar normativa complementaria, modificaciones posteriores y aplicación individual. El portal ONAT no se pudo recuperar durante la consulta. `verifiedOn` significa comprobación registrada por el usuario autorizado, no certificación automática ni sello de ONAT. Las tasas de tests son **fixtures sintéticas**, nunca catálogo legal.
+
+### Comprobaciones y límites
+
+Última ejecución: **209/209** —85 POS,67 LAN,22 finanzas,35 ONAT—; `npm run validate:pos` incluye ONAT. TypeScript y CSS sin errores, lint0errores/76warnings sin suprimir; formato ejecutado. Expo Doctor20/20, dependencias SDK58 alineadas por parches y árbol resuelto. Artefactos `.expo/*-results.json`. SQLite/transporte/AES usan dobles de prueba; no se actuó sobre una base real.
+
+No se declara módulo fiscal completo/certificado ni listo para producción: faltan reglas cubanas verificadas para cada régimen, formulas especiales, fechas en días hábiles y feriados, condiciones complejas de exención/bonificación, pérdidas compensables, fraccionamientos legales, restauración privada asistida y aceptación física Android de adjuntos/notificaciones/PDF/impresora/LAN/backup. Falta integración automática con nómina/gastos/bancos y multisucursal porque esas entidades no existen todavía. No hay consolidación fiscal empresarial ni ventas por actividad fiscal/sucursal. La vista previa redirigió a login; revisión visual ONAT autenticada pendiente. Pruebas de generación/compartición de PDF/Excel y notificaciones son nativas pendientes, no se sustituyen por los tests del motor.
+
+Aceptación externa: configurar perfil real; contrastar cada regla con contador/ONAT; comprobar importes con ejemplos legales; recorrer pagos parciales/anulaciones, anticipos y socios; abrir todos los archivos; reinstalar/restaurar datos anonimizados; probar dos Android sin internet y permisos revocados. Los recordatorios deben revisarse/cancelarse al cambiar cumplimiento: no se implementó conciliación automática entre todos los terminales y notificaciones ya programadas.
+
 [![Built with Bilt](https://img.shields.io/endpoint?url=https%3A%2F%2Fapp.bilt.me%2Fapi%2Fbadge)](https://bilt.me)
 
 ## Project info

@@ -2,7 +2,7 @@
 
 ## Alcance y evidencia
 
-Esta matriz corresponde a la auditoría y estabilización incremental del proyecto existente. No certifica producción ni sustituye aceptación Android. Se mantienen Expo SDK 58, React Native, TypeScript, Router, SQLite v7, hashes, licencias, cuotas e identidad de publicación. No se introducen servicios remotos, sincronización global, PWA nueva ni Desktop.
+Esta matriz corresponde a la auditoría y estabilización incremental del proyecto existente. No certifica producción ni sustituye aceptación Android. Se mantienen Expo SDK 58, React Native, TypeScript, Router, SQLite v8, hashes, licencias, cuotas e identidad de publicación. No se introducen servicios remotos, sincronización global, PWA nueva ni Desktop.
 
 Clasificación:
 
@@ -14,7 +14,22 @@ Clasificación:
 
 Los módulos operativos se clasifican A, no V en su conjunto: sus regresiones de lógica están verificadas, pero no se ha instalado ni probado un APK aquí. No se ejecutaron acciones sobre una base de producción. La revisión de rutas, handlers y persistencia es estática, no una prueba visual de todos los controles. El barrido no encontró callbacks vacíos; no prueba su ausencia absoluta.
 
-Evidencia de integración actual: `.expo/pos-regression-results.json`, `.expo/lan-security-results.json`, `.expo/finance-regression-results.json`: 85 POS + 64 LAN + 22 finanzas = **171/171**, sin fallos, ejecución del 2026-10-31 UTC. La ejecución anterior de 150 casos es histórica. Los JSON son artefactos locales, no aceptación comercial. SQLite se prueba con `sql.js`, transporte LAN simulado y AES de Node como doble de Expo.
+Evidencia de integración actual: `.expo/pos-regression-results.json`, `.expo/lan-security-results.json`, `.expo/finance-regression-results.json`, `.expo/onat-regression-results.json`: 85 POS + 67 LAN + 22 finanzas + 35 ONAT = **209/209**, sin fallos. Las ejecuciones de 150 y 171 casos son históricas. Los JSON son artefactos locales, no aceptación comercial. SQLite se prueba con `sql.js`, transporte LAN simulado y AES de Node como doble de Expo.
+
+## MipyPOS ONAT — ampliación fiscal
+
+| ID  | Área                                   | Estado | Evidencia y pendiente                                                                                                                                                                                                   |
+| --- | -------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F01 | Perfil `/onat-edit?mode=profile`       | A      | Versiones por contribuyente; categoría/NIT/municipio/actividad/contador; fuente POS única y bases manuales. Probar asistente completo y cambio de vigencia autenticado en Android.                                      |
+| F02 | Motor/reglas `/onat`                   | P      | Cálculos porcentaje/escala/cuota, bases/exención/bonificación, vigencia y revisión registrada; anticipos y separación empresa/socio. No paquete legal certificado, días hábiles ni fórmulas legales complejas.          |
+| F03 | Pagos/constancias/anulaciones          | A      | SQLite append-only, comprobantes persistidos, referencias repetidas, auditoría/permisos. Pagos realizados externamente, sin alterar caja. Probar selector/adjuntos/errores/reinicio reales.                             |
+| F04 | Panel/calendario/provisiones/simulador | A      | Estados y filtros, gráficos financieros reutilizados, reservas solo de planificación; notificaciones locales configurables. Probar visual, accesibilidad 320pt y notificaciones físicas, cancelación al cumplir/anular. |
+| F05 | Documentos de preparación              | P      | PDF/Excel/impresión con aviso no oficial; solicita exportación auditable. Pruebas nativas de creación/lectura/compartición/impresora pendientes.                                                                        |
+| F06 | Seguridad/LAN                          | A      | Admin o permiso fiscal expreso. Host vuelve a verificar; reintento sin duplicación, consulta denegada y revocación probados. Sin réplica fiscal cliente desconectada; probar host LAN real sin internet.                |
+| F07 | Migración/traslado/restauración        | P      | v8 aditiva; traslado completo esquema8 con referencias y cálculo revisados, compatibles5–7 fiscal vacío; copias privadas completas. Restore portable fiscal probado; restaura copia privada asistida sigue pendiente.   |
+| F08 | Integración empresarial                | P      | Automático ventas netas/ajustes/costos vendidos; complementos fiscales gastos/salarios/dividendos. No nómina empresarial/bancos/gastos automáticos, ni multisucursal/consolidación: entidades aún ausentes.             |
+
+Última comprobación ONAT: **209/209** (85 POS +67 LAN +22 finanzas +35 ONAT), TypeScript/CSS sin errores, lint0errores/76warnings. Expo Doctor20/20 y dependencias alineadas. Los artefactos incluyen `.expo/onat-regression-results.json`. Estos resultados no son pruebas físicas. Las capturas de `/onat` y `/onat-edit` muestran login: no se verificó visualmente el módulo autenticado. Referencia legal consultada: Gaceta especial1/2026, Ley113 concordada, alojada en Parlamento oficial; sin tasas preactivadas ni certificación de vigencia individual. Detalle de alcances/pruebas externas en README.
 
 ## Matriz de módulos y flujos
 

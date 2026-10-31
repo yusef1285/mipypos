@@ -38,7 +38,7 @@ export function usePosRepository(): Repository {
             ? 'products'
             : operationPermissions[operation];
         if (
-          !canAccess(user?.role, module) &&
+          !canAccess(user?.role, module, user?.can_manage_fiscal) &&
           !(user?.role === 'auditor' && auditReads.includes(operation))
         )
           return Promise.reject(new Error('Tu usuario no tiene permiso para esta operación.'));
@@ -46,6 +46,7 @@ export function usePosRepository(): Repository {
           return Promise.reject(new Error('Solo un administrador puede crear áreas.'));
         if (
           user?.role === 'auditor' &&
+          module !== 'onat' &&
           (mutationOperations.has(operation) || operation === 'registerCashWithdrawal')
         )
           return Promise.reject(new Error('El auditor solo puede consultar.'));
@@ -61,10 +62,21 @@ export function usePosRepository(): Repository {
           );
         }
         return handler(...args).then((result) =>
-          user?.role === 'admin' || result == null ? result : redactCosts(result),
+          user?.role === 'admin' || module === 'onat' || result == null
+            ? result
+            : redactCosts(result),
         );
       };
     return {
+      getFiscalData: bind('getFiscalData', (filter) =>
+        Database.getFiscalData(filter, user?.username ?? ''),
+      ),
+      executeFiscalCommand: bind('executeFiscalCommand', (input, _username, command) =>
+        Database.executeFiscalCommand(input, user?.username ?? '', command),
+      ),
+      setFiscalPermission: bind('setFiscalPermission', (id, allowed, _username, command) =>
+        Database.setFiscalPermission(id, allowed, user?.username ?? '', command),
+      ),
       getInvestmentData: bind('getInvestmentData', () =>
         Database.getInvestmentData(user?.username ?? ''),
       ),
@@ -120,5 +132,5 @@ export function usePosRepository(): Repository {
       getSale: bind('getSale', Database.getSale),
       findTransferTransaction: bind('findTransferTransaction', Database.findTransferTransaction),
     } satisfies Repository;
-  }, [networkConfig, user?.username, user?.role]);
+  }, [networkConfig, user?.username, user?.role, user?.can_manage_fiscal]);
 }

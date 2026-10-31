@@ -1,7 +1,7 @@
 import * as SQLite from 'expo-sqlite';
 import * as Crypto from 'expo-crypto';
 
-export const DATABASE_VERSION = 7;
+export const DATABASE_VERSION = 8;
 
 // The SQLite backup API includes committed WAL pages. Copies stay in the private
 // database directory; never export this credential-bearing recovery database.
@@ -106,6 +106,9 @@ export async function migrateHardening(db: SQLite.SQLiteDatabase) {
     'internal_consumptions',
     'consumption_events',
     'sale_adjustments',
+    'fiscal_profiles',
+    'fiscal_rules',
+    'fiscal_records',
   ];
   for (const table of tables) {
     const fields = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`);

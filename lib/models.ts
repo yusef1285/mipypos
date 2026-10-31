@@ -26,6 +26,7 @@ export interface Usuario {
   password_hash: string;
   role: UserRole;
   can_authorize_consumption: 0 | 1;
+  can_manage_fiscal?: 0 | 1;
 }
 
 export interface Producto {

@@ -63,6 +63,8 @@ function AppStack() {
       <Stack.Screen name="products" options={{ headerShown: true, title: 'Productos' }} />
       <Stack.Screen name="movements" options={{ headerShown: true, title: 'Movimientos' }} />
       <Stack.Screen name="users" options={{ headerShown: true, title: 'Usuarios' }} />
+      <Stack.Screen name="onat" options={{ headerShown: true, title: 'MipyPOS ONAT' }} />
+      <Stack.Screen name="onat-edit" options={{ headerShown: true, title: 'Gestión fiscal' }} />
       <Stack.Screen name="audit" options={{ headerShown: true, title: 'Auditoría' }} />
       <Stack.Screen name="consumption" options={{ headerShown: true, title: 'Consumo interno' }} />
       <Stack.Screen

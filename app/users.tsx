@@ -24,7 +24,8 @@ import { canAccess } from '@/lib/permissions';
 const roles: UserRole[] = ['admin', 'supervisor', 'seller', 'storekeeper', 'auditor'];
 export default function Users() {
   const { user } = useApp();
-  const { deleteUser, listUsers, saveUser, setConsumptionPermission } = usePosRepository();
+  const { deleteUser, listUsers, saveUser, setConsumptionPermission, setFiscalPermission } =
+    usePosRepository();
   const [rows, setRows] = useState<Usuario[]>([]);
   const [editing, setEditing] = useState<number>();
   const [username, setUsername] = useState('');
@@ -138,6 +139,58 @@ export default function Users() {
               <Chip size="sm" variant="soft">
                 {row.role}
               </Chip>
+              {row.role !== 'admin' ? (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  isDisabled={saving}
+                  onPress={() =>
+                    Alert.alert(
+                      'Autorización fiscal',
+                      row.can_manage_fiscal === 1
+                        ? 'Se revocará el acceso a MipyPOS ONAT.'
+                        : 'Este usuario podrá consultar y modificar información tributaria confidencial.',
+                      [
+                        { text: 'Cancelar', style: 'cancel' },
+                        {
+                          text: 'Confirmar',
+                          onPress: () =>
+                            void (async () => {
+                              setSaving(true);
+                              try {
+                                await setFiscalPermission(
+                                  row.id,
+                                  row.can_manage_fiscal !== 1,
+                                  user.username,
+                                );
+                                await load();
+                                void Haptics.notificationAsync(
+                                  Haptics.NotificationFeedbackType.Success,
+                                );
+                              } catch (error) {
+                                void Haptics.notificationAsync(
+                                  Haptics.NotificationFeedbackType.Error,
+                                );
+                                Alert.alert(
+                                  'No se pudo cambiar el permiso',
+                                  error instanceof Error ? error.message : 'Vuelve a intentarlo.',
+                                );
+                              } finally {
+                                setSaving(false);
+                              }
+                            })(),
+                        },
+                      ],
+                    )
+                  }
+                >
+                  <Button.Label>
+                    {row.can_manage_fiscal === 1
+                      ? 'Revocar acceso fiscal'
+                      : 'Autorizar acceso fiscal'}
+                  </Button.Label>
+                </Button>
+              ) : null}
               {row.role === 'supervisor' ? (
                 <Button
                   size="sm"

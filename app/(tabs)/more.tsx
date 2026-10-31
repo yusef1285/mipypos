@@ -22,9 +22,11 @@ const items: Array<{
     | '/consumption'
     | '/investment'
     | '/profitability'
-    | '/seller-performance';
+    | '/seller-performance'
+    | '/onat';
   icon: (typeof appIcons)[keyof typeof appIcons];
 }> = [
+  { module: 'onat', label: '🧾 MipyPOS ONAT', href: '/onat', icon: appIcons.reports },
   { module: 'audit', label: 'Auditoría', href: '/audit', icon: appIcons.reports },
   { module: 'products', label: 'Productos', href: '/products', icon: appIcons.products },
   {
@@ -65,7 +67,7 @@ export default function More() {
       <Card>
         <ListGroup>
           {items
-            .filter((item) => canAccess(user.role, item.module))
+            .filter((item) => canAccess(user.role, item.module, user.can_manage_fiscal))
             .map((item) => {
               const Icon = item.icon;
               return (
