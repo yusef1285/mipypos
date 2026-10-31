@@ -1,16 +1,20 @@
 import { randomUUID } from 'expo-crypto';
-import { useRef } from 'react';
-export function useFinanceCommand() {
-  const pending = useRef<{ signature: string; id: string } | null>(null);
+import { useState } from 'react';
+
+export function createFinanceCommandIdentity() {
+  let pending: { signature: string; id: string } | null = null;
   return {
     idFor: (input: unknown) => {
       const signature = JSON.stringify(input);
-      if (pending.current?.signature !== signature)
-        pending.current = { signature, id: randomUUID() };
-      return pending.current.id;
+      if (pending?.signature !== signature) pending = { signature, id: randomUUID() };
+      return pending.id;
     },
     clear: () => {
-      pending.current = null;
+      pending = null;
     },
   };
+}
+
+export function useFinanceCommand() {
+  return useState(createFinanceCommandIdentity)[0];
 }

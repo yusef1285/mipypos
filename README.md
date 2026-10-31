@@ -1,5 +1,35 @@
 # Welcome to your Bilt project
 
+## Resultado de cierre e integración — 31 de octubre de 2026
+
+**Salida a producción: NO APROBADA. MipyPOS Pro Max no está terminado.** La aprobación automatizada de los módulos existentes no demuestra que todos los módulos solicitados existan ni sustituye una validación Android real. No se generó ni instaló un APK en esta ejecución.
+
+### Correcciones entregadas
+
+- **Reintentos fiscales:** `useOnat` conserva la identidad del comando mientras el mismo envío no está confirmado, aunque el formulario genere otra UUID; bloqueo inmediato de doble pulsación. Se prueba una reserva confirmada cuya respuesta se pierde: el reintento no crea un segundo registro. Esta identidad de interfaz dura mientras la pantalla permanece montada; no es un nuevo journal de borradores ni una solución universal después de cerrar la app. Los journals LAN existentes se mantienen.
+- **Exportación Empresa/Socio:** las filas Excel y el HTML utilizado por PDF/impresión respetan el ámbito seleccionado. La solicitud auditada conserva ese ámbito opcional y el traslado lo valida; los registros antiguos sin ámbito siguen siendo legibles.
+- **Recordatorios:** cada recarga fiscal autorizada concilia las notificaciones locales de obligaciones pagadas, declaradas según su tipo o anuladas. Un pago parcial no las cancela. Solo elimina identificadores de obligaciones presentes y cumplidas en los datos cargados; no elimina otras alertas. Un fallo de cancelación se informa con reintento sin descartar los datos ni repetir un pago. No permite programar sobre una obligación ya cumplida. Anular un pago/constancia no vuelve a programar una alerta automáticamente. Sin conciliación en segundo plano de terminales desconectadas: se aplica cuando cada terminal actualiza ONAT.
+
+### Verificación ejecutada
+
+`lint:css` ejecutó parsers CSS y las cuatro suites encadenadas de `validate:pos`. Resultados frescos de `.expo/*-results.json`: **85 POS + 67 LAN + 22 finanzas + 47 ONAT = 221/221**, cero fallos, generados el 31 de octubre de 2026 entre 20:27:57 y 20:28:19 UTC. Se añadieron 12 casos ONAT. TypeScript y CSS limpios; lint **0 errores / 77 advertencias** sin suprimir; formateador ejecutado, sin afirmar un `format:check` independiente. Expo Doctor **20/20**, dependencias actualizadas y árbol resuelto.
+
+Las pruebas usan SQLite `sql.js`, transporte simulado y dobles de APIs nativas. Las capturas de `/onat` (320pt) y `/onat-edit?mode=record` (402pt) muestran login, no los controles autenticados. No hay comprobación visual completa ni prueba física Android de notificaciones, OCR, archivos, impresora, TLS, NSD, Wi-Fi Direct o recuperación WAL/SHM.
+
+### Bloqueos de producción todavía abiertos
+
+| Área | Problema real y consecuencia |
+| --- | --- |
+| A30/A32 recuperación | Falta restauración privada asistida con barrera global, drenaje LAN, cierre/reapertura y reconciliación de recibos. Restaurar una copia antigua sin eso puede perder confirmaciones y provocar reenvíos ambiguos; la app no habilita esa sustitución insegura. Legado sin ancla, corrupción doble o pérdida de clave siguen bloqueados conservadoramente. |
+| A31 réplica | El cliente no tiene réplica integral de ventas, movimientos, finanzas o fiscalidad; no actúa como segunda autoridad desconectada. |
+| A33/A34 | No existen multinegocio/multisucursal ni traslados empresariales con recepción parcial y compensaciones. Las áreas actuales no son sucursales. |
+| A35–A38 | No existen módulos operativos de personal/nómina, crédito/abonos, clientes/proveedores ni multidivisa histórica con caja por moneda. Los complementos ONAT no los sustituyen. |
+| A39–A41 | Faltan tickets con identidad histórica por establecimiento, consolidación empresarial local y gestión de aportes/participaciones de inversores. La inversión en inventario existente no es ese módulo. |
+| F02/F08 | No hay paquete de reglas fiscales certificado para cada régimen ni integración automática con nómina/gastos/bancos/multisucursal. Las tasas de prueba no son tasas legales. |
+| Aceptación | Pendientes compilación/instalación y recorridos autenticados Android, dos dispositivos sin internet, interrupción/reinicio, restauración de datos anonimizados y apertura/compartición/impresión reales. |
+
+SQLite permanece **v8**; no se cambia la licencia, contraseñas, cuotas ni identidad de publicación; no se utiliza una base de producción. Se conserva la matriz `lib/offline-acceptance.md` como fuente de pendientes. Este avance corrige fallos concretos, **no concluye todos los módulos solicitados ni certifica producción**.
+
 ## MipyPOS ONAT — integración del 31 de octubre de 2026
 
 Módulo independiente de preparación y control fiscal offline. Acceso en **Más → MipyPOS ONAT**, rutas `/onat` y `/onat-edit`. Conserva el diseño actual, SQLite local, licencias, credenciales e identidad de publicación; sin backend obligatorio, conexión ONAT ni ejecución de pagos.
@@ -27,11 +57,11 @@ La publicación enumera concordancias con Ley181/2025 (presupuesto2026) y Decret
 
 ### Comprobaciones y límites
 
-Última ejecución: **209/209** —85 POS,67 LAN,22 finanzas,35 ONAT—; `npm run validate:pos` incluye ONAT. TypeScript y CSS sin errores, lint0errores/76warnings sin suprimir; formato ejecutado. Expo Doctor20/20, dependencias SDK58 alineadas por parches y árbol resuelto. Artefactos `.expo/*-results.json`. SQLite/transporte/AES usan dobles de prueba; no se actuó sobre una base real.
+Última ejecución: **221/221** —85 POS,67 LAN,22 finanzas,47 ONAT—; `npm run validate:pos` incluye ONAT. TypeScript y CSS sin errores, lint0errores/77warnings sin suprimir; formato ejecutado. Expo Doctor20/20, dependencias SDK58 alineadas por parches y árbol resuelto. Artefactos `.expo/*-results.json`. SQLite/transporte/AES usan dobles de prueba; no se actuó sobre una base real.
 
 No se declara módulo fiscal completo/certificado ni listo para producción: faltan reglas cubanas verificadas para cada régimen, formulas especiales, fechas en días hábiles y feriados, condiciones complejas de exención/bonificación, pérdidas compensables, fraccionamientos legales, restauración privada asistida y aceptación física Android de adjuntos/notificaciones/PDF/impresora/LAN/backup. Falta integración automática con nómina/gastos/bancos y multisucursal porque esas entidades no existen todavía. No hay consolidación fiscal empresarial ni ventas por actividad fiscal/sucursal. La vista previa redirigió a login; revisión visual ONAT autenticada pendiente. Pruebas de generación/compartición de PDF/Excel y notificaciones son nativas pendientes, no se sustituyen por los tests del motor.
 
-Aceptación externa: configurar perfil real; contrastar cada regla con contador/ONAT; comprobar importes con ejemplos legales; recorrer pagos parciales/anulaciones, anticipos y socios; abrir todos los archivos; reinstalar/restaurar datos anonimizados; probar dos Android sin internet y permisos revocados. Los recordatorios deben revisarse/cancelarse al cambiar cumplimiento: no se implementó conciliación automática entre todos los terminales y notificaciones ya programadas.
+Aceptación externa: configurar perfil real; contrastar cada regla con contador/ONAT; comprobar importes con ejemplos legales; recorrer pagos parciales/anulaciones, anticipos y socios; abrir todos los archivos; reinstalar/restaurar datos anonimizados; probar dos Android sin internet y permisos revocados. Los recordatorios cumplidos se concilian localmente al recargar ONAT; no hay conciliación automática en segundo plano entre todos los terminales desconectados.
 
 [![Built with Bilt](https://img.shields.io/endpoint?url=https%3A%2F%2Fapp.bilt.me%2Fapi%2Fbadge)](https://bilt.me)
 

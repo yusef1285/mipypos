@@ -14,7 +14,15 @@ Clasificación:
 
 Los módulos operativos se clasifican A, no V en su conjunto: sus regresiones de lógica están verificadas, pero no se ha instalado ni probado un APK aquí. No se ejecutaron acciones sobre una base de producción. La revisión de rutas, handlers y persistencia es estática, no una prueba visual de todos los controles. El barrido no encontró callbacks vacíos; no prueba su ausencia absoluta.
 
-Evidencia de integración actual: `.expo/pos-regression-results.json`, `.expo/lan-security-results.json`, `.expo/finance-regression-results.json`, `.expo/onat-regression-results.json`: 85 POS + 67 LAN + 22 finanzas + 35 ONAT = **209/209**, sin fallos. Las ejecuciones de 150 y 171 casos son históricas. Los JSON son artefactos locales, no aceptación comercial. SQLite se prueba con `sql.js`, transporte LAN simulado y AES de Node como doble de Expo.
+Evidencia de integración actual: `.expo/pos-regression-results.json`, `.expo/lan-security-results.json`, `.expo/finance-regression-results.json`, `.expo/onat-regression-results.json`: 85 POS + 67 LAN + 22 finanzas + 47 ONAT = **221/221**, sin fallos. Artefactos frescos del 31 de octubre de 2026, 20:27:57–20:28:19 UTC. Las ejecuciones de 150, 171 y 209 casos son históricas. Los JSON son artefactos locales, no aceptación comercial. SQLite se prueba con `sql.js`, transporte LAN simulado y AES de Node como doble de Expo.
+
+## Decisión de salida a producción — NO APROBADA
+
+Se corrigieron tres defectos ONAT con 12 regresiones adicionales: identidad estable del reintento mientras la pantalla permanece montada (sin duplicar una reserva tras respuesta perdida), exportaciones Empresa/Socio con ámbito auditado y compatible con traslados anteriores, y cancelación local de recordatorios cumplidos/anulados al recargar datos autorizados. Pago parcial mantiene alerta; anular pago/constancia no reprograma alertas. Los fallos de cancelación se informan sin invalidar datos confirmados. La conciliación se aplica por terminal al actualizar ONAT, no en segundo plano en clientes desconectados.
+
+TypeScript/CSS sin errores, lint0errores/77warnings; formateador ejecutado. Expo Doctor20/20, dependencias actualizadas y árbol limpio. No se afirma un `format:check` independiente. Capturas320/402pt muestran login: ONAT autenticado no verificado visualmente. No hay APK ni aceptación física Android.
+
+**Bloqueos vigentes:** A30/A32 recuperación/restauración privada segura y reconciliación de recibos; A31 réplica integral; A33–A41 módulos empresariales ausentes; F02 reglas fiscales completas/verificadas y F08 integración empresarial; pruebas Android de SQLite/WAL/SHM, OCR, LAN/TLS/NSD/Direct, adjuntos/notificaciones/PDF/Excel/impresión. No se reclasifica ninguna fila ausente como completa ni se habilita una restauración insegura. README detalla impacto y límites. Este avance no concluye todos los módulos ni certifica producción.
 
 ## MipyPOS ONAT — ampliación fiscal
 
@@ -29,7 +37,7 @@ Evidencia de integración actual: `.expo/pos-regression-results.json`, `.expo/la
 | F07 | Migración/traslado/restauración        | P      | v8 aditiva; traslado completo esquema8 con referencias y cálculo revisados, compatibles5–7 fiscal vacío; copias privadas completas. Restore portable fiscal probado; restaura copia privada asistida sigue pendiente.   |
 | F08 | Integración empresarial                | P      | Automático ventas netas/ajustes/costos vendidos; complementos fiscales gastos/salarios/dividendos. No nómina empresarial/bancos/gastos automáticos, ni multisucursal/consolidación: entidades aún ausentes.             |
 
-Última comprobación ONAT: **209/209** (85 POS +67 LAN +22 finanzas +35 ONAT), TypeScript/CSS sin errores, lint0errores/76warnings. Expo Doctor20/20 y dependencias alineadas. Los artefactos incluyen `.expo/onat-regression-results.json`. Estos resultados no son pruebas físicas. Las capturas de `/onat` y `/onat-edit` muestran login: no se verificó visualmente el módulo autenticado. Referencia legal consultada: Gaceta especial1/2026, Ley113 concordada, alojada en Parlamento oficial; sin tasas preactivadas ni certificación de vigencia individual. Detalle de alcances/pruebas externas en README.
+Última comprobación ONAT: **221/221** (85 POS +67 LAN +22 finanzas +47 ONAT), TypeScript/CSS sin errores, lint0errores/77warnings. Expo Doctor20/20 y dependencias alineadas. Los artefactos incluyen `.expo/onat-regression-results.json`. Estos resultados no son pruebas físicas. Las capturas de `/onat` y `/onat-edit` muestran login: no se verificó visualmente el módulo autenticado. Referencia legal consultada: Gaceta especial1/2026, Ley113 concordada, alojada en Parlamento oficial; sin tasas preactivadas ni certificación de vigencia individual. Detalle de alcances/pruebas externas en README.
 
 ## Matriz de módulos y flujos
 

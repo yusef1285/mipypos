@@ -44,6 +44,10 @@ type HarnessModules = {
   '@/lib/network/pending-store': typeof import('../lib/network/pending-store');
   '@/lib/network/snapshot': typeof import('../lib/network/snapshot');
   '@/lib/network/pending-sale': typeof import('../lib/network/pending-sale');
+  '@/lib/onat-report': typeof import('../lib/onat-report');
+  '@/lib/onat-notifications': typeof import('../lib/onat-notifications');
+  '@/lib/use-finance-command': typeof import('../lib/use-finance-command');
+  '@/lib/use-onat': typeof import('../lib/use-onat');
 };
 
 export function createHarness(overrides: Record<string, unknown> = {}) {

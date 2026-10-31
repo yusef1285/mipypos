@@ -1,5 +1,7 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import type { FiscalRecord } from '@/lib/onat-models';
+import { inactiveFiscalObligationIds } from '@/lib/onat-report';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -36,4 +38,14 @@ export async function scheduleFiscalReminder(id: string, date: Date) {
 }
 export async function cancelFiscalReminder(id: string) {
   await Notifications.cancelScheduledNotificationAsync(`onat-${id}`);
+}
+
+export async function reconcileFiscalReminders(records: FiscalRecord[]) {
+  const inactive = new Set(inactiveFiscalObligationIds(records).map((id) => `onat-${id}`));
+  if (!inactive.size) return;
+  const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+  for (const reminder of scheduled) {
+    if (inactive.has(reminder.identifier))
+      await Notifications.cancelScheduledNotificationAsync(reminder.identifier);
+  }
 }

@@ -8,3 +8,8 @@ export function scheduleFiscalReminder(_id: string, _date: Date): Promise<string
 export function cancelFiscalReminder(_id: string): Promise<void> {
   return Promise.resolve();
 }
+export function reconcileFiscalReminders(
+  _records: import('@/lib/onat-models').FiscalRecord[],
+): Promise<void> {
+  return Promise.resolve();
+}

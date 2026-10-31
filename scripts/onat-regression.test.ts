@@ -22,12 +22,19 @@ import {
 import { canAccess } from '../lib/permissions';
 let passed = 0,
   failed = 0;
+const failures: { name: string; message: string; stack?: string }[] = [];
 before(prepareHarness);
 after(() => {
   mkdirSync('.expo', { recursive: true });
   writeFileSync(
     '.expo/onat-regression-results.json',
-    JSON.stringify({ ranAt: new Date().toISOString(), passed, failed, tests: passed + failed }),
+    JSON.stringify({
+      ranAt: new Date().toISOString(),
+      passed,
+      failed,
+      tests: passed + failed,
+      failures,
+    }),
   );
 });
 function check(name: string, action: () => void | Promise<void>) {
@@ -37,6 +44,11 @@ function check(name: string, action: () => void | Promise<void>) {
       passed++;
     } catch (e) {
       failed++;
+      failures.push({
+        name,
+        message: e instanceof Error ? e.message : String(e),
+        ...(e instanceof Error && e.stack ? { stack: e.stack } : {}),
+      });
       throw e;
     }
   });
@@ -132,7 +144,7 @@ const input = (
   attachment: null,
   attachmentName: '',
 });
-const estimate = (ruleId: string): OnatCommand => ({
+const estimate = (ruleId: string): Extract<OnatCommand, { action: 'estimate' }> => ({
   action: 'estimate',
   commandId: randomUUID(),
   filter,
@@ -608,4 +620,313 @@ check('anular liquidación libera anticipo y conserva ambos snapshots al importa
     assert.equal(record.value.calculation.tax, 88);
   }
   assert.equal(data.records.filter((r) => r.kind === 'void').length, 1);
+});
+
+check(
+  'identidad de reintento conserva UUID hasta confirmación y cambia con contenido nuevo',
+  () => {
+    const h = createHarness();
+    const identity = h.load('@/lib/use-finance-command').createFinanceCommandIdentity();
+    const value = input(null, 'provision');
+    const first = identity.idFor(value);
+    assert.equal(identity.idFor({ ...value }), first);
+    assert.notEqual(identity.idFor({ ...value, amount: 25 }), first);
+    identity.clear();
+    assert.notEqual(identity.idFor(value), first);
+  },
+);
+
+check('formulario fiscal reintenta respuesta perdida sin duplicar reserva', async () => {
+  const f = await fixture();
+  let responseLost = true;
+  const submitted: OnatCommand[] = [];
+  const h = createHarness({
+    react: {
+      useState: (initial: unknown) => [
+        typeof initial === 'function' ? initial() : initial,
+        () => undefined,
+      ],
+      useRef: (current: unknown) => ({ current }),
+      useCallback: (callback: unknown) => callback,
+      useEffect: () => undefined,
+    },
+    '@/lib/app-context': { useApp: () => ({ user: { username: 'admin', role: 'admin' } }) },
+    '@/components/FinanceControls': { financeFailure: (error: Error) => error.message },
+    '@/lib/onat-notifications': { reconcileFiscalReminders: async () => undefined },
+    'expo-haptics': {
+      NotificationFeedbackType: { Success: 'success', Error: 'error' },
+      notificationAsync: async () => undefined,
+    },
+    '@/lib/use-pos-repository': {
+      usePosRepository: () => ({
+        getFiscalData: () => f.db.getFiscalData(filter, 'admin'),
+        executeFiscalCommand: async (command: OnatCommand) => {
+          submitted.push(command);
+          const id = await f.exec(command);
+          if (responseLost) {
+            responseLost = false;
+            throw new Error('Respuesta perdida después de confirmar');
+          }
+          return id;
+        },
+      }),
+    },
+  });
+  const model = h.load('@/lib/use-onat').useOnat(filter);
+  const value = input(null, 'provision');
+  await assert.rejects(
+    model.save({ action: 'record', commandId: randomUUID(), value }),
+    /Respuesta perdida/,
+  );
+  const id = await model.save({ action: 'record', commandId: randomUUID(), value: { ...value } });
+  assert.equal(submitted[0].commandId, submitted[1].commandId);
+  const records = (await f.db.getFiscalData(filter, 'admin')).records.filter(
+    (r) => r.kind === 'provision',
+  );
+  assert.equal(records.length, 1);
+  assert.equal(records[0].id, id);
+});
+
+async function scopeFixture() {
+  const f = await fixture();
+  await f.exec(estimate(f.ruleId));
+  const partnerRule = await f.exec({
+    action: 'rule',
+    commandId: randomUUID(),
+    replacesId: null,
+    value: {
+      ...rule,
+      ruleKey: 'partner-fixture',
+      name: 'Obligación socio de prueba',
+      scope: 'Socio',
+      base: 'Base manual',
+    },
+  });
+  await f.exec({ ...estimate(partnerRule), beneficiary: 'Socio de prueba', manualBase: 1200 });
+  return { ...f, data: await f.db.getFiscalData(filter, 'admin') };
+}
+
+for (const scope of ['Empresa', 'Socio'] as const) {
+  check(`exportación respeta ámbito ${scope} en filas y documento`, async () => {
+    const f = await scopeFixture();
+    const report = f.load('@/lib/onat-report');
+    const rows = report.fiscalExportRows(f.data, filter, scope);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].Ámbito, scope);
+    const html = report.fiscalReportHtml(f.data, filter, scope);
+    assert.equal(html.includes('Obligación socio de prueba'), scope === 'Socio');
+    assert.equal(html.includes('Impuesto sintético'), scope === 'Empresa');
+  });
+}
+
+check('ámbito exportado permanece en traslado y admite exportaciones antiguas', async () => {
+  const f = await scopeFixture();
+  for (const scope of ['Empresa', 'Socio', undefined] as const) {
+    await f.exec({
+      action: 'export',
+      commandId: randomUUID(),
+      filter,
+      format: 'PDF',
+      ...(scope ? { scope } : {}),
+    });
+  }
+  const session = await f.db.openCashSession(0, 'admin');
+  await f.db.closeCashSession(session, {
+    denominations: [],
+    withdrawalCount: 0,
+    transferCount: 0,
+    products: [],
+    adminUsername: 'admin',
+    adminPassword: 'admin123',
+  });
+  const archive = await f.db.createBusinessArchive('admin');
+  const destination = createHarness().load('@/lib/database');
+  await destination.initializeDatabase();
+  await destination.restoreBusinessArchive(archive, 'admin');
+  const data = await destination.getFiscalData(filter, 'admin');
+  const exports = data.records.filter((r) => r.kind === 'export');
+  assert.equal(exports.length, 3);
+  assert.deepEqual(
+    exports
+      .map((r) => ('scope' in r.value ? r.value.scope : undefined))
+      .sort((a, b) => (a ?? '').localeCompare(b ?? '')),
+    ['Empresa', 'Socio', undefined],
+  );
+});
+
+check('reporte excluye anulados y otros contribuyentes y períodos', async () => {
+  const f = await fixture();
+  const obligation = await f.exec(estimate(f.ruleId));
+  const payment = await f.exec({
+    action: 'record',
+    commandId: randomUUID(),
+    value: input(obligation),
+  });
+  await f.exec({
+    action: 'void',
+    commandId: randomUUID(),
+    recordId: payment,
+    reason: 'Comprobante corregido',
+  });
+  const report = f.load('@/lib/onat-report');
+  const data = await f.db.getFiscalData(filter, 'admin');
+  assert.equal(report.fiscalExportRows(data, filter, 'Empresa')[0].Pagado, 0);
+  assert.equal(report.fiscalExportRows(data, { ...filter, taxpayerId: 'other' }).length, 0);
+  assert.equal(
+    report.fiscalExportRows(data, { ...filter, start: '2027-01-01', end: '2027-01-31' }).length,
+    0,
+  );
+  await f.exec({
+    action: 'void',
+    commandId: randomUUID(),
+    recordId: obligation,
+    reason: 'Recalcular obligación',
+  });
+  assert.equal(
+    report.fiscalExportRows(await f.db.getFiscalData(filter, 'admin'), filter).length,
+    0,
+  );
+});
+
+async function reminderFixture(name = rule.name) {
+  const f = await fixture();
+  // No POS sales exist in this fixture. Use a synthetic base yielding 95 in tax.
+  const id = await f.exec({
+    action: 'rule',
+    commandId: randomUUID(),
+    replacesId: null,
+    value: { ...rule, ruleKey: 'reminder-fixture', name, base: 'Base manual' },
+  });
+  const obligation = await f.exec({ ...estimate(id), manualBase: 1100 });
+  const data = await f.db.getFiscalData(filter, 'admin');
+  const record = data.records.find((r) => r.id === obligation);
+  assert.ok(record && 'calculation' in record.value);
+  assert.equal(record.value.calculation.tax, 95);
+  return { ...f, obligation, inactive: f.load('@/lib/onat-report').inactiveFiscalObligationIds };
+}
+
+check('pago parcial mantiene recordatorio y pago completo lo cancela', async () => {
+  const f = await reminderFixture();
+  assert.deepEqual(f.inactive((await f.db.getFiscalData(filter, 'admin')).records), []);
+  await f.exec({
+    action: 'record',
+    commandId: randomUUID(),
+    value: { ...input(f.obligation), amount: 30 },
+  });
+  assert.deepEqual(f.inactive((await f.db.getFiscalData(filter, 'admin')).records), []);
+  await f.exec({
+    action: 'record',
+    commandId: randomUUID(),
+    value: { ...input(f.obligation), amount: 65 },
+  });
+  assert.deepEqual(f.inactive((await f.db.getFiscalData(filter, 'admin')).records), [f.obligation]);
+});
+
+check('constancia cumple declaración jurada y anulación la deja pendiente', async () => {
+  const f = await reminderFixture('Declaración jurada');
+  const declaration = await f.exec({
+    action: 'record',
+    commandId: randomUUID(),
+    value: { ...input(f.obligation, 'declaration'), amount: 0 },
+  });
+  assert.deepEqual(f.inactive((await f.db.getFiscalData(filter, 'admin')).records), [f.obligation]);
+  await f.exec({
+    action: 'void',
+    commandId: randomUUID(),
+    recordId: declaration,
+    reason: 'Corregir constancia',
+  });
+  assert.deepEqual(f.inactive((await f.db.getFiscalData(filter, 'admin')).records), []);
+});
+
+check('constancia sola no cumple impuesto y anular obligación cancela recordatorio', async () => {
+  const f = await reminderFixture();
+  const declaration = await f.exec({
+    action: 'record',
+    commandId: randomUUID(),
+    value: { ...input(f.obligation, 'declaration'), amount: 0 },
+  });
+  assert.deepEqual(f.inactive((await f.db.getFiscalData(filter, 'admin')).records), []);
+  await f.exec({
+    action: 'void',
+    commandId: randomUUID(),
+    recordId: declaration,
+    reason: 'Retirar constancia',
+  });
+  await f.exec({
+    action: 'void',
+    commandId: randomUUID(),
+    recordId: f.obligation,
+    reason: 'Recalcular obligación',
+  });
+  assert.deepEqual(f.inactive((await f.db.getFiscalData(filter, 'admin')).records), [f.obligation]);
+});
+
+check('anular pago completo reabre cumplimiento sin reprogramar alerta', async () => {
+  const f = await reminderFixture();
+  const payment = await f.exec({
+    action: 'record',
+    commandId: randomUUID(),
+    value: { ...input(f.obligation), amount: 95 },
+  });
+  assert.deepEqual(f.inactive((await f.db.getFiscalData(filter, 'admin')).records), [f.obligation]);
+  await f.exec({
+    action: 'void',
+    commandId: randomUUID(),
+    recordId: payment,
+    reason: 'Pago equivocado',
+  });
+  assert.deepEqual(f.inactive((await f.db.getFiscalData(filter, 'admin')).records), []);
+});
+
+check('conciliación cancela solo recordatorios propios cumplidos y es repetible', async () => {
+  const f = await reminderFixture();
+  await f.exec({
+    action: 'record',
+    commandId: randomUUID(),
+    value: { ...input(f.obligation), amount: 95 },
+  });
+  const scheduled = new Set([`onat-${f.obligation}`, 'onat-other', 'other-app-reminder']);
+  const cancelled: string[] = [];
+  const h = createHarness({
+    'expo-notifications': {
+      setNotificationHandler: () => undefined,
+      getAllScheduledNotificationsAsync: async () =>
+        Array.from(scheduled, (identifier) => ({ identifier })),
+      cancelScheduledNotificationAsync: async (id: string) => {
+        cancelled.push(id);
+        scheduled.delete(id);
+      },
+    },
+  });
+  const notifications = h.load('@/lib/onat-notifications');
+  const records = (await f.db.getFiscalData(filter, 'admin')).records;
+  await notifications.reconcileFiscalReminders(records);
+  await notifications.reconcileFiscalReminders(records);
+  assert.deepEqual(cancelled, [`onat-${f.obligation}`]);
+  assert.deepEqual([...scheduled], ['onat-other', 'other-app-reminder']);
+});
+
+check('fallo de cancelación de recordatorio se informa y permite reintento', async () => {
+  const f = await reminderFixture();
+  await f.exec({
+    action: 'record',
+    commandId: randomUUID(),
+    value: { ...input(f.obligation), amount: 95 },
+  });
+  let failing = true;
+  const h = createHarness({
+    'expo-notifications': {
+      setNotificationHandler: () => undefined,
+      getAllScheduledNotificationsAsync: async () => [{ identifier: `onat-${f.obligation}` }],
+      cancelScheduledNotificationAsync: async () => {
+        if (failing) throw new Error('Permiso revocado');
+      },
+    },
+  });
+  const notifications = h.load('@/lib/onat-notifications');
+  const records = (await f.db.getFiscalData(filter, 'admin')).records;
+  await assert.rejects(notifications.reconcileFiscalReminders(records), /Permiso revocado/);
+  failing = false;
+  await notifications.reconcileFiscalReminders(records);
 });

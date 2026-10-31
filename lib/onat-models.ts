@@ -173,6 +173,7 @@ export const onatCommandSchema = z.discriminatedUnion('action', [
       commandId: id,
       filter: fiscalFilterSchema,
       format: z.enum(['PDF', 'Excel', 'Impresión']),
+      scope: z.enum(['Empresa', 'Socio']).optional(),
     })
     .strict(),
 ]);
@@ -221,7 +222,7 @@ export interface FiscalRecord {
     | FiscalRecordInput
     | Obligation
     | { recordId: string; reason: string }
-    | { filter: FiscalFilter; format: string };
+    | { filter: FiscalFilter; format: string; scope?: Obligation['scope'] };
 }
 export interface Obligation {
   ruleId: string;
@@ -289,7 +290,11 @@ export function parseFiscalRecordValue(kind: string, value: unknown): FiscalReco
   if (kind === 'void') return z.object({ recordId: id, reason: required }).strict().parse(value);
   if (kind === 'export')
     return z
-      .object({ filter: fiscalFilterSchema, format: z.enum(['PDF', 'Excel', 'Impresión']) })
+      .object({
+        filter: fiscalFilterSchema,
+        format: z.enum(['PDF', 'Excel', 'Impresión']),
+        scope: z.enum(['Empresa', 'Socio']).optional(),
+      })
       .strict()
       .parse(value);
   const record = recordSchema.parse(value);

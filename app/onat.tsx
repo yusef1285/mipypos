@@ -37,6 +37,8 @@ import { money } from '@/lib/format';
 import type { FinanceGroup } from '@/lib/finance-models';
 
 const sections = ['Resumen', 'Calendario', 'Reglas', 'Registros', 'Simulador'] as const;
+const fulfilled = (o: { value: Obligation; declared: boolean; paid: number }) =>
+  o.value.name === 'Declaración jurada' ? o.declared : o.paid >= o.value.calculation.tax;
 export default function OnatScreen() {
   const { licenseMode } = useApp();
   const [taxpayer, setTaxpayer] = useState('default');
@@ -111,8 +113,6 @@ export default function OnatScreen() {
     .reduce((s, r) => s + (r.value as FiscalRecordInput).amount, 0);
   const available = Math.max(0, provisions - paidToDate);
   const rule = data?.rules.find((r) => r.id === ruleId);
-  const fulfilled = (o: (typeof obligations)[number]) =>
-    o.value.name === 'Declaración jurada' ? o.declared : o.paid >= o.value.calculation.tax;
   const calendarObligations = obligations.filter((o) => o.value.scope === scope);
   const relevant = calendarObligations.filter((o) =>
     ['Vencida', 'Próxima'].includes(fiscalStatus(o.value.due, fulfilled(o))),
@@ -450,8 +450,9 @@ export default function OnatScreen() {
                               commandId: randomUUID(),
                               filter,
                               format,
+                              scope,
                             });
-                            await exportFiscalReport(data, filter, format, licenseMode);
+                            await exportFiscalReport(data, filter, format, licenseMode, scope);
                           })
                         }
                       >
@@ -616,7 +617,6 @@ export default function OnatScreen() {
               void model
                 .save({ action: 'void', commandId: randomUUID(), recordId: voidId, reason })
                 .then(async () => {
-                  await cancelFiscalReminder(voidId);
                   setVoidId('');
                   setReason('');
                   await model.load();
@@ -638,6 +638,11 @@ export default function OnatScreen() {
             isDisabled={actionBusy}
             onPress={() =>
               void run(async () => {
+                const obligation = obligations.find((o) => o.id === reminderId);
+                if (!obligation || fulfilled(obligation))
+                  throw new Error(
+                    'La obligación ya está cumplida o anulada. Actualiza el calendario.',
+                  );
                 const d = new Date(reminderDate);
                 d.setHours(9, 0, 0, 0);
                 await scheduleFiscalReminder(reminderId, d);

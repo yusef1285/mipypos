@@ -224,7 +224,7 @@ export function activeRecords(records: FiscalRecord[]) {
   return records.filter((r) => r.kind !== 'void' && !voided.has(r.id));
 }
 function profileFor(profiles: ProfileVersion[], filter: FiscalFilter) {
-  const p = profiles
+  const selectedProfile = profiles
     .filter(
       (p) => p.value.taxpayerId === filter.taxpayerId && p.value.effectiveFrom <= filter.start,
     )
@@ -232,7 +232,7 @@ function profileFor(profiles: ProfileVersion[], filter: FiscalFilter) {
       (a, b) =>
         b.value.effectiveFrom.localeCompare(a.value.effectiveFrom) || b.date.localeCompare(a.date),
     )[0];
-  if (!p) throw new Error('Configura un perfil vigente al inicio del período.');
+  if (!selectedProfile) throw new Error('Configura un perfil vigente al inicio del período.');
   if (
     profiles.some(
       (p) =>
@@ -242,7 +242,7 @@ function profileFor(profiles: ProfileVersion[], filter: FiscalFilter) {
     )
   )
     throw new Error('El perfil cambió durante el período. Consulta cada tramo por separado.');
-  return p;
+  return selectedProfile;
 }
 async function economyFor(
   db: SQLiteDatabase,
@@ -642,7 +642,11 @@ export async function executeFiscalCommand(db: SQLiteDatabase, raw: OnatCommand,
       } else if (input.action === 'export') {
         profileFor(data.profiles, input.filter);
         taxpayerId = input.filter.taxpayerId;
-        payload = { filter: input.filter, format: input.format };
+        payload = {
+          filter: input.filter,
+          format: input.format,
+          ...(input.scope ? { scope: input.scope } : {}),
+        };
       }
       await db.runAsync(
         'INSERT INTO fiscal_records VALUES(?,?,?,?,?,?)',
