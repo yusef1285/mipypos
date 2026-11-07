@@ -8,6 +8,7 @@ import { RecoveryBackupControls } from '@/components/RecoveryBackupControls';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
 import { LicensePanel } from '@/components/LicensePanel';
+import { ErrorLogPanel } from '@/components/ErrorLogPanel';
 import { getDeviceInfo } from '@/lib/license';
 
 interface DeviceInfo {
@@ -41,6 +42,7 @@ export default function Settings() {
       </Card>
       <RecoveryBackupControls />
       <LanConnection allowHost />
+      <ErrorLogPanel />
       <Button variant="danger-soft" size="lg" onPress={logout}>
         <LogOut className="text-danger" size={19} />
         <Button.Label>Cerrar sesión</Button.Label>

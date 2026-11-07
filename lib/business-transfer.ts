@@ -6,6 +6,7 @@ import * as Sharing from 'expo-sharing';
 import { createBusinessArchive, restoreBusinessArchive } from '@/lib/database';
 import { parseBusinessArchive, type BusinessArchive } from '@/lib/business-archive';
 import { z } from 'zod';
+import { markArchiveShared } from '@/lib/backup-reminder';
 
 const envelopeSchema = z
   .object({
@@ -49,6 +50,7 @@ export async function shareBusinessArchive(username: string) {
     mimeType: 'application/json',
     dialogTitle: 'Enviar negocio cerrado',
   });
+  await markArchiveShared();
   return file.uri;
 }
 export async function pickBusinessArchive(): Promise<BusinessArchive | null> {
