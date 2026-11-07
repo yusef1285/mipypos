@@ -8,6 +8,14 @@ on:
       run_id:
         description: ID de la ejecución de "APK Android"
         required: true
+  # Manual runs need the file on the default branch; until then a push of this
+  # file publishes the APK of RUN_ID below.
+  push:
+    branches: [modulos-empresariales]
+    paths: [.github/workflows/publish-apk.yml]
+
+env:
+  RUN_ID: ${{ inputs.run_id || '42404930800' }}
 
 permissions:
   contents: write
@@ -21,14 +29,14 @@ jobs:
         with:
           name: mipypos-apk
           path: dist
-          run-id: ${{ inputs.run_id }}
+          run-id: ${{ env.RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Crear pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           APK=$(ls dist/*.apk | head -1)
-          SHA=$(gh api repos/${{ github.repository }}/actions/runs/${{ inputs.run_id }} -q .head_sha)
+          SHA=$(gh api repos/${{ github.repository }}/actions/runs/${{ env.RUN_ID }} -q .head_sha)
           TAG="apk-${SHA::7}"
           gh release create "$TAG" "$APK" -R ${{ github.repository }} --target "$SHA" --prerelease \
             --title "MipyPOS – APK de prueba (${SHA::7})" \
