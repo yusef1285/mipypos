@@ -1,5 +1,35 @@
 # MipyPOS Pro Max
 
+## Módulos empresariales v10 — noviembre de 2026
+
+**Avance implementado y probado con regresiones automáticas; no es aprobación de producción.** SQLite pasa de forma aditiva **v9 → v10** (solo `CREATE TABLE IF NOT EXISTS`, sin datos sembrados). El archivo de traslado comercial pasa a **esquema 9** e incluye las tablas nuevas; los archivos de esquema 8 se importan con esas tablas vacías. Las licencias no se modificaron en esta entrega.
+
+### Módulos y pantallas (menú Más)
+
+| Módulo                 | Pantalla               | Quién opera                      | Reglas clave                                                                                                                                                      |
+| ---------------------- | ---------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sucursales             | `app/branches.tsx`     | Administrador (auditor consulta) | Código único, prefijo de ticket, áreas asignadas a sucursal, sucursal del dispositivo                                                                             |
+| Transferencias         | `app/transfers.tsx`    | Administrador y almacenero       | Envío → tránsito → recepción total/parcial; devolución o pérdida con motivo; cancelación solo sin recepciones. Cada paso deja movimientos de inventario trazables |
+| Clientes y proveedores | `app/parties.tsx`      | Administrador (auditor consulta) | Cargos, pagos y anulaciones en libro de solo inserción; límite de crédito; vencidos; el pago no supera el saldo                                                   |
+| Monedas y tasas        | `app/currencies.tsx`   | Administrador                    | Moneda base (CUP por defecto), tasas históricas sin fecha futura; la base no cambia después de usarse                                                             |
+| Nómina                 | `app/payroll.tsx`      | Administrador                    | Borrador → aprobada → pagada / anulada; importes congelados; aporte del empleador configurable                                                                    |
+| Socios                 | `app/partners.tsx`     | Administrador                    | Participaciones activas ≤ 100 %; aportes, retiros y dividendos con anulación por contrapartida                                                                    |
+| Consolidado            | `app/consolidated.tsx` | Administrador y auditor          | Ventas, tickets, inventario, tránsito, saldos, nómina, capital y caja por sucursal y periodo                                                                      |
+
+Todas las mutaciones son comandos idempotentes (`commandId` UUID) que viajan por LAN con el mismo permiso que en local. Los movimientos en efectivo exigen caja abierta y entran en el arqueo (`otherCashNet`); el efectivo en divisas se muestra aparte y no se suma al arqueo en moneda base. Los tickets impresos llevan numeración por sucursal (`PREFIJO-000001`); la restricción Pro de impresión no cambió.
+
+### Límites conocidos
+
+- El inventario en tránsito se valora al `unit_cost` capturado al enviar; puede haber una pequeña desviación frente al costo promedio ponderado posterior.
+- El consolidado agrupa por día calendario local del dispositivo.
+- La nómina no aplica presunciones legales (tablas, topes, retenciones); la tasa de aporte es configurable y debe validarla un contador.
+- No hay réplica LAN completa ni autonomía sin conexión para los clientes; tampoco recuperación cuando se pierde la base original.
+- Sin prueba física en Android/APK de estas pantallas.
+
+### Verificación
+
+`npx tsc --noEmit`, `npm run lint` (0 advertencias), `npm run format:check` y `npm run lint:css` limpios. **332/332** pruebas: 118 POS + 6 seguridad + 77 LAN + 24 finanzas + 47 ONAT + 45 recuperación + 15 empresariales (`scripts/business-regression.test.ts`, resultados en `.expo/business-regression-results.json`).
+
 ## Conciliación de recuperación — continuidad v9
 
 **Avance implementado, no finalización total ni aprobación de producción.** La base existente se actualiza de forma aditiva **v8 → v9**, con copia privada previa y transacción de migración. Se conservan usuarios, hashes, licencias, cuotas y datos comerciales. El formato de traslado empresarial permanece en **esquema8**: el journal privado no se transfiere por LAN ni se incluye en los archivos comerciales.

@@ -83,6 +83,16 @@ function AppStack() {
       <Stack.Screen name="exports" options={{ headerShown: true, title: 'Exportaciones' }} />
       <Stack.Screen name="cash-history" options={{ headerShown: true, title: 'Cierres de caja' }} />
       <Stack.Screen name="settings" options={{ headerShown: true, title: 'Configuración' }} />
+      <Stack.Screen name="branches" options={{ headerShown: true, title: 'Sucursales' }} />
+      <Stack.Screen name="transfers" options={{ headerShown: true, title: 'Transferencias' }} />
+      <Stack.Screen
+        name="parties"
+        options={{ headerShown: true, title: 'Clientes y proveedores' }}
+      />
+      <Stack.Screen name="currencies" options={{ headerShown: true, title: 'Monedas y tasas' }} />
+      <Stack.Screen name="payroll" options={{ headerShown: true, title: 'Nómina' }} />
+      <Stack.Screen name="partners" options={{ headerShown: true, title: 'Socios' }} />
+      <Stack.Screen name="consolidated" options={{ headerShown: true, title: 'Consolidado' }} />
     </Stack>
   );
 }

@@ -500,6 +500,17 @@ export default function Cash() {
             <Typography.Paragraph type="body-sm">
               Efectivo esperado: {money(expectedCash)}
             </Typography.Paragraph>
+            {preview.otherCashNet ? (
+              <Typography.Paragraph type="body-sm" color="muted">
+                Incluye cobros, pagos, nómina y socios en efectivo: {money(preview.otherCashNet)}
+              </Typography.Paragraph>
+            ) : null}
+            {preview.foreignCash.map((row) => (
+              <Typography.Paragraph key={row.currency} type="body-sm" className="text-warning">
+                {row.currency} en caja (no entra en el arqueo):{' '}
+                {row.net.toLocaleString('es-CU', { minimumFractionDigits: 2 })}
+              </Typography.Paragraph>
+            ))}
             <Typography.Paragraph type="body-sm">
               Diferencia de efectivo: {money(cashDifference)}
             </Typography.Paragraph>

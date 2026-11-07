@@ -39,7 +39,7 @@ const methods: Array<{ key: PaymentType; label: string }> = [
 ];
 export default function Sales() {
   const { user, session, licenseMode, refresh, networkConfig } = useApp();
-  const { listProducts, listAreas, listAreaStock, getSale } = usePosRepository();
+  const { listProducts, listAreas, listAreaStock, getSale, getSaleTicket } = usePosRepository();
   const [products, setProducts] = useState<Producto[]>([]);
   const [areas, setAreas] = useState<Area[]>([]);
   const [stocks, setStocks] = useState<AreaStock[]>([]);
@@ -235,8 +235,12 @@ export default function Sales() {
                 onPress: () => {
                   void (async () => {
                     try {
-                      const data = await getSale(id);
-                      if (data) await createThermalTicket(data.sale, data.lines, licenseMode);
+                      const [data, numbering] = await Promise.all([
+                        getSale(id),
+                        getSaleTicket(id).catch(() => null),
+                      ]);
+                      if (data)
+                        await createThermalTicket(data.sale, data.lines, licenseMode, numbering);
                     } catch (failure) {
                       Alert.alert(
                         'No se pudo generar el ticket',

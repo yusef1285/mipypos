@@ -1,5 +1,25 @@
 # MipyPOS — matriz de aceptación offline
 
+## Continuidad actual: módulos empresariales v10
+
+SQLite operativo es **v10**; el formato de traslado comercial es **esquema 9** (los de esquema 8 se aceptan con tablas v10 vacías). La migración v9→v10 es aditiva y se ejecuta antes de reinstalar el journal privado, de modo que las tablas nuevas también quedan registradas para recuperación. Las copias de recuperación v8 y v9 se concilian tratando las tablas v10 como vacías.
+
+| Área                           | Implementado                                                              | Probado automáticamente          | Probado en Android | Requiere validación externa                             |
+| ------------------------------ | ------------------------------------------------------------------------- | -------------------------------- | ------------------ | ------------------------------------------------------- |
+| Sucursales y áreas             | Sí, con sucursal del dispositivo y numeración de tickets por sucursal     | Sí                               | No                 | Formato de ticket con datos del establecimiento         |
+| Transferencias entre áreas     | Sí: envío, tránsito, recepción parcial, devolución, pérdida y cancelación | Sí, incluido stock y movimientos | No                 | Recorrido físico con almacenero                         |
+| Clientes/proveedores y crédito | Sí, libro de solo inserción, límite y vencidos                            | Sí                               | No                 | Política de crédito del negocio                         |
+| Multidivisa                    | Sí, moneda base y tasas históricas; divisas fuera del arqueo base         | Sí                               | No                 | Fuente oficial de tasas                                 |
+| Nómina                         | Sí, flujo con importes congelados y aporte configurable                   | Sí                               | No                 | **Contador**: tasas, retenciones y obligaciones legales |
+| Socios                         | Sí, participaciones ≤ 100 % y anulación por contrapartida                 | Sí                               | No                 | Reglas societarias                                      |
+| Consolidado                    | Sí, por sucursal y periodo (día local)                                    | Sí                               | No                 | Revisión contable de criterios                          |
+
+Supersede la nota de "Pendientes prioritarios" que impedía crear estas pantallas: ahora existen operaciones persistentes, permisos y regresiones. Siguen pendientes la evidencia Android, la réplica LAN integral, la recuperación ante pérdida de la base original y las licencias (aplazadas por decisión del propietario).
+
+### Resultado actual comprobado
+
+**332/332** pruebas (118 POS + 6 seguridad + 77 LAN + 24 finanzas + 47 ONAT + 45 recuperación + 15 empresariales). Tipos, lint (0 advertencias), formato y parser CSS limpios. Sin APK ni prueba física.
+
 ## Continuidad actual: conciliación con journal privado v9
 
 La migración v8→v9 y la restauración con replay registrado están implementadas. Este apartado sustituye las referencias históricas siguientes al bloqueo de **toda** copia divergente; no cambia el estado de los módulos empresariales ausentes ni aprueba producción.
