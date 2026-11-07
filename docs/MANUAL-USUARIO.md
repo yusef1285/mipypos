@@ -2,7 +2,7 @@
 
 ## Primer uso
 
-1. Instala el APK (Android 8 o superior). Si tenías una versión de prueba anterior firmada de otra forma, desinstálala primero.
+1. Instala el APK. Si tenías una versión de prueba anterior firmada de otra forma, desinstálala primero.
 2. Entra con el usuario `admin` y la contraseña inicial que te indicó el vendedor; la app te pedirá cambiarla.
 3. En Inicio aparece la tarjeta **Primeros pasos**: crea usuarios (Más → Usuarios), revisa la moneda base (Más → Monedas y tasas), crea productos y áreas, abre la caja y vende.
 4. Activa la licencia en Más → Configuración → Licencia: copia el **código del dispositivo** si tu licencia va atada al teléfono, pega el texto `MIPY1.…` que te enviaron y pulsa Activar.
