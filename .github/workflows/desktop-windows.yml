@@ -1,0 +1,76 @@
+name: MipyPOS Windows
+
+# Builds the Windows installer (NSIS .exe). The web bundle is exported on Linux
+# (same build verified in CI) and packaged with Electron on a Windows runner.
+on:
+  workflow_dispatch:
+  push:
+    branches: [escritorio-windows, version-1-0]
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Exportar versión web
+        run: CI=1 npx expo export -p web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mipypos-web
+          path: dist
+          retention-days: 3
+
+  windows:
+    needs: web
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: mipypos-web
+          path: dist
+      - name: Instalar dependencias de escritorio
+        working-directory: desktop
+        run: npm ci
+      - name: Pruebas del servidor LAN
+        working-directory: desktop
+        run: node --test test/lan.test.cjs
+      - name: Compilar instalador
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run dist:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mipypos-windows
+          path: desktop/release/*.exe
+          retention-days: 30
+      - name: Publicar pre-release descargable
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="desktop-${GITHUB_SHA::7}"
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" desktop/release/*.exe --prerelease --target "$GITHUB_SHA" \
+            --title "MipyPOS Windows ${GITHUB_REF_NAME} ${GITHUB_SHA::7}" \
+            --notes "Instalador de prueba de MipyPOS para Windows compilado desde ${GITHUB_REF_NAME} (build ${GITHUB_RUN_NUMBER}). Descárgalo en Assets."

@@ -4,6 +4,7 @@ import { Platform } from 'react-native';
 import type { NetworkConfig } from '@/lib/network/types';
 import { getSecret, setSecret, removeSecret } from '@/lib/network/secure-storage';
 import { validateHostPin, validateLanUrl } from '@/lib/network/qr';
+import { supportsSecureLan } from '@/lib/desktop';
 
 const CONFIG_KEY = 'mipypos.network.config';
 const TOKEN_KEY = 'mipypos.network.token';
@@ -70,9 +71,9 @@ export async function loadNetworkConfig(): Promise<NetworkConfig> {
     const pin =
       isRecord(value) && value.mode === 'client' ? ((await getSecret(PIN_KEY)) ?? '') : '';
     const config = normalize(value, pin);
-    if (Platform.OS !== 'android' && config.mode !== 'standalone')
+    if (!supportsSecureLan() && config.mode !== 'standalone')
       config.recoveryMessage =
-        'La conexión segura entre teléfonos solo está disponible en Android. Los datos locales se conservan.';
+        'La conexión segura solo está disponible en Android y en MipyPOS para Windows. Los datos locales se conservan.';
     await AsyncStorage.setItem(CONFIG_KEY, JSON.stringify(publicConfig(config)));
     return config;
   } catch (error) {
@@ -91,8 +92,10 @@ export async function loadNetworkConfig(): Promise<NetworkConfig> {
 }
 export async function saveNetworkConfig(config: NetworkConfig) {
   const normalized = normalize(config, config.hostPin ?? '');
-  if (Platform.OS !== 'android' && normalized.mode !== 'standalone')
-    throw new Error('La conexión segura entre teléfonos solo está disponible en Android.');
+  if (!supportsSecureLan() && normalized.mode !== 'standalone')
+    throw new Error(
+      'La conexión segura solo está disponible en Android y en MipyPOS para Windows.',
+    );
   if (normalized.hostPin) await setSecret(PIN_KEY, normalized.hostPin);
   else await removeSecret(PIN_KEY);
   await AsyncStorage.setItem(CONFIG_KEY, JSON.stringify(publicConfig(normalized)));

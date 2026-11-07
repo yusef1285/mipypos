@@ -51,6 +51,18 @@ Las ventas a crédito o en divisa no admiten ajustes (devolución o descuento) d
 
 Un teléfono administrador actúa como servidor y los demás se conectan escaneando su QR en Configuración → Red local. No hace falta Internet: basta un Wi-Fi o la zona Wi-Fi del teléfono administrador.
 
+También puede ser servidor una computadora con **MipyPOS para Windows** (ver [ESCRITORIO.md](ESCRITORIO.md)).
+
+### Si se corta la conexión
+
+- El teléfono sigue vendiendo: la venta se guarda en el teléfono con un número provisional (T-1, T-2…) y puedes dar un ticket provisional. En Ventas aparece “ventas sin enviar”.
+- Al volver la red se envían solas, o pulsa **Sincronizar ahora**. Nunca se duplican.
+- Se usa el último catálogo recibido (se muestra la fecha); las existencias pueden no reflejar lo vendido en otras terminales.
+- Un usuario que ya entró con conexión en ese teléfono puede entrar sin conexión durante 7 días.
+- Sin conexión no se permiten ventas a crédito ni en divisa. Máximo 300 ventas pendientes por teléfono.
+- Si una venta aparece en rojo (rechazada), usa **Reintentar en la caja actual** o **Descartar**.
+- El administrador no debe cerrar la caja mientras algún teléfono tenga ventas sin enviar.
+
 ## Seguridad
 
 - Si la app pasa más de 2 minutos en segundo plano, se bloquea y pide huella, rostro o el PIN del teléfono. Tras 30 minutos, o si el teléfono no tiene bloqueo de pantalla, se cierra la sesión.

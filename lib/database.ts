@@ -267,9 +267,16 @@ export function getNetworkReplica(cacheKey: string) {
     ),
   );
 }
-export function clearNetworkReplicas() {
+/** Session replicas are discarded on logout; offline catalogs survive until re-pairing. */
+export function clearNetworkReplicas(includeOffline = false) {
   return consistentRead(async () => {
-    await (await getDatabase()).runAsync('DELETE FROM network_replica');
+    await (
+      await getDatabase()
+    ).runAsync(
+      includeOffline
+        ? 'DELETE FROM network_replica'
+        : "DELETE FROM network_replica WHERE cache_key NOT LIKE 'offline:%'",
+    );
   });
 }
 export function storeNetworkReplica(cacheKey: string, payload: string) {
@@ -282,7 +289,10 @@ export function storeNetworkReplica(cacheKey: string, payload: string) {
       now(),
     );
     await db.runAsync(
-      'DELETE FROM network_replica WHERE cache_key NOT IN (SELECT cache_key FROM network_replica ORDER BY confirmed_at DESC LIMIT 16)',
+      "DELETE FROM network_replica WHERE cache_key NOT LIKE 'offline:%' AND cache_key NOT IN (SELECT cache_key FROM network_replica WHERE cache_key NOT LIKE 'offline:%' ORDER BY confirmed_at DESC LIMIT 16)",
+    );
+    await db.runAsync(
+      "DELETE FROM network_replica WHERE cache_key LIKE 'offline:%' AND cache_key NOT IN (SELECT cache_key FROM network_replica WHERE cache_key LIKE 'offline:%' ORDER BY confirmed_at DESC LIMIT 8)",
     );
   });
 }

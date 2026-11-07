@@ -1,4 +1,5 @@
 import { getDirectInfo } from '@/lib/network/direct';
+import { getDesktopBridge } from '@/lib/desktop';
 import {
   DeviceEventEmitter,
   Linking,
@@ -77,6 +78,8 @@ export async function getLocalHotspot(): Promise<HotspotCredentials | null> {
   return bridge().getHotspot();
 }
 export async function getLanHostIp(): Promise<string | null> {
+  const desktop = getDesktopBridge();
+  if (desktop) return desktop.network.getHostIp();
   const direct = await getDirectInfo();
   if (direct?.isOwner) return direct.hostIp;
   if (Platform.OS !== 'android' || !NativeModules.MipyLan) return null;

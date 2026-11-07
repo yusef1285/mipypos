@@ -14,6 +14,8 @@ Expo SDK 58, React Native 0.88, expo-router, heroui-native, zod 4, expo-sqlite. 
 | Red local      | `lib/network/*`                                                                | Host HTTP/TLS en el teléfono admin; `operations.ts` declara módulo y si es mutación; `host.ts` despacha |
 | Repositorio UI | `lib/use-pos-repository.ts`                                                    | Misma API en local y en cliente LAN                                                                     |
 | Nativo Android | `lib/network/native/*.java`, plugin `lib/network/withLocalHotspot.ts`          | El plugin copia los `.java` y registra `MipyLanPackage` en `prebuild`                                   |
+| Escritorio     | `desktop/*.cjs`, `lib/desktop.ts`                                              | Electron sobre la exportación web; `window.mipyDesktop` sustituye a los módulos nativos (ESCRITORIO.md) |
+| Sin conexión   | `lib/network/sale-outbox.ts`, `offline-session.ts`, `client.ts`                | Cola cifrada de ventas, login local 7 días, catálogo `offline:` en `network_replica`                    |
 
 ## Esquema v11
 
@@ -82,3 +84,11 @@ Para cambiar la clave: `keytool -genkeypair -storetype PKCS12 -keystore mipypos-
 
 - Pruebas físicas en dos Android (ver `lib/offline-acceptance.md`) y con impresoras Bluetooth reales.
 - Validación por un contador de nómina, ONAT y tratamiento contable de crédito/divisa.
+
+## Ventas sin conexión en terminales
+
+- `registerPosSale` en modo cliente encola siempre la venta en `sale-outbox` (`createPendingStore('mipypos.saleOutbox.v1')`, cifrado) y luego intenta `syncOutbox`. Devuelve `{ saleId }` si el host confirmó o `{ offline: OutboxSale }` si quedó en cola.
+- `syncOutbox` envía en orden con `registerHostSale` (consulta `/v1/sale-receipt` antes y después), se detiene ante error de red, marca `rejected` ante `HostRejection` y conserva `notCommitted` solo cuando el host confirma que no registró la venta. `retryOutboxSale` asigna un `commandId` nuevo solo a ventas `notCommitted`.
+- El catálogo sin conexión se guarda en `network_replica` con claves `offline:<sha256(autoridad, usuario)>`; `clearNetworkReplicas()` lo conserva y `clearNetworkReplicas(true)` lo borra (cambio de administrador).
+- `offline-session.ts` guarda un verificador PBKDF2 por (pin del host, usuario) en almacenamiento seguro; caduca a los 7 días.
+- Pruebas: `scripts/lan-security.test.ts` (cola, ACK perdido, rechazos, login y catálogo sin conexión) y `desktop/test/lan.test.cjs` (certificado, pin y servidor HTTPS).
