@@ -821,8 +821,18 @@ export async function setSetting(key: string, value: string) {
     );
   });
 }
+// Pro needs the cached mode plus an unexpired date; lib/license.ts refreshes both
+// after verifying the signed license, so expiry applies even before a refresh.
+function proActive(mode: string | null | undefined, expires: string | null | undefined) {
+  if (mode !== 'pro') return false;
+  if (!expires) return true;
+  const end = Date.parse(expires);
+  return Number.isFinite(end) && Date.now() < end;
+}
 export async function getLicenseMode(): Promise<LicenseMode> {
-  return (await getSetting('license_mode')) === 'pro' ? 'pro' : 'demo';
+  return proActive(await getSetting('license_mode'), await getSetting('license_expires_at'))
+    ? 'pro'
+    : 'demo';
 }
 
 export async function getDemoUsage() {
@@ -840,10 +850,11 @@ async function consumeDemoQuota(db: SQLite.SQLiteDatabase, resource: 'sales' | '
     (await db.getFirstAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', key))
       ?.value ?? 0,
   );
-  const mode = (
-    await db.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='license_mode'")
-  )?.value;
-  if (mode !== 'pro' && used >= 5)
+  const setting = async (name: string) =>
+    (await db.getFirstAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', name))
+      ?.value;
+  const pro = proActive(await setting('license_mode'), await setting('license_expires_at'));
+  if (!pro && used >= 5)
     throw new Error(
       resource === 'sales'
         ? 'Has alcanzado las 5 ventas de la demo. Activa una licencia Pro para seguir vendiendo.'

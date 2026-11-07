@@ -18,9 +18,7 @@ import {
   changeOwnPassword,
   getLicenseMode,
   getOpenSession,
-  getSetting,
   initializeDatabase,
-  setSetting,
 } from '@/lib/database';
 import { getPendingWithdrawal } from '@/lib/network/pending-withdrawal';
 import { getPendingOperation } from '@/lib/network/pending-operation';
@@ -37,7 +35,8 @@ import { disconnectDirect, getDirectInfo } from '@/lib/network/direct';
 import { startLanHost, stopLanHostAndDrain } from '@/lib/network/host';
 import { AppState, Platform } from 'react-native';
 import type { NetworkConfig } from '@/lib/network/types';
-import { validateLicenseKey } from '@/lib/license';
+import { activateLicense, refreshLicense, removeLicense } from '@/lib/license';
+import type { LicenseStatus } from '@/lib/license-token';
 import { DEFAULT_ADMIN_PASSWORD } from '@/lib/password';
 import type { LicenseMode, SesionCaja, Usuario } from '@/lib/models';
 
@@ -71,7 +70,9 @@ interface AppContextValue {
   logout: () => void;
   refresh: () => Promise<void>;
   configureNetwork: (config: NetworkConfig) => Promise<void>;
-  setLicense: (mode: LicenseMode, key?: string) => Promise<void>;
+  license: LicenseStatus;
+  /** Activates a signed license, or removes the current one with null. */
+  setLicense: (token: string | null) => Promise<LicenseStatus>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -84,6 +85,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   const [rememberedUsername, setRememberedUsername] = useState('');
   const [session, setSession] = useState<SesionCaja | null>(null);
   const [licenseMode, setLicenseMode] = useState<LicenseMode>('demo');
+  const [license, setLicenseStatus] = useState<LicenseStatus>({ state: 'none' });
   const [revision, setRevision] = useState(0);
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig>({
     mode: 'standalone',
@@ -122,6 +124,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       return;
     }
     setSession(await getOpenSession());
+    setLicenseStatus(await refreshLicense());
     setLicenseMode(await getLicenseMode());
     setRevision((value) => value + 1);
   }, [networkConfig]);
@@ -148,12 +151,10 @@ export function AppProvider({ children }: PropsWithChildren) {
       }
       setRememberedUsername((await AsyncStorage.getItem('mipypos.rememberedUsername')) ?? '');
       setSession(storedNetwork.mode === 'client' ? null : await getOpenSession());
-      const storedMode = await getLicenseMode();
-      const storedKey = await getSetting('license_key');
-      const validPro =
-        storedMode === 'pro' && storedKey ? await validateLicenseKey(storedKey) : false;
-      if (storedMode === 'pro' && !validPro) await setSetting('license_mode', 'demo');
-      setLicenseMode(validPro ? 'pro' : 'demo');
+      // Clients inherit Pro from the host snapshot; host/standalone verify the
+      // signed license locally (signature, device, expiry and clock).
+      if (storedNetwork.mode !== 'client') setLicenseStatus(await refreshLicense());
+      setLicenseMode(await getLicenseMode());
       setReady(true);
     })().catch((failure: unknown) => {
       setBootError(failure instanceof Error ? failure.message : 'No se pudo abrir MipyPOS.');
@@ -297,14 +298,32 @@ export function AppProvider({ children }: PropsWithChildren) {
     },
     [user, networkConfig],
   );
-  const setLicense = useCallback(async (mode: LicenseMode, key?: string) => {
-    if (mode === 'pro') {
-      if (!key || !(await validateLicenseKey(key))) throw new Error('La licencia no es válida.');
-      await setSetting('license_key', key.trim().toUpperCase());
-    }
-    await setSetting('license_mode', mode);
-    setLicenseMode(mode);
+  const setLicense = useCallback(async (token: string | null) => {
+    const status = token === null ? await removeLicense() : await activateLicense(token);
+    setLicenseStatus(status);
+    setLicenseMode(await getLicenseMode());
+    return status;
   }, []);
+
+  // Re-check expiry every minute and whenever the app returns to foreground.
+  useEffect(() => {
+    if (!ready || networkConfig.mode === 'client') return undefined;
+    const check = () =>
+      void refreshLicense()
+        .then(async (status) => {
+          setLicenseStatus(status);
+          setLicenseMode(await getLicenseMode());
+        })
+        .catch(() => undefined);
+    const timer = setInterval(check, 60_000);
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') check();
+    });
+    return () => {
+      clearInterval(timer);
+      subscription.remove();
+    };
+  }, [ready, networkConfig.mode]);
 
   const value = useMemo(
     () => ({
@@ -313,6 +332,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       rememberedUsername,
       session,
       licenseMode,
+      license,
       revision,
       networkConfig,
       hostAddress,
@@ -330,6 +350,7 @@ export function AppProvider({ children }: PropsWithChildren) {
       rememberedUsername,
       session,
       licenseMode,
+      license,
       revision,
       networkConfig,
       hostAddress,
