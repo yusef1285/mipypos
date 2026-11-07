@@ -253,13 +253,7 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
 export async function startLanHost(): Promise<string> {
   if (Platform.OS !== 'android')
     throw new Error('El host local requiere una compilación Android con el servidor LAN.');
-  const db = await DB.getDatabase();
-  const defaultPassword = await DB.hashPassword('admin123');
-  const unsafeAdmin = await db.getFirstAsync<{ id: number }>(
-    "SELECT id FROM users WHERE role='admin' AND password_hash=? LIMIT 1",
-    defaultPassword,
-  );
-  if (unsafeAdmin)
+  if (await DB.hasDefaultAdministratorPassword())
     throw new Error(
       'Cambia la contraseña inicial del administrador en Usuarios antes de iniciar la red local.',
     );

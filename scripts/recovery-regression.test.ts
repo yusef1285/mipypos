@@ -575,7 +575,7 @@ check(
   'conciliación conserva consumo, anulación y efectos únicos en inventario y caja',
   async () => {
     const f = await fixture();
-    const authorization = { username: 'admin', passwordHash: await f.db.hashPassword('admin123') };
+    const authorization = { username: 'admin', password: 'admin123' };
     await f.db.setProductCost(
       { commandId: 'recovery-cost', productId: f.product.id, cost: 40, reason: 'Costo registrado' },
       'admin',
@@ -611,7 +611,7 @@ check(
 );
 check('conciliación conserva costo vendido histórico, devolución y rentabilidad', async () => {
   const f = await fixture();
-  const authorization = { username: 'admin', passwordHash: await f.db.hashPassword('admin123') };
+  const authorization = { username: 'admin', password: 'admin123' };
   await f.db.setProductCost(
     {
       commandId: 'recovery-cost-sale',

@@ -15,7 +15,8 @@
     "test:finance": "tsx --test scripts/finance-regression.test.ts",
     "test:onat": "tsx --test scripts/onat-regression.test.ts",
     "test:recovery": "tsx --test scripts/recovery-regression.test.ts",
-    "validate:pos": "npm run test:pos && npm run test:lan && npm run test:finance && npm run test:onat && npm run test:recovery",
+    "test:security": "tsx --test scripts/security-regression.test.ts",
+    "validate:pos": "npm run test:pos && npm run test:security && npm run test:lan && npm run test:finance && npm run test:onat && npm run test:recovery",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check ."
   },
@@ -24,6 +25,7 @@
     "@expo/config": "^58.0.0",
     "@gorhom/bottom-sheet": "^5.2.9",
     "@hookform/resolvers": "^5.2.2",
+    "@noble/hashes": "^1.8.0",
     "@react-native-async-storage/async-storage": "~2.2.0",
     "@react-native-community/datetimepicker": "9.2.1",
     "@react-navigation/native": "^7.1.8",
@@ -33,7 +35,7 @@
     "class-variance-authority": "~0.7.1",
     "clsx": "~2.1.1",
     "date-fns": "^4.4.0",
-    "expo": "~58.0.22",
+    "expo": "~58.0.23",
     "expo-application": "~58.1.2",
     "expo-blur": "~58.0.5",
     "expo-build-properties": "~58.0.12",
@@ -49,15 +51,15 @@
     "expo-image-manipulator": "~58.0.16",
     "expo-image-picker": "~58.0.10",
     "expo-linear-gradient": "~58.0.3",
-    "expo-linking": "~58.0.15",
+    "expo-linking": "~58.0.16",
     "expo-media-library": "~58.0.13",
     "expo-network": "~58.0.4",
-    "expo-notifications": "~58.1.7",
+    "expo-notifications": "~58.1.8",
     "expo-print": "~58.0.8",
-    "expo-router": "~58.0.29",
+    "expo-router": "~58.0.30",
     "expo-secure-store": "~58.0.2",
-    "expo-sharing": "~58.0.21",
-    "expo-splash-screen": "~58.0.12",
+    "expo-sharing": "~58.0.22",
+    "expo-splash-screen": "~58.0.13",
     "expo-sqlite": "~58.0.15",
     "expo-status-bar": "~58.0.4",
     "expo-system-ui": "~58.0.7",
@@ -73,7 +75,7 @@
     "react-native-maps": "1.29.11",
     "react-native-qrcode-svg": "^6.3.26",
     "react-native-reanimated": "4.7.1",
-    "react-native-safe-area-context": "~5.10.1",
+    "react-native-safe-area-context": "~5.11.1",
     "react-native-screens": "~4.30.0",
     "react-native-svg": "15.16.0",
     "react-native-web": "^0.21.4",
@@ -82,8 +84,8 @@
     "tailwind-merge": "^3.4.0",
     "tailwind-variants": "^3.2.2",
     "uniwind": "^1.13.0",
-    "xlsx": "^0.18.5",
-    "zod": "~4.4.3",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
+    "zod": "~4.6.7",
     "zustand": "~5.0.10"
   },
   "devDependencies": {
@@ -106,7 +108,7 @@
     "workbox-cli": "^7.4.1"
   },
   "engines": {
-    "node": ">=20.19.4"
+    "node": ">=22.13.0"
   },
   "packageManager": "npm@10.9.0"
 }

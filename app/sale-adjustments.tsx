@@ -9,7 +9,6 @@ import { FinanceSelect } from '@/components/FinanceSelect';
 import { useApp } from '@/lib/app-context';
 import { usePosRepository } from '@/lib/use-pos-repository';
 import { useFinanceCommand } from '@/lib/use-finance-command';
-import { hashPassword } from '@/lib/database';
 import { money } from '@/lib/format';
 import type { SaleAdjustmentInput } from '@/lib/finance-models';
 export default function SaleAdjustments() {
@@ -56,7 +55,7 @@ export default function SaleAdjustments() {
         saleId: sale.sale.id,
         kind,
         reason,
-        authorization: { username: user.username, passwordHash: await hashPassword(password) },
+        authorization: { username: user.username, password },
         ...(kind !== 'anulacion' ? { lineId: Number(line) } : {}),
         ...(kind === 'descuento' ? { amount: numeric(amount) } : { quantity: numeric(quantity) }),
       };

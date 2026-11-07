@@ -3,6 +3,7 @@ import { createPendingStore } from '@/lib/network/pending-store';
 import type { OperationRequest, PosOperation } from '@/lib/network/operations';
 import { assertOperationRequest } from '@/lib/network/validation';
 import { validateHostPin } from '@/lib/network/qr';
+import { withoutSecrets } from '@/lib/password';
 
 const KEY = 'mipypos.pending-operation';
 export interface PendingOperation {
@@ -38,7 +39,10 @@ async function parsePendingOperation(stored: string): Promise<PendingOperation> 
     if (!('operation' in value) || !('args' in value)) throw new Error('Formato no válido');
     const request = { ...value, token: 'validation' };
     assertOperationRequest(request);
-    if ((await operationFingerprint(request.operation, request.args)) !== value.fingerprint)
+    if (
+      (await operationFingerprint(request.operation, request.args)) !== value.fingerprint &&
+      (await legacyOperationFingerprint(request.operation, request.args)) !== value.fingerprint
+    )
       throw new Error('El contenido pendiente cambió.');
     return {
       hostUrl: value.hostUrl,
@@ -62,6 +66,13 @@ async function parsePendingOperation(stored: string): Promise<PendingOperation> 
 const store = createPendingStore(KEY, parsePendingOperation, { legacySecure: true });
 export const getPendingOperation = store.get;
 export async function operationFingerprint(operation: string, args: unknown): Promise<string> {
+  return Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    JSON.stringify([operation, withoutSecrets(args)]),
+  );
+}
+// Journals written before v10 fingerprinted the raw arguments.
+function legacyOperationFingerprint(operation: string, args: unknown): Promise<string> {
   return Crypto.digestStringAsync(
     Crypto.CryptoDigestAlgorithm.SHA256,
     JSON.stringify([operation, args]),

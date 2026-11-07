@@ -311,7 +311,9 @@ void test('revision cambia con catálogo/inventario y no crece por replay', asyn
 });
 void test('limita intentos de login sin alterar los hashes existentes', async () => {
   const f = await fixture();
-  const hash = await f.db.hashPassword('admin123');
+  const hash = String(
+    f.database.exec("SELECT password_hash FROM users WHERE username='admin'")[0]?.values[0]?.[0],
+  );
   for (let i = 0; i < 5; i++)
     assert.equal(await f.db.authenticateForLogin('admin', 'incorrecta'), null);
   await assert.rejects(f.db.authenticateForLogin('admin', 'admin123'), /Espera un minuto/);
@@ -478,8 +480,8 @@ void test('ONAT LAN reintenta un perfil confirmado sin duplicarlo', async () => 
 });
 void test('ONAT LAN rechaza consulta sin autorización expresa', async () => {
   const f = await lanFixture();
-  await f.db.saveUser({ username: 'vendedor-fiscal', password: 'abc123', role: 'seller' });
-  await f.client.loginToHost(url, 'vendedor-fiscal', 'abc123');
+  await f.db.saveUser({ username: 'vendedor-fiscal', password: 'abc12345', role: 'seller' });
+  await f.client.loginToHost(url, 'vendedor-fiscal', 'abc12345');
   await assert.rejects(
     f.client.requestHostOperation(
       url,
@@ -496,11 +498,11 @@ void test('ONAT LAN contador autorizado accede; revocación impide nueva lectura
   const f = await lanFixture();
   const id = await f.db.saveUser({
     username: 'contador-fiscal',
-    password: 'abc123',
+    password: 'abc12345',
     role: 'auditor',
   });
   await f.db.setFiscalPermission(id, true, 'admin');
-  await f.client.loginToHost(url, 'contador-fiscal', 'abc123');
+  await f.client.loginToHost(url, 'contador-fiscal', 'abc12345');
   const args: PosArgs<'getFiscalData'> = [
     { taxpayerId: 'default', start: '2026-01-01', end: '2026-01-31' },
     'admin',

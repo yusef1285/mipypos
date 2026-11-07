@@ -59,6 +59,8 @@ export default function Investment() {
   useEffect(() => {
     const timer = setTimeout(() => void load(), 0);
     return () => clearTimeout(timer);
+    // Revision invalidates the external database result even though load does not read it.
+    // eslint-disable-next-line react/exhaustive-effect-dependencies
   }, [load, revision]);
   if (user?.role !== 'admin') return <AccessDenied />;
   const products = data?.products ?? [];

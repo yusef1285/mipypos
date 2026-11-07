@@ -1,7 +1,8 @@
-export interface AuthorizationProof {
-  username: string;
-  passwordHash: string;
-}
+/** The password travels only inside the TLS channel and is verified by the host. */
+export type AuthorizationProof =
+  | { username: string; password: string }
+  /** @deprecated Pre-v10 journals: verifiable only while the account keeps a legacy hash. */
+  | { username: string; passwordHash: string };
 export interface ConsumptionInput {
   commandId: string;
   productId: number;

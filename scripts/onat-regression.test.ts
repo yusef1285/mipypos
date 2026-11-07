@@ -279,7 +279,7 @@ check('no duplica ventas en varios contribuyentes', async () => {
 });
 check('sin permiso fiscal no puede consultar ni mutar', async () => {
   const f = await fixture();
-  await f.db.saveUser({ username: 'vendedor', password: 'abc123', role: 'seller' });
+  await f.db.saveUser({ username: 'vendedor', password: 'abc12345', role: 'seller' });
   await assert.rejects(f.db.getFiscalData(filter, 'vendedor'), /autorización fiscal/);
   await assert.rejects(
     f.db.executeFiscalCommand(estimate(f.ruleId), 'vendedor'),
@@ -290,7 +290,7 @@ check('sin permiso fiscal no puede consultar ni mutar', async () => {
 });
 check('permiso expreso es revocable y auditable', async () => {
   const f = await fixture();
-  const id = await f.db.saveUser({ username: 'contador', password: 'abc123', role: 'auditor' });
+  const id = await f.db.saveUser({ username: 'contador', password: 'abc12345', role: 'auditor' });
   await f.db.setFiscalPermission(id, true, 'admin');
   assert.ok(await f.db.getFiscalData(filter, 'contador'));
   await f.db.setFiscalPermission(id, false, 'admin');

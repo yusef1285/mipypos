@@ -103,6 +103,7 @@ const withLocalHotspot: ConfigPlugin = (config) => {
         'MipyReceiptModule.java',
         'MipyDirectModule.java',
         'MipyDiscoveryModule.java',
+        'MipyPasswordModule.java',
       ])
         writeFileSync(
           join(directory, file),

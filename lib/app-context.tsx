@@ -15,6 +15,7 @@ import {
 
 import {
   authenticateForLogin,
+  changeOwnPassword,
   getLicenseMode,
   getOpenSession,
   getSetting,
@@ -37,9 +38,17 @@ import { startLanHost, stopLanHostAndDrain } from '@/lib/network/host';
 import { AppState, Platform } from 'react-native';
 import type { NetworkConfig } from '@/lib/network/types';
 import { validateLicenseKey } from '@/lib/license';
+import { DEFAULT_ADMIN_PASSWORD } from '@/lib/password';
 import type { LicenseMode, SesionCaja, Usuario } from '@/lib/models';
 
 type AuthenticatedUser = Omit<Usuario, 'password_hash'>;
+
+/** The published initial password never opens a session; it must be replaced first. */
+export class PasswordChangeRequired extends Error {
+  constructor() {
+    super('Por seguridad, cambia la contraseña inicial antes de continuar.');
+  }
+}
 
 type NetworkStatus = 'connected' | 'syncing' | 'offline' | 'pending' | 'error';
 interface AppContextValue {
@@ -53,7 +62,12 @@ interface AppContextValue {
   hostAddress: string;
   networkStatus: NetworkStatus;
   networkError: string;
-  login: (username: string, password: string, remember: boolean) => Promise<void>;
+  login: (
+    username: string,
+    password: string,
+    remember: boolean,
+    newPassword?: string,
+  ) => Promise<void>;
   logout: () => void;
   refresh: () => Promise<void>;
   configureNetwork: (config: NetworkConfig) => Promise<void>;
@@ -197,7 +211,7 @@ export function AppProvider({ children }: PropsWithChildren) {
   }, [networkConfig.mode, user, refresh]);
 
   const login = useCallback(
-    async (username: string, password: string, remember: boolean) => {
+    async (username: string, password: string, remember: boolean, newPassword?: string) => {
       if (
         networkConfig.mode === 'client' &&
         (!networkConfig.hostUrl || networkConfig.recoveryMessage)
@@ -206,9 +220,16 @@ export function AppProvider({ children }: PropsWithChildren) {
           networkConfig.recoveryMessage ??
             'Escanea el QR del administrador antes de iniciar sesión.',
         );
-      const authenticated =
-        networkConfig.mode === 'client' && networkConfig.hostUrl
-          ? await loginToHost(networkConfig.hostUrl, username, password)
+      const remote = networkConfig.mode === 'client' && networkConfig.hostUrl;
+      if (!remote && password === DEFAULT_ADMIN_PASSWORD && !newPassword) {
+        if (!(await authenticateForLogin(username, password)))
+          throw new Error('Usuario o contraseña incorrectos.');
+        throw new PasswordChangeRequired();
+      }
+      const authenticated = remote
+        ? await loginToHost(networkConfig.hostUrl, username, password)
+        : newPassword
+          ? await changeOwnPassword(username, password, newPassword)
           : await authenticateForLogin(username, password);
       if (!authenticated) throw new Error('Usuario o contraseña incorrectos.');
       if (remember)

@@ -18,7 +18,6 @@ import { FinanceSelect } from '@/components/FinanceSelect';
 import { useApp } from '@/lib/app-context';
 import { usePosRepository } from '@/lib/use-pos-repository';
 import { useFinanceCommand } from '@/lib/use-finance-command';
-import { hashPassword } from '@/lib/database';
 import { CONSUMPTION_REASONS, type ConsumptionRecord } from '@/lib/finance-models';
 import { canAccess } from '@/lib/permissions';
 import { money } from '@/lib/format';
@@ -73,6 +72,8 @@ export default function Consumption() {
   useEffect(() => {
     const timer = setTimeout(() => void load(), 0);
     return () => clearTimeout(timer);
+    // Revision invalidates the external database result even though load does not read it.
+    // eslint-disable-next-line react/exhaustive-effect-dependencies
   }, [load, revision]);
   if (!user || !canAccess(user.role, 'consumption')) return <AccessDenied />;
   const rows = (data?.rows ?? []).filter(
@@ -102,7 +103,7 @@ export default function Consumption() {
     setError('');
     try {
       if (!password) throw new Error('Introduce la contraseña del usuario que autoriza.');
-      const authorization = { username: authUser, passwordHash: await hashPassword(password) };
+      const authorization = { username: authUser, password };
       if (action === 'Anular' && selected) {
         const input = { id: selected.id, reason: correction, authorization };
         await cancelConsumption({ ...input, commandId: command.idFor(input) }, user.username);

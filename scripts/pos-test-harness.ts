@@ -33,6 +33,7 @@ type HarnessModules = {
   '@/lib/recovery-reconciliation': typeof import('../lib/recovery-reconciliation');
   '@/lib/database-maintenance': typeof import('../lib/database-maintenance');
   '@/lib/database': typeof import('../lib/database');
+  '@/lib/password': typeof import('../lib/password');
   '@/lib/network/qr': typeof import('../lib/network/qr');
   '@/lib/network/operations': typeof import('../lib/network/operations');
   '@/lib/permissions': typeof import('../lib/permissions');
@@ -238,6 +239,7 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
       digestStringAsync: async (_algorithm: string, input: string) =>
         createHash('sha256').update(input).digest('hex'),
       randomUUID,
+      getRandomBytes: (length: number) => new Uint8Array(randomBytes(length)),
       AESEncryptionKey: TestAesKey,
       AESSealedData: TestSealedData,
       aesEncryptAsync: async (

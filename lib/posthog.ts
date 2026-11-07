@@ -26,8 +26,10 @@ export function initPostHog(): void {
         autocapture: false,
         capture_pageview: false,
         capture_pageleave: false,
-        disable_session_recording: false,
-        session_recording: {},
+        // Screens show sales, cash and fiscal data: never record sessions.
+        disable_session_recording: true,
+        mask_all_text: true,
+        mask_all_element_attributes: true,
       });
     })
     .catch(() => {

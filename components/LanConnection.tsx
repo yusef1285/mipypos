@@ -77,6 +77,8 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       active = false;
       clearInterval(timer);
     };
+    // Restart polling when the host address or mode changes the Wi-Fi Direct session.
+    // eslint-disable-next-line react/exhaustive-effect-dependencies
   }, [hostAddress, networkConfig.mode]);
   const startDirect = async () => {
     try {

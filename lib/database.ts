@@ -2,6 +2,14 @@ import * as Crypto from 'expo-crypto';
 import * as SQLite from 'expo-sqlite';
 import * as Finance from '@/lib/finance';
 import * as Onat from '@/lib/onat';
+import {
+  DEFAULT_ADMIN_PASSWORD,
+  assertNewPassword,
+  createPasswordHash,
+  needsPasswordUpgrade,
+  verifyPassword,
+  withoutSecrets,
+} from '@/lib/password';
 import type { FiscalFilter, OnatCommand } from '@/lib/onat-models';
 import { assertProductNotInDraft } from '@/lib/sale-draft';
 import type {
@@ -408,7 +416,10 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
     if (!importedAdmin) throw new Error('El archivo no contiene un administrador válido.');
     for (const account of tables.users) {
       account.password_hash =
-        account === importedAdmin ? user.password_hash : await hashPassword(Crypto.randomUUID());
+        account === importedAdmin
+          ? user.password_hash
+          : // A random 122-bit secret: nobody can sign in until an administrator resets it.
+            await createPasswordHash(Crypto.randomUUID(), 1);
     }
     for (let index = BUSINESS_TABLES.length - 1; index >= 0; index -= 1)
       await db.execAsync(`DELETE FROM ${BUSINESS_TABLES[index]}`);
@@ -511,8 +522,20 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
   });
 }
 
-export async function hashPassword(password: string) {
-  return Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, `MipyPOS:${password}`);
+/** Salted PBKDF2-SHA256 (see lib/password.ts). */
+export function hashPassword(password: string) {
+  return createPasswordHash(password);
+}
+
+/** True while an administrator still uses the published initial password. */
+export async function hasDefaultAdministratorPassword() {
+  const db = await getDatabase();
+  const admins = await db.getAllAsync<{ password_hash: string }>(
+    "SELECT password_hash FROM users WHERE role='admin'",
+  );
+  for (const admin of admins)
+    if (await verifyPassword(DEFAULT_ADMIN_PASSWORD, admin.password_hash)) return true;
+  return false;
 }
 
 export async function getDatabase() {
@@ -829,8 +852,54 @@ export async function authenticate(username: string, password: string) {
     'SELECT * FROM users WHERE username=? COLLATE NOCASE',
     username.trim(),
   );
-  if (!user || user.password_hash !== (await hashPassword(password))) return null;
+  if (!user || !(await verifyPassword(password, user.password_hash))) return null;
+  if (needsPasswordUpgrade(user.password_hash)) {
+    // Transparent upgrade of legacy unsalted hashes after a verified login.
+    const upgraded = await createPasswordHash(password);
+    const changed = await transaction(db, async () => {
+      const result = await db.runAsync(
+        'UPDATE users SET password_hash=? WHERE id=? AND password_hash=?',
+        upgraded,
+        user.id,
+        user.password_hash,
+      );
+      return result.changes === 1;
+    });
+    if (changed) user.password_hash = upgraded;
+  }
   return user;
+}
+
+/** Mandatory change of the initial password before the first session starts. */
+export async function changeOwnPassword(
+  username: string,
+  currentPassword: string,
+  newPassword: string,
+) {
+  assertNewPassword(newPassword);
+  if (newPassword === currentPassword)
+    throw new Error('La nueva contraseña debe ser distinta de la actual.');
+  const user = await authenticateForLogin(username, currentPassword);
+  if (!user) throw new Error('Usuario o contraseña incorrectos.');
+  const db = await getDatabase();
+  const hash = await createPasswordHash(newPassword);
+  await transaction(db, async () => {
+    const result = await db.runAsync(
+      'UPDATE users SET password_hash=? WHERE id=? AND password_hash=?',
+      hash,
+      user.id,
+      user.password_hash,
+    );
+    if (result.changes !== 1) throw new Error('La cuenta cambió. Inicia sesión nuevamente.');
+    await db.runAsync(
+      'INSERT INTO audit_log(action,username,date,detail) VALUES(?,?,?,?)',
+      'user.password_changed',
+      user.username,
+      now(),
+      json({ userId: user.id, reason: 'initial-password' }),
+    );
+  });
+  return { ...user, password_hash: hash };
 }
 
 // Separate from password hashing: persistent bounded login attempts, serialized with writes.
@@ -1253,8 +1322,7 @@ export async function saveUser(
           if ((administrators?.count ?? 0) <= 1)
             throw new Error('Debe existir al menos un administrador.');
         }
-        if (input.password && input.password.length < 6)
-          throw new Error('La contraseña debe tener al menos 6 caracteres.');
+        if (input.password) assertNewPassword(input.password);
         if (input.password)
           await db.runAsync(
             'UPDATE users SET username=?, password_hash=?, role=? WHERE id=?',
@@ -1272,8 +1340,8 @@ export async function saveUser(
           );
         return input.id;
       }
-      if (!input.password || input.password.length < 6)
-        throw new Error('La contraseña debe tener al menos 6 caracteres.');
+      if (!input.password) throw new Error('La contraseña es obligatoria.');
+      assertNewPassword(input.password);
       const result = await db.runAsync(
         'INSERT INTO users(username,password_hash,role) VALUES(?,?,?)',
         name,
@@ -2683,7 +2751,7 @@ async function runFinanceMutation<T>(
   const db = await getDatabase();
   const fingerprint = await Crypto.digestStringAsync(
     Crypto.CryptoDigestAlgorithm.SHA256,
-    json([username, input]),
+    json([username, withoutSecrets(input)]),
   );
   return transaction(
     db,

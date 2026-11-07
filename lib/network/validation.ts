@@ -29,7 +29,10 @@ const date = z
   .string()
   .max(40)
   .refine((value) => Number.isFinite(Date.parse(value)));
-const proof = z.object({ username: text, passwordHash: z.string().regex(/^[a-f0-9]{64}$/) });
+const proof = z.union([
+  z.object({ username: text, password: z.string().min(1).max(256) }).strict(),
+  z.object({ username: text, passwordHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+]);
 const command = z
   .object({
     commandId: identity,
