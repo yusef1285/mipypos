@@ -10,7 +10,8 @@ import {
   Typography,
   useThemeColor,
 } from 'heroui-native';
-import { Minus, Plus, Trash2 } from 'lucide-react-native';
+import { randomUUID } from 'expo-crypto';
+import { Minus, PauseCircle, Plus, ScanLine, Trash2 } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, FlatList, View } from 'react-native';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
@@ -31,7 +32,19 @@ import { usePosRepository } from '@/lib/use-pos-repository';
 import { createThermalTicket } from '@/lib/ticket';
 import { roundMoney, roundQuantity, validateQuantity } from '@/lib/units';
 import { trackSaleDraft, clearSaleDraft } from '@/lib/sale-draft';
-import { saleUnitPrice } from '@/lib/sale-pricing';
+import { lineUnitPrice, saleUnitPrice } from '@/lib/sale-pricing';
+import { PRODUCT_BARCODES, QrScanner } from '@/components/QrScanner';
+import { FinanceSelect } from '@/components/FinanceSelect';
+import { holdOrder, listHeldOrders, removeHeldOrder, type HeldOrder } from '@/lib/held-orders';
+import type { ProductExtras } from '@/lib/business-models';
+
+type SaleOptions = {
+  baseCurrency: string;
+  extras: ProductExtras[];
+  clients: { id: number; name: string }[];
+  currencies: { code: string; name: string; rate: number }[];
+};
+type Special = 'normal' | 'credit' | 'fx';
 
 const methods: Array<{ key: PaymentType; label: string }> = [
   { key: 'cash', label: 'Efectivo' },
@@ -39,7 +52,29 @@ const methods: Array<{ key: PaymentType; label: string }> = [
 ];
 export default function Sales() {
   const { user, session, licenseMode, refresh, networkConfig } = useApp();
-  const { listProducts, listAreas, listAreaStock, getSale, getSaleTicket } = usePosRepository();
+  const {
+    listProducts,
+    listAreas,
+    listAreaStock,
+    getSale,
+    getSaleTicket,
+    getSaleOptions,
+    executeSaleCommand,
+  } = usePosRepository();
+  const [options, setOptions] = useState<SaleOptions>({
+    baseCurrency: 'CUP',
+    extras: [],
+    clients: [],
+    currencies: [],
+  });
+  const [special, setSpecial] = useState<Special>('normal');
+  const [clientId, setClientId] = useState('');
+  const [fxCode, setFxCode] = useState('');
+  const [fxAmount, setFxAmount] = useState('');
+  const [scanning, setScanning] = useState(false);
+  const [held, setHeld] = useState<HeldOrder[]>([]);
+  const [holdLabel, setHoldLabel] = useState('');
+  const heldOwner = user ? `${networkConfig.clientId}:${user.id}` : '';
   const [products, setProducts] = useState<Producto[]>([]);
   const [areas, setAreas] = useState<Area[]>([]);
   const [stocks, setStocks] = useState<AreaStock[]>([]);
@@ -85,6 +120,10 @@ export default function Sales() {
               areaStock: await listAreaStock(),
             };
       setProducts(data.products);
+      // Optional data: an older host without v11 simply sells without these extras.
+      const saleOptions = await getSaleOptions().catch(() => null);
+      if (saleOptions) setOptions(saleOptions);
+      if (heldOwner) setHeld(await listHeldOrders(heldOwner));
       setAreas(data.areas);
       setStocks(data.areaStock);
       setAreaId((current) =>
@@ -100,7 +139,7 @@ export default function Sales() {
       setLoading(false);
       loadingRef.current = false;
     }
-  }, [user, networkConfig, listProducts, listAreas, listAreaStock]);
+  }, [user, networkConfig, listProducts, listAreas, listAreaStock, getSaleOptions, heldOwner]);
   useEffect(() => {
     // Synchronize with external SQLite/LAN stock through the polling subscription.
     const initialTimer = setTimeout(() => void load(), 0);
@@ -119,12 +158,36 @@ export default function Sales() {
       ),
     [stocks, areaId],
   );
-  const visible = products.filter((product) =>
-    `${product.name} ${product.category}`.toLowerCase().includes(search.toLowerCase()),
+  const tiers = useMemo(
+    () => new Map(options.extras.map((extra) => [extra.product_id, extra])),
+    [options.extras],
   );
+  const byBarcode = useMemo(
+    () =>
+      new Map(
+        options.extras.flatMap((extra) =>
+          extra.barcode ? [[extra.barcode, extra.product_id] as const] : [],
+        ),
+      ),
+    [options.extras],
+  );
+  const term = search.trim().toLowerCase();
+  const visible = products.filter(
+    (product) =>
+      `${product.name} ${product.category}`.toLowerCase().includes(term) ||
+      (term.length >= 4 && tiers.get(product.id)?.barcode === search.trim()),
+  );
+  // Wholesale tiers depend on each line's quantity, so prices are derived here.
+  const priced = cart.map((item) => ({
+    ...item,
+    price: lineUnitPrice(item.product, method, item.quantity, tiers.get(item.product.id)),
+  }));
   const total = roundMoney(
-    cart.reduce((sum, item) => sum + roundMoney(item.price * item.quantity), 0),
+    priced.reduce((sum, item) => sum + roundMoney(item.price * item.quantity), 0),
   );
+  const fx = options.currencies.find((currency) => currency.code === fxCode);
+  const fxValue = Number(fxAmount.replace(',', '.'));
+  const fxBase = fx && Number.isFinite(fxValue) ? roundMoney(fxValue * fx.rate) : 0;
   const cashPart =
     method === 'cash' ? total : method === 'mixed' ? Number(amounts.cash.replace(',', '.')) : 0;
   const tender = Number(cashReceived.replace(',', '.'));
@@ -177,6 +240,42 @@ export default function Sales() {
     );
     setAmounts({ cash: '', transfer: '' });
   };
+  const hold = () => saveHeld(holdLabel);
+  const saveHeld = async (label: string) => {
+    if (!areaId) return;
+    try {
+      await holdOrder({
+        label: label.trim() || `Pedido ${held.length + 1}`,
+        areaId,
+        owner: heldOwner,
+        items: cart.map((item) => ({ productId: item.product.id, quantity: item.quantity })),
+      });
+      setCart([]);
+      setDrafts({});
+      setHoldLabel('');
+      setHeld(await listHeldOrders(heldOwner));
+    } catch (failure) {
+      Alert.alert('No se pudo guardar', failure instanceof Error ? failure.message : '');
+    }
+  };
+  const resume = (order: HeldOrder) => {
+    if (cart.length) {
+      Alert.alert('Carrito ocupado', 'Completa o pon en espera la venta actual primero.');
+      return;
+    }
+    const rows = order.items.flatMap((line) => {
+      const product = products.find((p) => p.id === line.productId);
+      return product
+        ? [{ product, areaId: order.areaId, quantity: line.quantity, price: product.price_cash }]
+        : [];
+    });
+    setAreaId(order.areaId);
+    setCart(rows);
+    setDrafts({});
+    void removeHeldOrder(order.id).then(async () => setHeld(await listHeldOrders(heldOwner)));
+    if (rows.length < order.items.length)
+      Alert.alert('Pedido recuperado', 'Algunos productos ya no existen y se omitieron.');
+  };
   const finish = async () => {
     if (!user || saving) return;
     let committed = false;
@@ -187,6 +286,10 @@ export default function Sales() {
         id = await sendPendingSale(networkConfig, user.username);
       } else {
         if (!session) throw new Error('Abre la caja antes de vender.');
+        if (special === 'credit' && !clientId)
+          throw new Error('Elige el cliente de la venta a crédito.');
+        if (special === 'fx' && (!fx || fxBase + 0.005 < total))
+          throw new Error('El importe en divisa no cubre el total de la venta.');
         cart.forEach((item) => {
           validateQuantity(item.quantity, item.product.quantity_decimals);
           if (item.quantity > (available.get(item.product.id) ?? 0))
@@ -202,13 +305,20 @@ export default function Sales() {
                 : 0,
         }));
         const settlement = {
-          cashReceived: cashPart > 0 ? (cashReceived.trim() ? tender : NaN) : null,
+          cashReceived:
+            cashPart > 0
+              ? special !== 'normal'
+                ? total
+                : cashReceived.trim()
+                  ? tender
+                  : NaN
+              : null,
           transferReceipt: method !== 'cash' ? receipt : null,
         };
         validateSettlement(payments, settlement);
         id = await registerPosSale(
           networkConfig,
-          cart,
+          priced,
           method,
           payments,
           user.username,
@@ -218,6 +328,40 @@ export default function Sales() {
       }
       setPendingSale(false);
       committed = true;
+      let followUp = '';
+      if (!pendingSale && special !== 'normal') {
+        try {
+          if (special === 'credit')
+            await executeSaleCommand(
+              {
+                commandId: randomUUID(),
+                action: 'sale.credit',
+                saleId: id,
+                partyId: Number(clientId),
+              },
+              user.username,
+            );
+          else if (fx)
+            await executeSaleCommand(
+              {
+                commandId: randomUUID(),
+                action: 'sale.fx',
+                saleId: id,
+                currency: fx.code,
+                amount: roundMoney(fxValue),
+              },
+              user.username,
+            );
+          followUp =
+            special === 'credit'
+              ? '\nCargada a la cuenta del cliente.'
+              : `\nCobrado en ${fxCode}. Vuelto: ${money(roundMoney(fxBase - total))}`;
+        } catch (failure) {
+          followUp = `\nAtención: la venta quedó en efectivo. ${failure instanceof Error ? failure.message : ''}`;
+        }
+      }
+      setSpecial('normal');
+      setFxAmount('');
       setCart([]);
       setDrafts({});
       setCashReceived('');
@@ -226,7 +370,7 @@ export default function Sales() {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert(
         'Venta registrada',
-        `Venta #${id}${cashPart > 0 && !pendingSale ? `\nVuelto: ${money(change)}` : ''}`,
+        `Venta #${id}${cashPart > 0 && !pendingSale && !followUp ? `\nVuelto: ${money(change)}` : ''}${followUp}`,
         licenseMode === 'pro'
           ? [
               { text: 'Cerrar' },
@@ -271,7 +415,7 @@ export default function Sales() {
     <View className="gap-5 pt-5">
       <SectionTitle badge={cart.length}>Carrito</SectionTitle>
       {cart.length ? (
-        cart.map((item) => (
+        priced.map((item) => (
           <Animated.View key={item.product.id} entering={FadeIn} exiting={FadeOut}>
             <Card className="gap-3 p-3">
               <Typography.Paragraph className="font-semibold">
@@ -280,6 +424,7 @@ export default function Sales() {
               <Typography.Paragraph type="body-sm" color="muted">
                 {money(item.price)} / {item.product.unit} ·{' '}
                 {money(roundMoney(item.price * item.quantity))}
+                {item.price !== saleUnitPrice(item.product, method) ? ' · precio mayorista' : ''}
               </Typography.Paragraph>
               <View className="flex-row items-center gap-2">
                 <Button
@@ -394,7 +539,7 @@ export default function Sales() {
           }
         />
       ) : null}
-      {method !== 'transfer' ? (
+      {method !== 'transfer' && special === 'normal' ? (
         <>
           <TextField isDisabled={saving || pendingSale}>
             <Label>Efectivo recibido (CUP)</Label>
@@ -414,6 +559,71 @@ export default function Sales() {
           </Typography.Heading>
         </>
       ) : null}
+      {method === 'cash' &&
+      !pendingSale &&
+      (options.clients.length || options.currencies.length) ? (
+        <>
+          <SectionTitle>Cobro especial</SectionTitle>
+          <View className="flex-row flex-wrap gap-2">
+            {(
+              [
+                ['normal', 'Normal'],
+                ...(options.clients.length ? [['credit', 'A crédito'] as const] : []),
+                ...(options.currencies.length ? [['fx', 'En divisa'] as const] : []),
+              ] as const
+            ).map(([key, label]) => (
+              <Chip
+                key={key}
+                disabled={saving}
+                variant={special === key ? 'primary' : 'soft'}
+                onPress={() => setSpecial(key)}
+              >
+                <Chip.Label>{label}</Chip.Label>
+              </Chip>
+            ))}
+          </View>
+          {special === 'credit' ? (
+            <FinanceSelect
+              label="Cliente"
+              value={clientId}
+              onChange={setClientId}
+              options={options.clients.map((client) => ({
+                value: String(client.id),
+                label: client.name,
+              }))}
+            />
+          ) : null}
+          {special === 'fx' ? (
+            <>
+              <FinanceSelect
+                label="Moneda recibida"
+                value={fxCode}
+                onChange={setFxCode}
+                options={options.currencies.map((currency) => ({
+                  value: currency.code,
+                  label: `${currency.code} · tasa ${currency.rate}`,
+                }))}
+              />
+              <TextField isDisabled={saving}>
+                <Label>Importe recibido {fxCode ? `(${fxCode})` : ''}</Label>
+                <Input
+                  keyboardType="decimal-pad"
+                  value={fxAmount}
+                  onChangeText={setFxAmount}
+                  placeholder="0.00"
+                />
+              </TextField>
+              <Typography.Paragraph>
+                {fx && fxBase
+                  ? fxBase + 0.005 < total
+                    ? `Equivale a ${money(fxBase)}: faltan ${money(total - fxBase)}`
+                    : `Equivale a ${money(fxBase)} · vuelto ${money(roundMoney(fxBase - total))} en ${options.baseCurrency}`
+                  : 'Elige la moneda e indica el importe.'}
+              </Typography.Paragraph>
+            </>
+          ) : null}
+        </>
+      ) : null}
       <Typography.Heading type="h2">Total: {money(total)}</Typography.Heading>
       {pendingSale ? (
         <Typography.Paragraph className="text-warning">
@@ -431,6 +641,18 @@ export default function Sales() {
           {saving ? 'Confirmando…' : pendingSale ? 'Confirmar venta pendiente' : 'Completar venta'}
         </Button.Label>
       </Button>
+      {cart.length && !pendingSale && areaId ? (
+        <TextField isDisabled={saving}>
+          <Label>Nombre del pedido en espera</Label>
+          <Input value={holdLabel} onChangeText={setHoldLabel} placeholder="Mesa 3, Juan…" />
+        </TextField>
+      ) : null}
+      {cart.length && !pendingSale && areaId ? (
+        <Button variant="secondary" isDisabled={saving} onPress={() => void hold()}>
+          <PauseCircle size={18} color={accent} />
+          <Button.Label>Poner en espera (mesa o cliente)</Button.Label>
+        </Button>
+      ) : null}
     </View>
   );
   return (
@@ -484,7 +706,58 @@ export default function Sales() {
                 <Button.Label>Vaciar carrito para cambiar de área</Button.Label>
               </Button>
             ) : null}
-            <Input value={search} onChangeText={setSearch} placeholder="Buscar producto" />
+            {held.length ? (
+              <>
+                <SectionTitle badge={held.length}>Pedidos en espera</SectionTitle>
+                <View className="flex-row flex-wrap gap-2">
+                  {held.map((order) => (
+                    <Chip
+                      key={order.id}
+                      disabled={saving || pendingSale}
+                      variant="soft"
+                      onPress={() => resume(order)}
+                    >
+                      <Chip.Label numberOfLines={1}>
+                        {order.label} · {order.items.length}
+                      </Chip.Label>
+                    </Chip>
+                  ))}
+                </View>
+              </>
+            ) : null}
+            <View className="flex-row items-center gap-2">
+              <Input
+                className="min-w-0 flex-1"
+                value={search}
+                onChangeText={setSearch}
+                placeholder="Buscar producto o código"
+              />
+              {byBarcode.size ? (
+                <Button
+                  isIconOnly
+                  variant="secondary"
+                  accessibilityLabel="Escanear código de barras"
+                  onPress={() => setScanning((value) => !value)}
+                >
+                  <ScanLine size={20} color={accent} />
+                </Button>
+              ) : null}
+            </View>
+            {scanning ? (
+              <QrScanner
+                types={PRODUCT_BARCODES}
+                prompt="Permite la cámara para escanear códigos de barras."
+                busyText="Agregando…"
+                repeat
+                onCancel={() => setScanning(false)}
+                onScan={async (code) => {
+                  const product = products.find((p) => p.id === byBarcode.get(code.trim()));
+                  if (!product) throw new Error(`No hay ningún producto con el código ${code}.`);
+                  add(product);
+                  void Haptics.selectionAsync();
+                }}
+              />
+            ) : null}
           </View>
         }
         ListEmptyComponent={
@@ -518,6 +791,9 @@ export default function Sales() {
               <Typography.Paragraph type="body-sm" color="muted">
                 {available.get(product.id) ?? 0} {product.unit} disponibles ·{' '}
                 {money(saleUnitPrice(product, method))} / {product.unit}
+                {tiers.get(product.id)?.wholesale_price != null
+                  ? ` · mayor ${money(tiers.get(product.id)?.wholesale_price ?? 0)} desde ${tiers.get(product.id)?.wholesale_min_qty}`
+                  : ''}
               </Typography.Paragraph>
             </View>
             <Button

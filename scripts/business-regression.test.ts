@@ -916,7 +916,9 @@ check('v11 conteo físico ajusta existencias con motivo y respeta permisos', asy
   await count(start, 'almacen');
   await f.db.saveUser({ username: 'vende', password: 'Vende-1234', role: 'seller' });
   await assert.rejects(count(start, 'vende'), /permiso/);
-  const audit = f.database.exec("SELECT COUNT(*) FROM audit_log WHERE action='business.inventory.count'");
+  const audit = f.database.exec(
+    "SELECT COUNT(*) FROM audit_log WHERE action='business.inventory.count'",
+  );
   assert.equal(audit[0].values[0][0], 3);
 });
 

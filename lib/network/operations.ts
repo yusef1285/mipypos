@@ -8,6 +8,7 @@ export const operationPermissions = {
   getSaleTicket: 'sales',
   executeSaleCommand: 'sales',
   listProductExtras: 'home',
+  getSaleOptions: 'sales',
   getFiscalData: 'onat',
   executeFiscalCommand: 'onat',
   setFiscalPermission: 'users',

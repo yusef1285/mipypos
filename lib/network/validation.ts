@@ -132,6 +132,7 @@ export const operationArgs = {
   getSaleTicket: z.tuple([id]),
   executeSaleCommand: z.tuple([saleCommandSchema, text.optional(), command]),
   listProductExtras: noArgs,
+  getSaleOptions: noArgs,
   getFiscalData: z.tuple([fiscalFilterSchema, text.optional()]),
   executeFiscalCommand: z.tuple([onatCommandSchema, text.optional(), command]),
   setFiscalPermission: z.tuple([id, z.boolean(), text.optional(), command]),
@@ -709,6 +710,13 @@ const businessData = z.object({
     .nullable(),
 });
 
+const productExtrasRow = z.object({
+  product_id: id,
+  barcode: string.nullable(),
+  min_stock: finite.nonnegative(),
+  wholesale_price: finite.nonnegative().nullable(),
+  wholesale_min_qty: finite.positive().nullable(),
+});
 // The mapped annotation checks every registered action against its actual DB return type.
 // Parsing (not a cast) also supplies nullable fields omitted by cost redaction.
 export const operationResultSchemas: { [K in PosOperation]: z.ZodType<PosResult<K>> } = {
@@ -722,15 +730,13 @@ export const operationResultSchemas: { [K in PosOperation]: z.ZodType<PosResult<
   executeBusinessCommand: z.string().min(1).max(128),
   getSaleTicket: z.object({ saleId: id, number: id, label: string, branchName: string }).nullable(),
   executeSaleCommand: z.string().min(1).max(128),
-  listProductExtras: z.array(
-    z.object({
-      product_id: id,
-      barcode: string.nullable(),
-      min_stock: finite.nonnegative(),
-      wholesale_price: finite.nonnegative().nullable(),
-      wholesale_min_qty: finite.positive().nullable(),
-    }),
-  ),
+  listProductExtras: z.array(productExtrasRow),
+  getSaleOptions: z.object({
+    baseCurrency: string,
+    extras: z.array(productExtrasRow),
+    clients: z.array(z.object({ id, name: string })),
+    currencies: z.array(z.object({ code: string, name: string, rate: finite.positive() })),
+  }),
   getFiscalData: fiscalData,
   executeFiscalCommand: z.string().uuid(),
   setFiscalPermission: id,

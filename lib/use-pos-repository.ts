@@ -83,6 +83,7 @@ export function usePosRepository(): Repository {
         Database.executeSaleCommand(input, user?.username ?? '', command),
       ),
       listProductExtras: bind('listProductExtras', Database.listProductExtras),
+      getSaleOptions: bind('getSaleOptions', Database.getSaleOptions),
       getFiscalData: bind('getFiscalData', (filter) =>
         Database.getFiscalData(filter, user?.username ?? ''),
       ),

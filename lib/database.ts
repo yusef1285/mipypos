@@ -2993,6 +2993,29 @@ export async function executeSaleCommand(
     (value) => parseOperationResult('executeSaleCommand', value),
   );
 }
+/** What the point of sale needs beyond the catalog: tiers, barcodes, clients, rates. */
+export async function getSaleOptions() {
+  return consistentRead(async () => {
+    const db = await getDatabase();
+    const base = await Business.baseCurrency(db);
+    const currencies: { code: string; name: string; rate: number }[] = [];
+    for (const row of await db.getAllAsync<{ code: string; name: string }>(
+      'SELECT code,name FROM currencies WHERE code<>? ORDER BY code',
+      base,
+    )) {
+      const rate = await Business.rateFor(db, row.code).catch(() => null);
+      if (rate) currencies.push({ ...row, rate });
+    }
+    return {
+      baseCurrency: base,
+      extras: await Business.listProductExtras(db),
+      clients: await db.getAllAsync<{ id: number; name: string }>(
+        "SELECT id,name FROM parties WHERE active=1 AND kind IN ('client','both') ORDER BY name",
+      ),
+      currencies,
+    };
+  });
+}
 export async function listProductExtras() {
   return Business.listProductExtras(await getDatabase());
 }

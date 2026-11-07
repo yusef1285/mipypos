@@ -128,6 +128,8 @@ async function handleOperation(request: OperationRequest, user: Usuario): Promis
       return DB.executeSaleCommand(request.args[0], user.username, command);
     case 'listProductExtras':
       return DB.listProductExtras();
+    case 'getSaleOptions':
+      return DB.getSaleOptions();
     case 'getFiscalData':
       return DB.getFiscalData(request.args[0], user.username);
     case 'executeFiscalCommand':
