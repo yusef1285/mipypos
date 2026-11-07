@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createHarness, prepareHarness } from './pos-test-harness';
 import type { BusinessCommand } from '../lib/business-models';
-import { BUSINESS_V10_TABLES } from '../lib/business-schema';
+import { BUSINESS_V10_TABLES, BUSINESS_V11_TABLES } from '../lib/business-schema';
 import type { CartItem } from '../lib/models';
 import { canAccess } from '../lib/permissions';
 
@@ -95,8 +95,8 @@ async function sell(f: Fixture, areaId: number, quantity = 1) {
 
 check('migraci처n v10 crea las tablas empresariales con protecci처n de historial', async () => {
   const f = await fixture();
-  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 10);
-  for (const table of BUSINESS_V10_TABLES) {
+  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 11);
+  for (const table of [...BUSINESS_V10_TABLES, ...BUSINESS_V11_TABLES]) {
     const triggers = f.database.exec(
       `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='${table}' AND name LIKE 'recovery_capture_%'`,
     )[0].values[0][0];
@@ -104,17 +104,18 @@ check('migraci처n v10 crea las tablas empresariales con protecci처n de historial
   }
   // Re-running the migration is idempotent.
   await f.db.initializeDatabase();
-  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 10);
+  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 11);
 });
 
 check('base v9 existente migra a v10 sin perder datos', async () => {
   const f = await fixture();
   await f.db.openCashSession(100, 'admin');
   await sell(f, f.warehouse.id);
-  for (const table of [...BUSINESS_V10_TABLES].toReversed()) f.database.run(`DROP TABLE ${table}`);
+  for (const table of [...BUSINESS_V10_TABLES, ...BUSINESS_V11_TABLES].toReversed())
+    f.database.run(`DROP TABLE ${table}`);
   f.database.run('PRAGMA user_version=9');
   await f.db.initializeDatabase();
-  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 10);
+  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 11);
   assert.equal(f.database.exec('SELECT COUNT(*) FROM sales')[0].values[0][0], 1);
   assert.equal(f.database.exec('SELECT COUNT(*) FROM sale_tickets')[0].values[0][0], 0);
   assert.equal(
@@ -845,7 +846,7 @@ check('archivo de traslado v9 lleva los m처dulos y se importa en un destino vac�
     adminPassword: 'admin123',
   });
   const archive = await f.db.createBusinessArchive('admin');
-  assert.equal(archive.schemaVersion, 9);
+  assert.equal(archive.schemaVersion, 10);
   assert.equal(archive.tables.party_ledger.length, 2);
   assert.equal(archive.tables.sale_tickets.length, 1);
   const target = createHarness();

@@ -21,12 +21,18 @@ export const BUSINESS_V10_TABLES = [
   'cash_entries',
 ] as const;
 
+// v11: product extras (barcode, minimum stock, wholesale tier), credit sales and
+// foreign-currency tenders. Same rule as v10: new tables only, created empty.
+export const BUSINESS_V11_TABLES = ['product_extras', 'sale_credits', 'sale_fx'] as const;
+
 const APPEND_ONLY = [
   'party_ledger',
   'exchange_rates',
   'payroll_lines',
   'partner_movements',
   'cash_entries',
+  'sale_credits',
+  'sale_fx',
 ] as const;
 
 export async function migrateBusiness(db: SQLiteDatabase) {
@@ -217,6 +223,36 @@ export async function migrateBusiness(db: SQLiteDatabase) {
       date TEXT NOT NULL,
       CHECK((kind='reversal')=(reverses_id IS NOT NULL))
     );
+    CREATE TABLE IF NOT EXISTS product_extras (
+      product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+      barcode TEXT UNIQUE CHECK(barcode IS NULL OR (length(barcode) BETWEEN 4 AND 64 AND barcode NOT GLOB '*[^0-9A-Za-z.-]*')),
+      min_stock REAL NOT NULL DEFAULT 0 CHECK(min_stock>=0),
+      wholesale_price REAL CHECK(wholesale_price IS NULL OR wholesale_price>=0),
+      wholesale_min_qty REAL CHECK(wholesale_min_qty IS NULL OR wholesale_min_qty>0),
+      CHECK((wholesale_price IS NULL)=(wholesale_min_qty IS NULL))
+    );
+    CREATE TABLE IF NOT EXISTS sale_credits (
+      sale_id INTEGER PRIMARY KEY REFERENCES sales(id),
+      party_id INTEGER NOT NULL REFERENCES parties(id),
+      ledger_id TEXT NOT NULL UNIQUE REFERENCES party_ledger(id),
+      session_id INTEGER NOT NULL REFERENCES cash_sessions(id),
+      amount REAL NOT NULL CHECK(amount>0),
+      username TEXT NOT NULL,
+      date TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS sale_credits_session ON sale_credits(session_id);
+    CREATE TABLE IF NOT EXISTS sale_fx (
+      sale_id INTEGER PRIMARY KEY REFERENCES sales(id),
+      session_id INTEGER NOT NULL REFERENCES cash_sessions(id),
+      currency TEXT NOT NULL,
+      amount REAL NOT NULL CHECK(amount>0),
+      rate REAL NOT NULL CHECK(rate>0),
+      base_amount REAL NOT NULL CHECK(base_amount>0),
+      change_base REAL NOT NULL CHECK(change_base>=0),
+      username TEXT NOT NULL,
+      date TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS sale_fx_session ON sale_fx(session_id);
     CREATE TRIGGER IF NOT EXISTS sale_tickets_no_update BEFORE UPDATE ON sale_tickets
       BEGIN SELECT RAISE(ABORT,'La numeración de tickets no se modifica.'); END;
     CREATE TRIGGER IF NOT EXISTS payroll_runs_frozen_amounts BEFORE UPDATE OF
@@ -239,7 +275,7 @@ export async function migrateBusiness(db: SQLiteDatabase) {
       CREATE TRIGGER IF NOT EXISTS ${table}_no_delete BEFORE DELETE ON ${table}
         BEGIN SELECT RAISE(ABORT,'Este registro es inalterable. Registra una reversión.'); END;`);
   // Shared rows invalidate LAN catalog caches exactly like the v9 tables.
-  for (const table of BUSINESS_V10_TABLES) {
+  for (const table of [...BUSINESS_V10_TABLES, ...BUSINESS_V11_TABLES]) {
     const fields = await db.getAllAsync<{ name: string }>(`PRAGMA table_info(${table})`);
     const changed = fields.map((f) => `OLD."${f.name}" IS NOT NEW."${f.name}"`).join(' OR ');
     for (const event of ['INSERT', 'DELETE', 'UPDATE'] as const)

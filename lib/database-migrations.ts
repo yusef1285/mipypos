@@ -4,7 +4,7 @@ import * as Crypto from 'expo-crypto';
 import { migrateBusiness } from '@/lib/business-schema';
 import { assertRecoveryJournalAvailable, installRecoveryJournal } from '@/lib/recovery-journal';
 
-export const DATABASE_VERSION = 10;
+export const DATABASE_VERSION = 11;
 
 // The SQLite backup API includes committed WAL pages. Copies stay in the private
 // database directory; never export this credential-bearing recovery database.

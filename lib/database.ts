@@ -362,7 +362,7 @@ export async function createBusinessArchive(username: string): Promise<BusinessA
       app: 'MipyPOS',
       format: 'business-close',
       version: 2,
-      schemaVersion: 9,
+      schemaVersion: 10,
       archiveId: Crypto.randomUUID(),
       createdAt: now(),
       sourceUser: username,
@@ -1220,8 +1220,8 @@ export async function restorePrivateRecoveryBackup(
         await installRecoveryJournal(candidate!);
         await candidate!.execAsync(`PRAGMA user_version=${DATABASE_VERSION}`);
       });
-    } else if (backup.schemaVersion === 9) {
-      // v10 only adds empty business tables: the verified journal prefix is kept.
+    } else if (backup.schemaVersion === 9 || backup.schemaVersion === 10) {
+      // v10 and v11 only add empty business tables: the verified journal prefix is kept.
       await candidate.withTransactionAsync(async () => {
         await assertRecoveryJournalAvailable(candidate!);
         await migrateBusiness(candidate!);

@@ -47,6 +47,7 @@ export async function inspectRecoverySnapshot(
   if (
     copy.schemaVersion !== 8 &&
     copy.schemaVersion !== 9 &&
+    copy.schemaVersion !== 10 &&
     copy.schemaVersion !== DATABASE_VERSION
   )
     throw new Error('Esta copia necesita revisión de compatibilidad antes de recuperarla.');

@@ -251,7 +251,7 @@ check('migraciones fiscales y v9 aditivas e idempotentes', async () => {
   const d = await f.db.getDatabase();
   assert.equal(
     (await d.getFirstAsync<{ user_version: number }>('PRAGMA user_version'))?.user_version,
-    10,
+    11,
   );
   assert.equal((await f.db.getFiscalData(filter, 'admin')).profiles.length, 1);
 });
@@ -461,7 +461,7 @@ check('traslado v8 preserva datos fiscales y adjuntos sin credenciales', async (
     adminPassword: 'admin123',
   });
   const archive = await f.db.createBusinessArchive('admin');
-  assert.equal(archive.schemaVersion, 9);
+  assert.equal(archive.schemaVersion, 10);
   assert.equal('password_hash' in archive.tables.users[0], false);
   const snapshot = archive.tables.fiscal_records.find((r) => r.kind === 'obligation');
   assert.ok(snapshot && typeof snapshot.payload === 'string');
