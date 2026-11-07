@@ -20,6 +20,7 @@ import { Choice, FinanceField, FinanceStatus } from '@/components/FinanceControl
 import { FinanceSelect } from '@/components/FinanceSelect';
 import { EmptyState, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
+import { IsoDateField } from '@/components/IsoDateField';
 import { useApp } from '@/lib/app-context';
 import type { Employee, PaymentMethod, PayrollRun } from '@/lib/business-models';
 import { canAccess } from '@/lib/permissions';
@@ -126,7 +127,7 @@ export default function Payroll() {
               }))
             }
           />
-          <FinanceField label="Alta (AAAA-MM-DD)" value={emp.start} onChange={set('start')} />
+          <IsoDateField label="Alta" value={emp.start} onChange={set('start')} />
           <View className="flex-row gap-2">
             <Button
               className="flex-1"
@@ -225,16 +226,8 @@ export default function Payroll() {
           {admin && active.length ? (
             creating ? (
               <FormCard title="Preparar nómina">
-                <FinanceField
-                  label="Desde (AAAA-MM-DD)"
-                  value={periodStart}
-                  onChange={setPeriodStart}
-                />
-                <FinanceField
-                  label="Hasta (AAAA-MM-DD)"
-                  value={periodEnd}
-                  onChange={setPeriodEnd}
-                />
+                <IsoDateField label="Desde" value={periodStart} onChange={setPeriodStart} />
+                <IsoDateField label="Hasta" value={periodEnd} onChange={setPeriodEnd} />
                 <FinanceField
                   label="Aporte del empleador (%)"
                   decimal

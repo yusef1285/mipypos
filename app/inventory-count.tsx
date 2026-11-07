@@ -27,6 +27,7 @@ export default function InventoryCount() {
   const [search, setSearch] = useState('');
   const [reason, setReason] = useState('Conteo físico');
   const [busy, setBusy] = useState(false);
+  const [limit, setLimit] = useState(80);
   const load = useCallback(async () => {
     try {
       const [a, s, p] = await Promise.all([listAreas(), listAreaStock(), listProducts('')]);
@@ -90,7 +91,7 @@ export default function InventoryCount() {
         <>
           <Input value={search} onChangeText={setSearch} placeholder="Buscar producto" />
           {visible.length ? (
-            visible.map((product) => {
+            visible.slice(0, limit).map((product) => {
               const value = counted[product.id] ?? '';
               const diff = value.trim() ? numeric(value) - system(product.id) : 0;
               return (
@@ -119,6 +120,11 @@ export default function InventoryCount() {
           ) : (
             <EmptyState title="No hay productos" />
           )}
+          {visible.length > limit ? (
+            <Button variant="secondary" onPress={() => setLimit((value) => value + 80)}>
+              <Button.Label>Mostrar más ({visible.length - limit} restantes)</Button.Label>
+            </Button>
+          ) : null}
           <FinanceField label="Motivo" value={reason} onChange={setReason} />
           <Button isDisabled={busy || !lines.length} onPress={() => void submit()}>
             <Button.Label>

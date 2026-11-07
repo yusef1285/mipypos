@@ -63,6 +63,7 @@ export default function Products() {
   const [extras, setExtras] = useState<ProductExtras[]>([]);
   const [scanning, setScanning] = useState(false);
   const [onlyLow, setOnlyLow] = useState(false);
+  const [limit, setLimit] = useState(80);
   const extraOf = useMemo(() => new Map(extras.map((e) => [e.product_id, e])), [extras]);
   const [products, setProducts] = useState<Producto[]>([]);
   const [search, setSearch] = useState('');
@@ -93,7 +94,9 @@ export default function Products() {
   const term = search.trim();
   const byCode =
     term.length >= 4 ? products.filter((p) => extraOf.get(p.id)?.barcode === term) : [];
-  const shown = onlyLow ? low : products;
+  const list = byCode.length ? byCode : onlyLow ? low : products;
+  // Rendering thousands of cards at once freezes low-end phones; show them in pages.
+  const shown = list.slice(0, limit);
   const edit = (p: Producto) => {
     setEditing(p.id);
     setForm({
@@ -440,8 +443,8 @@ export default function Products() {
       <Chip variant={onlyLow ? 'primary' : 'soft'} onPress={() => setOnlyLow((value) => !value)}>
         <Chip.Label>Por reponer ({low.length})</Chip.Label>
       </Chip>
-      {(byCode.length ? byCode : shown).length ? (
-        (byCode.length ? byCode : shown).map((product) => (
+      {shown.length ? (
+        shown.map((product) => (
           <Card key={product.id} className="flex-row items-center gap-3 p-3">
             {product.image_path ? (
               <Image
@@ -481,6 +484,11 @@ export default function Products() {
       ) : (
         <EmptyState title="No hay productos" />
       )}
+      {list.length > shown.length ? (
+        <Button variant="secondary" onPress={() => setLimit((value) => value + 80)}>
+          <Button.Label>Mostrar más ({list.length - shown.length} restantes)</Button.Label>
+        </Button>
+      ) : null}
     </Screen>
   );
 }

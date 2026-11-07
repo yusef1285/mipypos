@@ -5,9 +5,10 @@ import { View } from 'react-native';
 
 import { AccessDenied } from '@/components/AccessDenied';
 import { Row, amount, monthStartIso, todayIso, useBusinessData } from '@/components/BusinessKit';
-import { FinanceField, FinanceStatus } from '@/components/FinanceControls';
+import { FinanceStatus } from '@/components/FinanceControls';
 import { EmptyState, MetricCard, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
+import { IsoDateField } from '@/components/IsoDateField';
 import { useApp } from '@/lib/app-context';
 import { canAccess } from '@/lib/permissions';
 
@@ -27,10 +28,10 @@ export default function Consolidated() {
       <Card className="gap-3 p-4">
         <View className="flex-row gap-2">
           <View className="flex-1">
-            <FinanceField label="Desde (AAAA-MM-DD)" value={start} onChange={setStart} />
+            <IsoDateField label="Desde" value={start} onChange={setStart} />
           </View>
           <View className="flex-1">
-            <FinanceField label="Hasta (AAAA-MM-DD)" value={end} onChange={setEnd} />
+            <IsoDateField label="Hasta" value={end} onChange={setEnd} />
           </View>
         </View>
         <Typography.Paragraph type="body-sm" color="muted">

@@ -9,7 +9,6 @@ import {
   amount,
   parseAmount,
   quantityText,
-  todayIso,
   useBusinessCommand,
   useBusinessData,
 } from '@/components/BusinessKit';
@@ -17,6 +16,7 @@ import { FinanceField } from '@/components/FinanceControls';
 import { FinanceSelect } from '@/components/FinanceSelect';
 import { EmptyState } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
+import { IsoDateField } from '@/components/IsoDateField';
 import { useApp } from '@/lib/app-context';
 import type { Producto } from '@/lib/models';
 import { usePosRepository } from '@/lib/use-pos-repository';
@@ -158,11 +158,7 @@ export default function Purchases() {
           </View>
           <FinanceField label="Factura o comprobante" value={reference} onChange={setReference} />
           {payment === 'credit' ? (
-            <FinanceField
-              label={`Vence (AAAA-MM-DD, opcional; hoy ${todayIso()})`}
-              value={dueDate}
-              onChange={setDueDate}
-            />
+            <IsoDateField optional label="Vence" value={dueDate} onChange={setDueDate} />
           ) : null}
           <Button
             isDisabled={busy || !lines.length || !supplier || !area}

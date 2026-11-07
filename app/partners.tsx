@@ -19,6 +19,7 @@ import { Choice, FinanceField, FinanceStatus } from '@/components/FinanceControl
 import { FinanceSelect } from '@/components/FinanceSelect';
 import { EmptyState, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
+import { IsoDateField } from '@/components/IsoDateField';
 import { useApp } from '@/lib/app-context';
 import type { Partner, PartnerMovement, PaymentMethod } from '@/lib/business-models';
 import { shortDate } from '@/lib/format';
@@ -101,7 +102,7 @@ export default function Partners() {
           <FinanceField label="Nombre" value={name} onChange={setName} />
           <FinanceField label="CI" value={doc} onChange={setDoc} />
           <FinanceField label="Participación (%)" decimal value={share} onChange={setShare} />
-          <FinanceField label="Ingreso (AAAA-MM-DD)" value={joined} onChange={setJoined} />
+          <IsoDateField label="Ingreso" value={joined} onChange={setJoined} />
           <View className="flex-row gap-2">
             <Button
               className="flex-1"
