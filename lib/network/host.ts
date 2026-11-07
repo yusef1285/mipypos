@@ -22,7 +22,7 @@ import {
 } from '@/lib/network/operations';
 import { operationFingerprint } from '@/lib/network/pending-operation';
 import { redactCosts } from '@/lib/finance-privacy';
-import { saleUnitPrice } from '@/lib/sale-pricing';
+import { lineUnitPrice } from '@/lib/sale-pricing';
 import { saleFingerprint } from '@/lib/sale-identity';
 import { assertOperationRequest, assertSaleCommand, ProtocolError } from '@/lib/network/validation';
 import { canAccess, type ModuleKey } from '@/lib/permissions';
@@ -124,6 +124,10 @@ async function handleOperation(request: OperationRequest, user: Usuario): Promis
       return DB.executeBusinessCommand(request.args[0], user.username, command);
     case 'getSaleTicket':
       return DB.getSaleTicket(request.args[0]);
+    case 'executeSaleCommand':
+      return DB.executeSaleCommand(request.args[0], user.username, command);
+    case 'listProductExtras':
+      return DB.listProductExtras();
     case 'getFiscalData':
       return DB.getFiscalData(request.args[0], user.username);
     case 'executeFiscalCommand':
@@ -234,6 +238,7 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
     );
   if (!Number.isInteger(command.sessionId)) throw new Error('Actualiza la caja antes de vender.');
   const byId = new Map((await DB.listProducts()).map((product) => [product.id, product]));
+  const tiers = new Map((await DB.listProductExtras()).map((tier) => [tier.product_id, tier]));
   const items: CartItem[] = command.items.map((input) => {
     const product = byId.get(input.productId);
     if (!product) throw new Error('Uno de los productos ya no existe.');
@@ -241,7 +246,7 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
       product,
       areaId: input.areaId,
       quantity: input.quantity,
-      price: saleUnitPrice(product, command.method),
+      price: lineUnitPrice(product, command.method, input.quantity, tiers.get(product.id)),
     };
   });
   return DB.registerSale(

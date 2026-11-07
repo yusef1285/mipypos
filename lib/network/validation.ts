@@ -7,7 +7,11 @@ import {
   storedObligationSchema,
   parseFiscalRecord,
 } from '@/lib/onat-models';
-import { businessCommandSchema, businessFilterSchema } from '@/lib/business-models';
+import {
+  businessCommandSchema,
+  businessFilterSchema,
+  saleCommandSchema,
+} from '@/lib/business-models';
 import { snapshotSchema } from '@/lib/network/snapshot';
 import {
   operationPermissions,
@@ -126,6 +130,8 @@ export const operationArgs = {
   getTransferData: actorRead,
   executeBusinessCommand: z.tuple([businessCommandSchema, text.optional(), command]),
   getSaleTicket: z.tuple([id]),
+  executeSaleCommand: z.tuple([saleCommandSchema, text.optional(), command]),
+  listProductExtras: noArgs,
   getFiscalData: z.tuple([fiscalFilterSchema, text.optional()]),
   executeFiscalCommand: z.tuple([onatCommandSchema, text.optional(), command]),
   setFiscalPermission: z.tuple([id, z.boolean(), text.optional(), command]),
@@ -715,6 +721,16 @@ export const operationResultSchemas: { [K in PosOperation]: z.ZodType<PosResult<
   }),
   executeBusinessCommand: z.string().min(1).max(128),
   getSaleTicket: z.object({ saleId: id, number: id, label: string, branchName: string }).nullable(),
+  executeSaleCommand: z.string().min(1).max(128),
+  listProductExtras: z.array(
+    z.object({
+      product_id: id,
+      barcode: string.nullable(),
+      min_stock: finite.nonnegative(),
+      wholesale_price: finite.nonnegative().nullable(),
+      wholesale_min_qty: finite.positive().nullable(),
+    }),
+  ),
   getFiscalData: fiscalData,
   executeFiscalCommand: z.string().uuid(),
   setFiscalPermission: id,

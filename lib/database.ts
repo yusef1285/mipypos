@@ -3,7 +3,8 @@ import * as SQLite from 'expo-sqlite';
 import * as Finance from '@/lib/finance';
 import * as Onat from '@/lib/onat';
 import * as Business from '@/lib/business';
-import type { BusinessCommand, BusinessFilter } from '@/lib/business-models';
+import type { BusinessCommand, BusinessFilter, SaleCommand } from '@/lib/business-models';
+import { saleCommandSchema } from '@/lib/business-models';
 import {
   DEFAULT_ADMIN_PASSWORD,
   assertNewPassword,
@@ -35,7 +36,7 @@ import {
   storedSettlementSchema,
   parseOperationResult,
 } from '@/lib/network/validation';
-import { saleUnitPrice } from '@/lib/sale-pricing';
+import { lineUnitPrice, type WholesaleTier } from '@/lib/sale-pricing';
 import { saleFingerprint } from '@/lib/sale-identity';
 import { canAccess } from '@/lib/permissions';
 import { prepareMigrationBackup, migrateHardening } from '@/lib/database-migrations';
@@ -2277,7 +2278,11 @@ export async function registerSale(
       )
         throw new Error(`La unidad de ${current.name} cambió. Actualiza el carrito.`);
       currentProducts.set(current.id, current);
-      const price = saleUnitPrice(current, method);
+      const tier = await db.getFirstAsync<WholesaleTier>(
+        'SELECT wholesale_price,wholesale_min_qty FROM product_extras WHERE product_id=?',
+        current.id,
+      );
+      const price = lineUnitPrice(current, method, item.quantity, tier);
       if (!Number.isFinite(item.price) || Math.abs(item.price - price) > 0.000001)
         throw new Error(`El precio de ${current.name} cambió. Actualiza el carrito.`);
       if (!Number.isInteger(item.areaId)) throw new Error('Selecciona el área de venta.');
@@ -2971,6 +2976,25 @@ export async function executeBusinessCommand(
     command,
     (value) => parseOperationResult('executeBusinessCommand', value),
   );
+}
+export async function executeSaleCommand(
+  input: SaleCommand,
+  username: string,
+  command?: MutationCommand,
+): Promise<string> {
+  const parsed = saleCommandSchema.safeParse(input);
+  if (!parsed.success)
+    throw new Error(parsed.error.issues[0]?.message ?? 'Revisa los datos de la venta.');
+  const db = await getDatabase();
+  return transaction(
+    db,
+    () => Business.executeBusinessCommand(db, parsed.data, username),
+    command,
+    (value) => parseOperationResult('executeSaleCommand', value),
+  );
+}
+export async function listProductExtras() {
+  return Business.listProductExtras(await getDatabase());
 }
 export async function getSaleTicket(saleId: number) {
   if (!Number.isInteger(saleId) || saleId <= 0) throw new Error('Venta no válida.');

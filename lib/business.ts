@@ -23,12 +23,13 @@ import {
   type Partner,
   type PartnerMovement,
   type PaymentMethod,
+  type ProductExtras,
   type PayrollLine,
   type PayrollRun,
   type StockTransfer,
   type StockTransferLine,
 } from '@/lib/business-models';
-import { financeCommand } from '@/lib/finance';
+import { financeCommand, receivePurchase } from '@/lib/finance';
 import type { Producto, Usuario } from '@/lib/models';
 import { fractionalUnit, roundMoney, roundQuantity, validateQuantity } from '@/lib/units';
 
@@ -49,7 +50,10 @@ const STOREKEEPER_ACTIONS = new Set<Action>([
   'transfer.receive',
   'transfer.resolve',
   'transfer.cancel',
+  'inventory.count',
 ]);
+// A seller may settle their own open-session sale on credit or in foreign cash.
+const SALE_ACTIONS = new Set<Action>(['sale.credit', 'sale.fx']);
 
 export async function businessActor(db: SQLiteDatabase, username: string, action?: Action) {
   const actor = await db.getFirstAsync<Usuario>(
@@ -60,7 +64,10 @@ export async function businessActor(db: SQLiteDatabase, username: string, action
     actor &&
     (actor.role === 'admin' ||
       (action === undefined && ['auditor', 'storekeeper'].includes(actor.role)) ||
-      (action !== undefined && actor.role === 'storekeeper' && STOREKEEPER_ACTIONS.has(action)));
+      (action !== undefined && actor.role === 'storekeeper' && STOREKEEPER_ACTIONS.has(action)) ||
+      (action !== undefined &&
+        ['supervisor', 'seller'].includes(actor.role) &&
+        SALE_ACTIONS.has(action)));
   if (!actor || !allowed) throw new Error('Tu usuario no tiene permiso para esta operación.');
   return actor;
 }
@@ -141,9 +148,18 @@ async function cashEntry(
 // base-currency entries change expected cash, foreign currency is reported apart.
 export async function sessionCashEntries(db: SQLiteDatabase, sessionId: number) {
   const base = await baseCurrency(db);
+  // A foreign-currency tender (v11) replaces the base cash the sale assumed:
+  // base drawer goes down by its full equivalent, the foreign bills go up.
   const rows = await db.getAllAsync<{ currency: string; net: number }>(
-    `SELECT currency,ROUND(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END),2) AS net
-     FROM cash_entries WHERE session_id=? GROUP BY currency ORDER BY currency`,
+    `SELECT currency,ROUND(SUM(net),2) AS net FROM (
+       SELECT currency,CASE WHEN direction='in' THEN amount ELSE -amount END AS net
+         FROM cash_entries WHERE session_id=?
+       UNION ALL SELECT currency,amount FROM sale_fx WHERE session_id=?
+       UNION ALL SELECT ?,-base_amount FROM sale_fx WHERE session_id=?)
+     GROUP BY currency ORDER BY currency`,
+    sessionId,
+    sessionId,
+    base,
     sessionId,
   );
   return {
@@ -778,6 +794,8 @@ async function voidLedger(db: SQLiteDatabase, input: CommandOf<'ledger.void'>, a
     input.entryId,
   );
   if (!entry || entry.kind === 'reversal') throw new Error('Movimiento no encontrado.');
+  if (await db.getFirstAsync('SELECT sale_id FROM sale_credits WHERE ledger_id=?', entry.id))
+    throw new Error('Este cargo viene de una venta a crédito. Registra el cobro o una devolución.');
   if (await db.getFirstAsync('SELECT id FROM party_ledger WHERE reverses_id=?', entry.id))
     throw new Error('Este movimiento ya fue anulado.');
   if (entry.kind === 'charge') {
@@ -1186,6 +1204,8 @@ async function voidPartnerMovement(
     input.movementId,
   );
   if (!entry || entry.kind === 'reversal') throw new Error('Movimiento no encontrado.');
+  if (await db.getFirstAsync('SELECT sale_id FROM sale_credits WHERE ledger_id=?', entry.id))
+    throw new Error('Este cargo viene de una venta a crédito. Registra el cobro o una devolución.');
   if (await db.getFirstAsync('SELECT id FROM partner_movements WHERE reverses_id=?', entry.id))
     throw new Error('Este movimiento ya fue anulado.');
   const cash = entry.cash_entry_id
@@ -1216,6 +1236,250 @@ async function voidPartnerMovement(
 }
 
 // ---------- Command dispatcher ----------
+// ---------- v11: credit sales, foreign tenders, purchases, counts, extras ----------
+async function saleForFollowUp(db: SQLiteDatabase, saleId: number, actor: Usuario) {
+  const sale = await db.getFirstAsync<{
+    id: number;
+    session_id: number;
+    user: string;
+    payments: string;
+  }>('SELECT id,session_id,user,payments FROM sales WHERE id=?', saleId);
+  if (!sale) throw new Error('Venta no encontrada.');
+  if (actor.role === 'seller' && sale.user.toLowerCase() !== actor.username.toLowerCase())
+    throw new Error('Solo puedes completar tus propias ventas.');
+  if (sale.session_id !== (await openSessionId(db)))
+    throw new Error('La venta pertenece a una caja ya cerrada.');
+  if (
+    await db.getFirstAsync(
+      'SELECT sale_id FROM sale_credits WHERE sale_id=? UNION ALL SELECT sale_id FROM sale_fx WHERE sale_id=?',
+      saleId,
+      saleId,
+    )
+  )
+    throw new Error('Esta venta ya tiene un cobro a crédito o en divisa.');
+  if (await db.getFirstAsync('SELECT id FROM sale_adjustments WHERE sale_id=? LIMIT 1', saleId))
+    throw new Error('La venta ya tiene devoluciones o descuentos.');
+  const payments = z
+    .array(z.object({ type: z.string(), amount: z.number() }))
+    .catch([])
+    .parse(JSON.parse(sale.payments));
+  const cash = roundMoney(
+    payments.filter((p) => p.type === 'cash').reduce((sum, p) => sum + p.amount, 0),
+  );
+  if (cash <= 0) throw new Error('La venta no tiene parte en efectivo.');
+  return { sale, cash };
+}
+async function saleCredit(db: SQLiteDatabase, input: CommandOf<'sale.credit'>, actor: Usuario) {
+  const { sale, cash } = await saleForFollowUp(db, input.saleId, actor);
+  const base = await baseCurrency(db);
+  const ledgerId = await ledgerCharge(
+    db,
+    {
+      commandId: input.commandId,
+      action: 'ledger.charge',
+      partyId: input.partyId,
+      side: 'receivable',
+      amount: cash,
+      currency: base,
+      reference: `Venta #${sale.id}`,
+      dueDate: input.dueDate,
+      note: 'Venta a crédito',
+    },
+    actor,
+  );
+  // The sale counted this cash in the drawer; it stays owed by the client instead.
+  await cashEntry(db, actor, 'out', cash, base, 'ledger', ledgerId, `Venta a crédito #${sale.id}`);
+  await db.runAsync(
+    'INSERT INTO sale_credits(sale_id,party_id,ledger_id,session_id,amount,username,date) VALUES(?,?,?,?,?,?,?)',
+    sale.id,
+    input.partyId,
+    ledgerId,
+    sale.session_id,
+    cash,
+    actor.username,
+    nowIso(),
+  );
+  await audit(db, 'sale.credit', actor, { saleId: sale.id, partyId: input.partyId, cash });
+  return ledgerId;
+}
+async function saleFx(db: SQLiteDatabase, input: CommandOf<'sale.fx'>, actor: Usuario) {
+  const { sale, cash } = await saleForFollowUp(db, input.saleId, actor);
+  const base = await baseCurrency(db);
+  if (input.currency === base) throw new Error('Elige una moneda distinta de la moneda base.');
+  const rate = await rateFor(db, input.currency);
+  const baseAmount = roundMoney(input.amount * rate);
+  if (baseAmount + 0.005 < cash)
+    throw new Error(`El importe en ${input.currency} no cubre el efectivo de la venta.`);
+  const change = roundMoney(baseAmount - cash);
+  await db.runAsync(
+    'INSERT INTO sale_fx(sale_id,session_id,currency,amount,rate,base_amount,change_base,username,date) VALUES(?,?,?,?,?,?,?,?,?)',
+    sale.id,
+    sale.session_id,
+    input.currency,
+    roundMoney(input.amount),
+    rate,
+    baseAmount,
+    Math.max(0, change),
+    actor.username,
+    nowIso(),
+  );
+  await audit(db, 'sale.fx', actor, { saleId: sale.id, currency: input.currency, rate, change });
+  return String(sale.id);
+}
+async function receiveSupplierPurchase(
+  db: SQLiteDatabase,
+  input: CommandOf<'purchase.receive'>,
+  actor: Usuario,
+) {
+  const party = await activeParty(db, input.partyId, 'payable');
+  await areaName(db, input.areaId);
+  if (new Set(input.lines.map((line) => line.productId)).size !== input.lines.length)
+    throw new Error('Cada producto debe aparecer una sola vez en la compra.');
+  let total = 0;
+  for (const line of input.lines) {
+    await receivePurchase(
+      db,
+      {
+        commandId: input.commandId,
+        productId: line.productId,
+        areaId: input.areaId,
+        quantity: line.quantity,
+        cost: line.cost,
+        reason: `Compra ${input.reference} (${party.name})`,
+      },
+      actor,
+    );
+    total += roundMoney(line.quantity * line.cost);
+  }
+  total = roundMoney(total);
+  let result: string = Crypto.randomUUID();
+  if (total > 0) {
+    const base = await baseCurrency(db);
+    result = await ledgerCharge(
+      db,
+      {
+        commandId: input.commandId,
+        action: 'ledger.charge',
+        partyId: party.id,
+        side: 'payable',
+        amount: total,
+        currency: base,
+        reference: input.reference,
+        dueDate: input.dueDate,
+        note: 'Compra a proveedor',
+      },
+      actor,
+    );
+    if (input.payment !== 'credit')
+      await ledgerPayment(
+        db,
+        {
+          commandId: input.commandId,
+          action: 'ledger.payment',
+          partyId: party.id,
+          side: 'payable',
+          amount: total,
+          currency: base,
+          method: input.payment,
+          reference: input.reference,
+          note: 'Pago de compra',
+        },
+        actor,
+      );
+  }
+  await audit(db, 'purchase.receive', actor, {
+    partyId: party.id,
+    areaId: input.areaId,
+    reference: input.reference,
+    payment: input.payment,
+    lines: input.lines.length,
+    total,
+  });
+  return result;
+}
+async function countInventory(
+  db: SQLiteDatabase,
+  input: CommandOf<'inventory.count'>,
+  actor: Usuario,
+) {
+  const area = await areaName(db, input.areaId);
+  if (new Set(input.lines.map((line) => line.productId)).size !== input.lines.length)
+    throw new Error('Cada producto debe contarse una sola vez.');
+  const differences: { productId: number; expected: number; counted: number }[] = [];
+  for (const line of input.lines) {
+    const p = await db.getFirstAsync<Producto>('SELECT * FROM products WHERE id=?', line.productId);
+    if (!p) throw new Error('Producto no encontrado.');
+    validateQuantity(line.counted, p.quantity_decimals);
+    const current =
+      (
+        await db.getFirstAsync<{ quantity: number }>(
+          'SELECT quantity FROM area_stock WHERE area_id=? AND product_id=?',
+          input.areaId,
+          p.id,
+        )
+      )?.quantity ?? 0;
+    const delta = roundQuantity(line.counted - current);
+    if (Math.abs(delta) < 0.0005) continue;
+    await moveStock(db, p.id, input.areaId, delta);
+    await movement(
+      db,
+      delta > 0 ? 'entrada' : 'salida',
+      { product_id: p.id, product_name: p.name },
+      delta > 0 ? null : area,
+      delta > 0 ? area : null,
+      Math.abs(delta),
+      actor,
+    );
+    differences.push({ productId: p.id, expected: current, counted: line.counted });
+  }
+  const id = Crypto.randomUUID();
+  await audit(db, 'inventory.count', actor, {
+    id,
+    areaId: input.areaId,
+    reason: input.reason,
+    counted: input.lines.length,
+    differences,
+  });
+  return id;
+}
+async function saveProductExtras(
+  db: SQLiteDatabase,
+  input: CommandOf<'product.extras'>,
+  actor: Usuario,
+) {
+  if (!(await db.getFirstAsync('SELECT id FROM products WHERE id=?', input.productId)))
+    throw new Error('Producto no encontrado.');
+  if ((input.wholesalePrice === null) !== (input.wholesaleMinQty === null))
+    throw new Error('Indica precio mayorista y cantidad mínima, o deja ambos vacíos.');
+  const barcode = input.barcode || null;
+  if (barcode) {
+    const other = await db.getFirstAsync<{ name: string }>(
+      'SELECT p.name FROM product_extras e JOIN products p ON p.id=e.product_id WHERE e.barcode=? AND e.product_id<>?',
+      barcode,
+      input.productId,
+    );
+    if (other) throw new Error(`Ese código de barras ya pertenece a ${other.name}.`);
+  }
+  if (!barcode && input.minStock === 0 && input.wholesalePrice === null)
+    await db.runAsync('DELETE FROM product_extras WHERE product_id=?', input.productId);
+  else
+    await db.runAsync(
+      `INSERT INTO product_extras(product_id,barcode,min_stock,wholesale_price,wholesale_min_qty) VALUES(?,?,?,?,?)
+       ON CONFLICT(product_id) DO UPDATE SET barcode=excluded.barcode,min_stock=excluded.min_stock,
+         wholesale_price=excluded.wholesale_price,wholesale_min_qty=excluded.wholesale_min_qty`,
+      input.productId,
+      barcode,
+      input.minStock,
+      input.wholesalePrice,
+      input.wholesaleMinQty,
+    );
+  await audit(db, 'product.extras', actor, input);
+  return String(input.productId);
+}
+export function listProductExtras(db: SQLiteDatabase) {
+  return db.getAllAsync<ProductExtras>('SELECT * FROM product_extras ORDER BY product_id');
+}
+
 export const parseBusinessResult = (value: unknown) => z.string().min(1).max(128).parse(value);
 export async function executeBusinessCommand(
   db: SQLiteDatabase,
@@ -1233,6 +1497,16 @@ export async function executeBusinessCommand(
     JSON.stringify(['business', actor.username, input]),
     async () => {
       switch (input.action) {
+        case 'sale.credit':
+          return saleCredit(db, input, actor);
+        case 'sale.fx':
+          return saleFx(db, input, actor);
+        case 'purchase.receive':
+          return receiveSupplierPurchase(db, input, actor);
+        case 'inventory.count':
+          return countInventory(db, input, actor);
+        case 'product.extras':
+          return saveProductExtras(db, input, actor);
         case 'branch.save':
           return saveBranch(db, input, actor);
         case 'branch.assignArea':
