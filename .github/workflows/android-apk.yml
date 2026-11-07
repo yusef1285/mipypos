@@ -1,0 +1,47 @@
+name: APK Android
+
+# Builds an installable release APK. Without signing secrets it is signed with
+# the Expo template debug keystore: valid for testing, not for Play Store.
+on:
+  workflow_dispatch:
+  push:
+    branches: [modulos-empresariales]
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: npm ci --no-audit --no-fund
+      - name: Generar proyecto Android
+        run: npx expo prebuild --platform android --no-install --clean
+      - name: Compilar APK release
+        working-directory: android
+        env:
+          NODE_ENV: production
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+      - name: Renombrar APK
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/MipyPOS-${VERSION}-${GITHUB_SHA::7}.apk"
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mipypos-apk
+          path: dist/*.apk
+          retention-days: 30
