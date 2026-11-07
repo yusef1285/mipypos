@@ -108,7 +108,10 @@ export default function Cash() {
     [billCounts, coins],
   );
   const expectedCash =
-    (preview?.fund ?? 0) + (preview?.cashSales ?? 0) - (preview?.withdrawalTotal ?? 0);
+    (preview?.fund ?? 0) +
+    (preview?.cashSales ?? 0) -
+    (preview?.withdrawalTotal ?? 0) +
+    (preview?.otherCashNet ?? 0);
   const transferCount = Number(transfer.replace(',', '.')) || 0;
   const cashDifference = cashCount - expectedCash;
   const transferDifference = transferCount - (preview?.transferSales ?? 0);

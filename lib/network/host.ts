@@ -116,6 +116,14 @@ async function handleOperation(request: OperationRequest, user: Usuario): Promis
     };
   }
   switch (request.operation) {
+    case 'getBusinessData':
+      return DB.getBusinessData(request.args[0], user.username);
+    case 'getTransferData':
+      return DB.getTransferData(user.username);
+    case 'executeBusinessCommand':
+      return DB.executeBusinessCommand(request.args[0], user.username, command);
+    case 'getSaleTicket':
+      return DB.getSaleTicket(request.args[0]);
     case 'getFiscalData':
       return DB.getFiscalData(request.args[0], user.username);
     case 'executeFiscalCommand':

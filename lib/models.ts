@@ -161,6 +161,10 @@ export interface CashSummary {
   transferSales: number;
   cardSales: number;
   withdrawalTotal: number;
+  /** Net base-currency cash from credit, payroll and partner movements. */
+  otherCashNet: number;
+  /** Foreign-currency cash movements, counted apart from the drawer. */
+  foreignCash: Array<{ currency: string; net: number }>;
   expectedCash: number;
 }
 export interface CashClosureProduct {
@@ -181,6 +185,8 @@ export interface CashClosurePreview {
   cardSales: number;
   salesTotal: number;
   withdrawalTotal: number;
+  otherCashNet: number;
+  foreignCash: Array<{ currency: string; net: number }>;
   withdrawals: CashWithdrawal[];
   products: CashClosureProduct[];
 }

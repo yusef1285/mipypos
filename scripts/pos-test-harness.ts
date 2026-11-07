@@ -33,6 +33,7 @@ type HarnessModules = {
   '@/lib/recovery-reconciliation': typeof import('../lib/recovery-reconciliation');
   '@/lib/database-maintenance': typeof import('../lib/database-maintenance');
   '@/lib/database': typeof import('../lib/database');
+  '@/lib/business': typeof import('../lib/business');
   '@/lib/password': typeof import('../lib/password');
   '@/lib/network/qr': typeof import('../lib/network/qr');
   '@/lib/network/operations': typeof import('../lib/network/operations');

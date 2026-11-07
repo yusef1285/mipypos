@@ -2,6 +2,8 @@ import * as Crypto from 'expo-crypto';
 import * as SQLite from 'expo-sqlite';
 import * as Finance from '@/lib/finance';
 import * as Onat from '@/lib/onat';
+import * as Business from '@/lib/business';
+import type { BusinessCommand, BusinessFilter } from '@/lib/business-models';
 import {
   DEFAULT_ADMIN_PASSWORD,
   assertNewPassword,
@@ -65,9 +67,11 @@ import {
 import { DATABASE_VERSION } from '@/lib/database-migrations';
 import {
   assertRecoveryJournalAvailable,
+  installRecoveryJournal,
   migrateRecoveryJournal,
   reconcileRecoveryCandidate,
 } from '@/lib/recovery-journal';
+import { migrateBusiness } from '@/lib/business-schema';
 import { assertDatabaseIdentity, confirmDatabaseIdentity } from '@/lib/recovery-anchor';
 import { getPendingOperation } from '@/lib/network/pending-operation';
 import { getPendingSale } from '@/lib/network/pending-sale';
@@ -341,7 +345,7 @@ export async function createBusinessArchive(username: string): Promise<BusinessA
         await Promise.all(
           BUSINESS_TABLES.map(async (table) => [
             table,
-            await db.getAllAsync<ArchiveRow>(`SELECT * FROM ${table}`),
+            await db.getAllAsync<ArchiveRow>(`SELECT * FROM ${table} ORDER BY rowid`),
           ]),
         ),
       ),
@@ -358,7 +362,7 @@ export async function createBusinessArchive(username: string): Promise<BusinessA
       app: 'MipyPOS',
       format: 'business-close',
       version: 2,
-      schemaVersion: 8,
+      schemaVersion: 9,
       archiveId: Crypto.randomUUID(),
       createdAt: now(),
       sourceUser: username,
@@ -392,7 +396,12 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
       UNION ALL SELECT 1 FROM network_commands
       UNION ALL SELECT 1 FROM fiscal_profiles
       UNION ALL SELECT 1 FROM fiscal_rules
-      UNION ALL SELECT 1 FROM fiscal_records LIMIT 1`,
+      UNION ALL SELECT 1 FROM fiscal_records
+      UNION ALL SELECT 1 FROM branches
+      UNION ALL SELECT 1 FROM currencies
+      UNION ALL SELECT 1 FROM parties
+      UNION ALL SELECT 1 FROM employees
+      UNION ALL SELECT 1 FROM partners LIMIT 1`,
       username,
     );
     if (auxiliaryData)
@@ -454,6 +463,7 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
       }
     }
     await Onat.validateFiscalStorage(db);
+    await Business.validateBusinessStorage(db);
     const foreignErrors = await db.getAllAsync('PRAGMA foreign_key_check');
     if (foreignErrors.length) throw new Error('El archivo contiene referencias incompletas.');
     const stockError = await db.getFirstAsync(
@@ -1195,6 +1205,16 @@ export async function restorePrivateRecoveryBackup(
       // recoverable, but cannot acquire missing historical evidence retroactively.
       await candidate.withTransactionAsync(async () => {
         await migrateRecoveryJournal(candidate!);
+        await migrateBusiness(candidate!);
+        await installRecoveryJournal(candidate!);
+        await candidate!.execAsync(`PRAGMA user_version=${DATABASE_VERSION}`);
+      });
+    } else if (backup.schemaVersion === 9) {
+      // v10 only adds empty business tables: the verified journal prefix is kept.
+      await candidate.withTransactionAsync(async () => {
+        await assertRecoveryJournalAvailable(candidate!);
+        await migrateBusiness(candidate!);
+        await installRecoveryJournal(candidate!);
         await candidate!.execAsync(`PRAGMA user_version=${DATABASE_VERSION}`);
       });
     }
@@ -1698,13 +1718,16 @@ export async function getCashSummary(sessionId: number): Promise<CashSummary> {
         sessionId,
       )
     )?.total ?? 0;
+  const other = await Business.sessionCashEntries(db, sessionId);
   return {
     salesTotal: rows.reduce((sum, row) => sum + row.amount, 0),
     cashSales,
     transferSales: amount('transfer'),
     cardSales: amount('card'),
     withdrawalTotal,
-    expectedCash: roundMoney((session?.fund ?? 0) + cashSales - withdrawalTotal),
+    otherCashNet: other.net,
+    foreignCash: other.foreign,
+    expectedCash: roundMoney((session?.fund ?? 0) + cashSales - withdrawalTotal + other.net),
   };
 }
 export async function getCashClosurePreview(sessionId: number): Promise<CashClosurePreview> {
@@ -1753,6 +1776,8 @@ export async function getCashClosurePreview(sessionId: number): Promise<CashClos
     cardSales: summary.cardSales,
     salesTotal: summary.salesTotal,
     withdrawalTotal: summary.withdrawalTotal,
+    otherCashNet: summary.otherCashNet,
+    foreignCash: summary.foreignCash,
     withdrawals: await db.getAllAsync<CashWithdrawal>(
       'SELECT * FROM cash_withdrawals WHERE session_id=? ORDER BY id',
       sessionId,
@@ -1837,7 +1862,9 @@ function reconcileCashClosure(
   if (physicalByProduct.size !== preview.products.length)
     throw new Error('El conteo físico contiene productos que no pertenecen al cierre.');
 
-  const expectedCash = roundMoney(preview.fund + preview.cashSales - preview.withdrawalTotal);
+  const expectedCash = roundMoney(
+    preview.fund + preview.cashSales - preview.withdrawalTotal + preview.otherCashNet,
+  );
   if (
     !Number.isFinite(input.withdrawalCount) ||
     input.withdrawalCount < 0 ||
@@ -1857,7 +1884,8 @@ function reconcileCashClosure(
         preview.withdrawalTotal +
         input.transferCount +
         preview.cardSales -
-        preview.salesTotal,
+        preview.salesTotal -
+        preview.otherCashNet,
     ),
     products: reconciledProducts,
   };
@@ -1880,7 +1908,9 @@ function differenceDetail(
         throw new Error('Introduce conteos monetarios con hasta dos decimales.');
       return json({
         kind: input.kind,
-        expectedCash: roundMoney(preview.fund + preview.cashSales - preview.withdrawalTotal),
+        expectedCash: roundMoney(
+          preview.fund + preview.cashSales - preview.withdrawalTotal + preview.otherCashNet,
+        ),
         cashCount: input.counted,
         expectedTransfer: preview.transferSales,
         transferCount: input.transferCount,
@@ -2299,6 +2329,11 @@ export async function registerSale(
       if (!areaUpdate.changes)
         throw new Error(`Stock insuficiente de ${item.product.name} en el área seleccionada.`);
     }
+    await Business.assignSaleTicket(
+      db,
+      saleId,
+      items.map((item) => item.areaId),
+    );
     await db.runAsync(
       'INSERT INTO network_events(type,entity_id,created_at) VALUES(?,?,?)',
       'sale.created',
@@ -2896,6 +2931,39 @@ export function getConsumptionData(username: string) {
 }
 export function getFiscalData(filter: FiscalFilter, username: string) {
   return consistentRead(async () => Onat.readFiscalData(await getDatabase(), filter, username));
+}
+export async function getBusinessData(filter: BusinessFilter, username: string) {
+  return consistentRead(async () =>
+    Business.getBusinessData(await getDatabase(), username, filter),
+  );
+}
+export async function getTransferData(username?: string) {
+  return consistentRead(async () => {
+    const data = await Business.getBusinessData(await getDatabase(), username ?? '');
+    return {
+      branches: data.branches,
+      areas: data.areas,
+      transfers: data.transfers,
+      transferLines: data.transferLines,
+    };
+  });
+}
+export async function executeBusinessCommand(
+  input: BusinessCommand,
+  username: string,
+  command?: MutationCommand,
+): Promise<string> {
+  const db = await getDatabase();
+  return transaction(
+    db,
+    () => Business.executeBusinessCommand(db, input, username),
+    command,
+    (value) => parseOperationResult('executeBusinessCommand', value),
+  );
+}
+export async function getSaleTicket(saleId: number) {
+  if (!Number.isInteger(saleId) || saleId <= 0) throw new Error('Venta no válida.');
+  return consistentRead(async () => Business.getSaleTicket(await getDatabase(), saleId));
 }
 export async function executeFiscalCommand(
   input: OnatCommand,

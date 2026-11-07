@@ -11,6 +11,7 @@ import {
   applyAndroidPrivateBackupPolicy,
 } from '../lib/android-backup-policy';
 import appConfig from '../app.config';
+import { BUSINESS_V10_TABLES } from '../lib/business-schema';
 let passed = 0;
 let failed = 0;
 const failures: Array<{ name: string; message: string }> = [];
@@ -1254,7 +1255,7 @@ void regression(
       before,
     );
     assert.equal(f.database.exec('SELECT legacy_card FROM sales')[0].values[0][0], 1);
-    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 9);
+    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 10);
     const backup = f.backups.get('mipypos.pre-v6.db');
     assert.ok(backup);
     assert.deepEqual(backup.exec('SELECT id,total,method,payments FROM sales')[0].values, before);
@@ -1293,7 +1294,7 @@ void regression(
       assert.equal((await f.db.listProducts()).length, 1);
       f.failWritesContaining('');
       await f.db.initializeDatabase();
-      assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 9);
+      assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 10);
     }
   },
 );
@@ -1316,7 +1317,7 @@ void regression(
     assert.ok(f.backups.get('mipypos.pre-v6.db'));
     f.failWritesContaining('');
     await f.db.initializeDatabase();
-    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 9);
+    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 10);
   },
 );
 void regression(
@@ -1447,7 +1448,7 @@ void regression(
         "SELECT * FROM settings WHERE key IN ('license_mode','usage_products','usage_sales')",
       ),
     );
-    assert.equal(copy.exec('PRAGMA user_version')[0].values[0][0], 9);
+    assert.equal(copy.exec('PRAGMA user_version')[0].values[0][0], 10);
     assert.equal(copy.exec('PRAGMA foreign_key_check').length, 0);
     const original = copy.exec('SELECT * FROM products');
     const currentProduct = await f.db.getProduct(f.product.id);
@@ -1633,13 +1634,13 @@ void regression(
     const backup = await f.db.createPrivateRecoveryBackup('admin', 'admin123');
     const file = f.backups.get(backup.fileName);
     assert.ok(file);
-    file.run('PRAGMA user_version=10');
+    file.run('PRAGMA user_version=11');
     await assert.rejects(
       f.db.inspectPrivateRecoveryBackup('admin', 'admin123', backup.id),
       /No se pudo verificar/,
     );
-    assert.equal(file.exec('PRAGMA user_version')[0].values[0][0], 10);
-    file.run('PRAGMA user_version=9');
+    assert.equal(file.exec('PRAGMA user_version')[0].values[0][0], 11);
+    file.run('PRAGMA user_version=10');
     file.run("UPDATE sync_state SET authority_id='otra-autoridad' WHERE id=1");
     await assert.rejects(
       f.db.inspectPrivateRecoveryBackup('admin', 'admin123', backup.id),
@@ -1735,6 +1736,9 @@ void regression(
       delete sale.legacy_card;
       delete sale.pricing_basis;
     }
+    // A real v6 file predates the enterprise tables (e.g. per-branch tickets).
+    const tables: Record<string, unknown> = archive.tables;
+    for (const table of BUSINESS_V10_TABLES) delete tables[table];
     const target = createHarness();
     const db = target.load('@/lib/database');
     await db.initializeDatabase();
@@ -1752,9 +1756,9 @@ void regression(
 );
 void regression('versión futura se rechaza antes de crear o modificar tablas', async () => {
   const h = createHarness();
-  h.database.run('PRAGMA user_version=10');
+  h.database.run('PRAGMA user_version=11');
   await assert.rejects(h.load('@/lib/database').initializeDatabase(), /más reciente/);
-  assert.equal(h.database.exec('PRAGMA user_version')[0].values[0][0], 10);
+  assert.equal(h.database.exec('PRAGMA user_version')[0].values[0][0], 11);
   assert.equal(h.database.exec("SELECT name FROM sqlite_master WHERE type='table'").length, 0);
 });
 void regression(
@@ -2335,7 +2339,7 @@ void regression(
   },
 );
 
-for (const version of [8, 10]) {
+for (const version of [8, 9, 11]) {
   void regression(
     `recuperación rechaza versión SQLite ${version} al verificar una generación`,
     async () => {

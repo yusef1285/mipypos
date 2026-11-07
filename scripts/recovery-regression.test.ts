@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { Database } from 'sql.js';
 import type { CartItem } from '../lib/models';
 import { createHarness, prepareHarness } from './pos-test-harness';
+import { BUSINESS_V10_TABLES } from '../lib/business-schema';
 
 beforeAll(prepareHarness);
 let passed = 0;
@@ -40,7 +41,14 @@ after(() => {
     ),
   );
 });
+// A real pre-v10 file has none of the enterprise tables (their triggers and
+// indexes are dropped with them).
+function stripBusiness(database: Database, version = 9) {
+  for (const table of [...BUSINESS_V10_TABLES].toReversed()) database.run(`DROP TABLE ${table}`);
+  database.run(`PRAGMA user_version=${version}`);
+}
 function stripJournal(database: Database) {
+  stripBusiness(database, 8);
   for (const [name] of database.exec(
     "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'recovery_%'",
   )[0]?.values ?? [])
@@ -502,7 +510,7 @@ check('migración v8 a v9 conserva datos, cuentas, licencia y copia previa', asy
     ),
     settings,
   );
-  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 9);
+  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 10);
   assert.equal(f.backups.get('mipypos.pre-v8.db')!.exec('PRAGMA user_version')[0].values[0][0], 8);
 });
 check(
@@ -521,7 +529,7 @@ check(
       0,
     );
     await f.db.initializeDatabase();
-    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 9);
+    assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 10);
   },
 );
 async function legacyCopy(f: Awaited<ReturnType<typeof fixture>>) {

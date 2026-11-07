@@ -7,6 +7,7 @@ import {
   storedObligationSchema,
   parseFiscalRecord,
 } from '@/lib/onat-models';
+import { businessCommandSchema, businessFilterSchema } from '@/lib/business-models';
 import { snapshotSchema } from '@/lib/network/snapshot';
 import {
   operationPermissions,
@@ -121,6 +122,10 @@ const closure = z.object({
 const noArgs = z.tuple([]);
 const actorRead = z.tuple([text.optional()]);
 export const operationArgs = {
+  getBusinessData: z.tuple([businessFilterSchema, text.optional()]),
+  getTransferData: actorRead,
+  executeBusinessCommand: z.tuple([businessCommandSchema, text.optional(), command]),
+  getSaleTicket: z.tuple([id]),
   getFiscalData: z.tuple([fiscalFilterSchema, text.optional()]),
   executeFiscalCommand: z.tuple([onatCommandSchema, text.optional(), command]),
   setFiscalPermission: z.tuple([id, z.boolean(), text.optional(), command]),
@@ -477,9 +482,239 @@ const fiscalData = z.object({
   warnings: z.array(string),
 });
 
+// ---- v10 enterprise modules ----
+const bit = z.number().int().min(0).max(1);
+const method = z.enum(['cash', 'transfer', 'other']);
+const nullableId = id.nullable();
+const branchRow = z.object({
+  id,
+  name: string,
+  code: string,
+  address: string,
+  ticket_prefix: string,
+  active: bit,
+  created_at: string,
+});
+const transferRow = z.object({
+  id: string,
+  from_area_id: id,
+  to_area_id: id,
+  from_area: string,
+  to_area: string,
+  from_branch_id: nullableId,
+  to_branch_id: nullableId,
+  status: z.enum(['sent', 'partial', 'received', 'cancelled']),
+  note: string,
+  sent_by: string,
+  sent_at: string,
+  received_by: string.nullable(),
+  received_at: string.nullable(),
+});
+const transferLineRow = z.object({
+  id,
+  transfer_id: string,
+  product_id: id,
+  product_name: string,
+  unit: string,
+  quantity_sent: finite,
+  quantity_received: finite,
+  quantity_returned: finite,
+  quantity_lost: finite,
+  unit_cost: finite.nullable(),
+});
+const areaBranchRow = z.object({
+  area_id: id,
+  area_name: string,
+  branch_id: nullableId,
+});
+const businessData = z.object({
+  baseCurrency: string,
+  deviceBranchId: nullableId,
+  branches: z.array(branchRow),
+  areas: z.array(areaBranchRow),
+  transfers: z.array(transferRow),
+  transferLines: z.array(transferLineRow),
+  parties: z.array(
+    z.object({
+      id,
+      kind: z.enum(['client', 'supplier', 'both']),
+      name: string,
+      document: string,
+      phone: string,
+      email: string,
+      address: string,
+      credit_limit: finite,
+      notes: string,
+      active: bit,
+      created_at: string,
+    }),
+  ),
+  ledger: z.array(
+    z.object({
+      id: string,
+      party_id: id,
+      side: z.enum(['receivable', 'payable']),
+      kind: z.enum(['charge', 'payment', 'reversal']),
+      amount: finite,
+      currency: string,
+      rate: finite,
+      base_amount: finite,
+      method: method.nullable(),
+      reference: string,
+      due_date: string.nullable(),
+      note: string,
+      reverses_id: string.nullable(),
+      cash_entry_id: string.nullable(),
+      username: string,
+      date: string,
+    }),
+  ),
+  balances: z.array(
+    z.object({
+      partyId: id,
+      receivable: finite,
+      payable: finite,
+      overdue: finite,
+    }),
+  ),
+  currencies: z.array(
+    z.object({
+      code: string,
+      name: string,
+      symbol: string,
+      decimals: z.number().int(),
+    }),
+  ),
+  rates: z.array(
+    z.object({
+      id,
+      code: string,
+      rate: finite,
+      effective_date: string,
+      source: string,
+      username: string,
+      recorded_at: string,
+    }),
+  ),
+  employees: z.array(
+    z.object({
+      id,
+      name: string,
+      document: string,
+      position: string,
+      branch_id: nullableId,
+      base_salary: finite,
+      pay_period: z.enum(['monthly', 'biweekly', 'weekly']),
+      start_date: string,
+      end_date: string.nullable(),
+      active: bit,
+    }),
+  ),
+  payrollRuns: z.array(
+    z.object({
+      id: string,
+      period_start: string,
+      period_end: string,
+      status: z.enum(['draft', 'approved', 'paid', 'void']),
+      contribution_rate: finite,
+      gross_total: finite,
+      deductions_total: finite,
+      net_total: finite,
+      contribution_total: finite,
+      note: string,
+      created_by: string,
+      created_at: string,
+      approved_by: string.nullable(),
+      paid_by: string.nullable(),
+      paid_at: string.nullable(),
+      method: method.nullable(),
+      void_reason: string.nullable(),
+    }),
+  ),
+  payrollLines: z.array(
+    z.object({
+      id,
+      run_id: string,
+      employee_id: id,
+      employee_name: string,
+      base: finite,
+      bonuses: finite,
+      deductions: finite,
+      gross: finite,
+      net: finite,
+      contribution: finite,
+    }),
+  ),
+  partners: z.array(
+    z.object({
+      id,
+      name: string,
+      document: string,
+      share_percent: finite,
+      joined_at: string,
+      active: bit,
+    }),
+  ),
+  partnerMovements: z.array(
+    z.object({
+      id: string,
+      partner_id: id,
+      kind: z.enum(['contribution', 'withdrawal', 'dividend', 'reversal']),
+      amount: finite,
+      currency: string,
+      rate: finite,
+      base_amount: finite,
+      method,
+      note: string,
+      reverses_id: string.nullable(),
+      cash_entry_id: string.nullable(),
+      username: string,
+      date: string,
+    }),
+  ),
+  consolidation: z
+    .object({
+      start: string,
+      end: string,
+      baseCurrency: string,
+      branches: z.array(
+        z.object({
+          branchId: nullableId,
+          name: string,
+          sales: finite,
+          tickets: z.number().int().nonnegative(),
+          inventoryValue: finite,
+          inventoryUnknownCost: z.number().int().nonnegative(),
+          payroll: finite,
+        }),
+      ),
+      totals: z.object({
+        sales: finite,
+        tickets: z.number().int().nonnegative(),
+        inventoryValue: finite,
+        inTransitValue: finite,
+        receivables: finite,
+        payables: finite,
+        payroll: finite,
+        partnerCapital: finite,
+        cashEntriesNet: finite,
+      }),
+    })
+    .nullable(),
+});
+
 // The mapped annotation checks every registered action against its actual DB return type.
 // Parsing (not a cast) also supplies nullable fields omitted by cost redaction.
 export const operationResultSchemas: { [K in PosOperation]: z.ZodType<PosResult<K>> } = {
+  getBusinessData: businessData,
+  getTransferData: z.object({
+    branches: z.array(branchRow),
+    areas: z.array(areaBranchRow),
+    transfers: z.array(transferRow),
+    transferLines: z.array(transferLineRow),
+  }),
+  executeBusinessCommand: z.string().min(1).max(128),
+  getSaleTicket: z.object({ saleId: id, number: id, label: string, branchName: string }).nullable(),
   getFiscalData: fiscalData,
   executeFiscalCommand: z.string().uuid(),
   setFiscalPermission: id,
@@ -556,6 +791,11 @@ export const operationResultSchemas: { [K in PosOperation]: z.ZodType<PosResult<
     cardSales: finite,
     salesTotal: finite,
     withdrawalTotal: finite,
+    // Absent when a pre-v10 host answers; defaults keep the old cash formula.
+    otherCashNet: finite.default(0),
+    foreignCash: z
+      .array(z.object({ currency: z.string().regex(/^[A-Z]{3}$/), net: finite }).strict())
+      .default([]),
     withdrawals: z.array(withdrawal),
     products: z.array(closureProduct),
   }),

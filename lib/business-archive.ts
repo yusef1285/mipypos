@@ -23,7 +23,24 @@ export const BUSINESS_TABLES = [
   'fiscal_profiles',
   'fiscal_rules',
   'fiscal_records',
+  // v10 enterprise modules (archive schema 9), in foreign-key order.
+  'branches',
+  'area_branches',
+  'currencies',
+  'exchange_rates',
+  'cash_entries',
+  'parties',
+  'party_ledger',
+  'stock_transfers',
+  'stock_transfer_lines',
+  'sale_tickets',
+  'employees',
+  'payroll_runs',
+  'payroll_lines',
+  'partners',
+  'partner_movements',
 ] as const;
+const V10_ARCHIVE_TABLES = BUSINESS_TABLES.slice(BUSINESS_TABLES.indexOf('branches'));
 export type BusinessTable = (typeof BUSINESS_TABLES)[number];
 export type ArchiveRow = Record<string, string | number | null>;
 const row = z.record(z.string(), z.union([z.string(), z.number().finite(), z.null()]));
@@ -32,7 +49,7 @@ export const archiveSchema = z
     app: z.literal('MipyPOS'),
     format: z.literal('business-close'),
     version: z.union([z.literal(1), z.literal(2)]),
-    schemaVersion: z.union([z.literal(5), z.literal(6), z.literal(7), z.literal(8)]),
+    schemaVersion: z.union([z.literal(5), z.literal(6), z.literal(7), z.literal(8), z.literal(9)]),
     archiveId: z.string().uuid(),
     createdAt: z.string().datetime(),
     sourceUser: z.string().min(1),
@@ -83,6 +100,36 @@ export function parseBusinessArchive(value: unknown): BusinessArchive {
     normalized = {
       ...normalized,
       tables: { fiscal_profiles: [], fiscal_rules: [], fiscal_records: [], ...normalized.tables },
+    };
+  }
+  if (
+    normalized &&
+    typeof normalized === 'object' &&
+    'schemaVersion' in normalized &&
+    typeof normalized.schemaVersion === 'number' &&
+    normalized.schemaVersion < 9 &&
+    'tables' in normalized &&
+    normalized.tables &&
+    typeof normalized.tables === 'object'
+  ) {
+    const tables: Record<string, unknown> = { ...normalized.tables };
+    // Older archives predate these modules; a pre-v9 file may only carry them empty.
+    if (
+      V10_ARCHIVE_TABLES.some(
+        (table) =>
+          Object.hasOwn(tables, table) &&
+          !(Array.isArray(tables[table]) && (tables[table] as unknown[]).length === 0),
+      )
+    )
+      throw new Error(
+        'El archivo no es un cierre completo compatible con esta versión de MipyPOS.',
+      );
+    normalized = {
+      ...normalized,
+      tables: {
+        ...Object.fromEntries(V10_ARCHIVE_TABLES.map((table) => [table, []])),
+        ...tables,
+      },
     };
   }
   const parsed = archiveSchema.safeParse(normalized);

@@ -1,6 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import * as Crypto from 'expo-crypto';
 import { DATABASE_VERSION } from '@/lib/database-migrations';
+import { BUSINESS_V10_TABLES } from '@/lib/business-schema';
 import { JOURNAL_EXCLUDED_TABLES, planRecoveryReplay } from '@/lib/recovery-journal';
 
 export interface RecoveryTableDifference {
@@ -69,12 +70,23 @@ async function rowsForComparison(db: SQLiteDatabase, table: string) {
   };
 }
 
+async function emptyComparison() {
+  return {
+    count: 0,
+    digest: await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, '[]'),
+  };
+}
+
 export async function reconcileRecoveryDatabases(
   current: SQLiteDatabase,
   backup: SQLiteDatabase,
 ): Promise<RecoveryReconciliation> {
   const backupVersion = await backup.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
   const legacy = backupVersion?.user_version === 8;
+  // v10 adds only new (initially empty) business tables. Before v10 those
+  // objects are excluded from the current schema; rows still have to match.
+  const preBusiness = legacy || backupVersion?.user_version === 9;
+  const v10Tables = BUSINESS_V10_TABLES.map((table) => `'${table}'`).join(',');
   // v9 adds only private journal structures. A v8 backup must otherwise have
   // exactly the existing schema; do not hide unexpected objects in the backup.
   const schemaQuery =
@@ -84,6 +96,7 @@ export async function reconcileRecoveryDatabases(
       (legacy
         ? " AND tbl_name NOT IN ('recovery_journal','recovery_lineage') AND name NOT LIKE 'recovery_capture_%'"
         : '') +
+      (preBusiness ? ` AND tbl_name NOT IN (${v10Tables})` : '') +
       ' ORDER BY type,name',
   );
   const backupSchema = await backup.getAllAsync(schemaQuery + ' ORDER BY type,name');
@@ -96,7 +109,10 @@ export async function reconcileRecoveryDatabases(
   for (const { name } of names) {
     if (RECOVERY_RUNTIME_TABLES.has(name)) continue;
     const a = await rowsForComparison(current, name);
-    const b = await rowsForComparison(backup, name);
+    const b =
+      preBusiness && BUSINESS_V10_TABLES.some((table) => table === name)
+        ? await emptyComparison()
+        : await rowsForComparison(backup, name);
     tables.push({
       table: name,
       currentRows: a.count,
