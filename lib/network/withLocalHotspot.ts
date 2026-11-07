@@ -22,6 +22,9 @@ const withLocalHotspot: ConfigPlugin = (config) => {
       'android.permission.CHANGE_NETWORK_STATE',
       'android.permission.ACCESS_FINE_LOCATION',
       'android.permission.NEARBY_WIFI_DEVICES',
+      'android.permission.BLUETOOTH',
+      'android.permission.BLUETOOTH_ADMIN',
+      'android.permission.BLUETOOTH_CONNECT',
     ]) {
       const existing = permissions.find((permission) => permission.$['android:name'] === name);
       if (!existing)
@@ -29,6 +32,10 @@ const withLocalHotspot: ConfigPlugin = (config) => {
           $: {
             'android:name': name,
             ...(name.endsWith('ACCESS_FINE_LOCATION') ? { 'android:maxSdkVersion': '32' } : {}),
+            // Legacy Bluetooth permissions only apply up to Android 11; 12+ uses BLUETOOTH_CONNECT.
+            ...(name.endsWith('.BLUETOOTH') || name.endsWith('BLUETOOTH_ADMIN')
+              ? { 'android:maxSdkVersion': '30' }
+              : {}),
             ...(name.endsWith('NEARBY_WIFI_DEVICES')
               ? { 'android:usesPermissionFlags': 'neverForLocation' }
               : {}),
@@ -104,6 +111,7 @@ const withLocalHotspot: ConfigPlugin = (config) => {
         'MipyDirectModule.java',
         'MipyDiscoveryModule.java',
         'MipyPasswordModule.java',
+        'MipyPrinterModule.java',
       ])
         writeFileSync(
           join(directory, file),

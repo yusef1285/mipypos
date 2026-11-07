@@ -30,6 +30,7 @@ import { getPendingSale, sendPendingSale } from '@/lib/network/pending-sale';
 import { getHostSnapshot } from '@/lib/network/client';
 import { usePosRepository } from '@/lib/use-pos-repository';
 import { createThermalTicket } from '@/lib/ticket';
+import { printSaleTicket, printerSupported } from '@/lib/bt-printer';
 import { roundMoney, roundQuantity, validateQuantity } from '@/lib/units';
 import { trackSaleDraft, clearSaleDraft } from '@/lib/sale-draft';
 import { lineUnitPrice, saleUnitPrice } from '@/lib/sale-pricing';
@@ -374,6 +375,29 @@ export default function Sales() {
         licenseMode === 'pro'
           ? [
               { text: 'Cerrar' },
+              ...(printerSupported()
+                ? [
+                    {
+                      text: 'Imprimir',
+                      onPress: () => {
+                        void (async () => {
+                          try {
+                            const [data, numbering] = await Promise.all([
+                              getSale(id),
+                              getSaleTicket(id).catch(() => null),
+                            ]);
+                            if (data) await printSaleTicket(data.sale, data.lines, numbering);
+                          } catch (failure) {
+                            Alert.alert(
+                              'No se pudo imprimir',
+                              failure instanceof Error ? failure.message : 'Inténtalo de nuevo.',
+                            );
+                          }
+                        })();
+                      },
+                    },
+                  ]
+                : []),
               {
                 text: 'Ticket',
                 onPress: () => {

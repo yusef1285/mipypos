@@ -18,7 +18,8 @@
     "test:security": "tsx --test scripts/security-regression.test.ts",
     "test:business": "tsx --test scripts/business-regression.test.ts",
     "test:license": "tsx --test scripts/license-regression.test.ts",
-    "validate:pos": "npm run test:pos && npm run test:security && npm run test:lan && npm run test:finance && npm run test:onat && npm run test:recovery && npm run test:business && npm run test:license",
+    "test:escpos": "tsx --test scripts/escpos.test.ts",
+    "validate:pos": "npm run test:pos && npm run test:security && npm run test:lan && npm run test:finance && npm run test:onat && npm run test:recovery && npm run test:business && npm run test:license && npm run test:escpos",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check ."
   },

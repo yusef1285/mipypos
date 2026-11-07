@@ -9,6 +9,7 @@ import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
 import { LicensePanel } from '@/components/LicensePanel';
 import { ErrorLogPanel } from '@/components/ErrorLogPanel';
+import { PrinterPanel } from '@/components/PrinterPanel';
 import { getDeviceInfo } from '@/lib/license';
 
 interface DeviceInfo {
@@ -42,6 +43,7 @@ export default function Settings() {
       </Card>
       <RecoveryBackupControls />
       <LanConnection allowHost />
+      <PrinterPanel />
       <ErrorLogPanel />
       <Button variant="danger-soft" size="lg" onPress={logout}>
         <LogOut className="text-danger" size={19} />
