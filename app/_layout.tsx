@@ -85,6 +85,11 @@ function AppStack() {
       <Stack.Screen name="settings" options={{ headerShown: true, title: 'Configuración' }} />
       <Stack.Screen name="branches" options={{ headerShown: true, title: 'Sucursales' }} />
       <Stack.Screen name="transfers" options={{ headerShown: true, title: 'Transferencias' }} />
+      <Stack.Screen name="purchases" options={{ headerShown: true, title: 'Compras' }} />
+      <Stack.Screen
+        name="inventory-count"
+        options={{ headerShown: true, title: 'Conteo físico' }}
+      />
       <Stack.Screen
         name="parties"
         options={{ headerShown: true, title: 'Clientes y proveedores' }}

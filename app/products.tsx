@@ -12,13 +12,16 @@ import {
   Typography,
   useThemeColor,
 } from 'heroui-native';
-import { Download, ImagePlus, Pencil, Plus, Trash2, Upload } from 'lucide-react-native';
-import { useCallback, useEffect, useState } from 'react';
+import { randomUUID } from 'expo-crypto';
+import { Download, ImagePlus, Pencil, Plus, ScanLine, Trash2, Upload } from 'lucide-react-native';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Image, View } from 'react-native';
 
 import { AccessDenied } from '@/components/AccessDenied';
 import { DemoQuota } from '@/components/DemoQuota';
 import { EmptyState } from '@/components/pos-ui';
+import { PRODUCT_BARCODES, QrScanner } from '@/components/QrScanner';
+import type { ProductExtras } from '@/lib/business-models';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
 import { parseCsv } from '@/lib/csv';
@@ -40,11 +43,27 @@ const empty = {
   price_cash: '',
   price_transfer: '',
   image_path: null as string | null,
+  barcode: '',
+  min_stock: '',
+  wholesale_price: '',
+  wholesale_min_qty: '',
 };
+const decimal = (value: string) => Number(value.replace(',', '.'));
 export default function Products() {
   const { user, licenseMode, refresh, networkConfig } = useApp();
-  const { deleteProduct, getExportRows, importProducts, listProducts, saveProduct } =
-    usePosRepository();
+  const {
+    deleteProduct,
+    getExportRows,
+    importProducts,
+    listProducts,
+    saveProduct,
+    listProductExtras,
+    executeBusinessCommand,
+  } = usePosRepository();
+  const [extras, setExtras] = useState<ProductExtras[]>([]);
+  const [scanning, setScanning] = useState(false);
+  const [onlyLow, setOnlyLow] = useState(false);
+  const extraOf = useMemo(() => new Map(extras.map((e) => [e.product_id, e])), [extras]);
   const [products, setProducts] = useState<Producto[]>([]);
   const [search, setSearch] = useState('');
   const [form, setForm] = useState(empty);
@@ -56,18 +75,25 @@ export default function Products() {
     if (!user || !canAccess(user.role, 'products')) return;
     try {
       setProducts(await listProducts(search));
+      setExtras(await listProductExtras().catch(() => []));
     } catch (failure) {
       Alert.alert(
         'No se pudieron cargar los productos',
         failure instanceof Error ? failure.message : 'Vuelve a intentarlo.',
       );
     }
-  }, [search, listProducts, user]);
+  }, [search, listProducts, listProductExtras, user]);
   useEffect(() => {
     const timer = setTimeout(() => void load(), 0);
     return () => clearTimeout(timer);
   }, [load]);
   if (!user || !canAccess(user.role, 'products')) return <AccessDenied />;
+  const minimum = (p: Producto) => extraOf.get(p.id)?.min_stock || 5;
+  const low = products.filter((p) => p.stock <= minimum(p));
+  const term = search.trim();
+  const byCode =
+    term.length >= 4 ? products.filter((p) => extraOf.get(p.id)?.barcode === term) : [];
+  const shown = onlyLow ? low : products;
   const edit = (p: Producto) => {
     setEditing(p.id);
     setForm({
@@ -80,6 +106,16 @@ export default function Products() {
       price_cash: String(p.price_cash),
       price_transfer: String(p.price_transfer),
       image_path: p.image_path,
+      barcode: extraOf.get(p.id)?.barcode ?? '',
+      min_stock: extraOf.get(p.id)?.min_stock ? String(extraOf.get(p.id)?.min_stock) : '',
+      wholesale_price:
+        extraOf.get(p.id)?.wholesale_price != null
+          ? String(extraOf.get(p.id)?.wholesale_price)
+          : '',
+      wholesale_min_qty:
+        extraOf.get(p.id)?.wholesale_min_qty != null
+          ? String(extraOf.get(p.id)?.wholesale_min_qty)
+          : '',
     });
     setShowForm(true);
   };
@@ -101,7 +137,11 @@ export default function Products() {
   const save = async () => {
     try {
       setSaving(true);
-      await saveProduct(
+      const wholesale = form.wholesale_price.trim() ? decimal(form.wholesale_price) : null;
+      const wholesaleQty = form.wholesale_min_qty.trim() ? decimal(form.wholesale_min_qty) : null;
+      if ((wholesale == null) !== (wholesaleQty == null))
+        throw new Error('Indica el precio mayorista y la cantidad mínima, o deja ambos vacíos.');
+      const productId = await saveProduct(
         {
           id: editing,
           name: form.name,
@@ -116,6 +156,34 @@ export default function Products() {
         },
         user.username,
       );
+      const before = editing ? extraOf.get(editing) : undefined;
+      const changed =
+        (before?.barcode ?? '') !== form.barcode.trim() ||
+        (before?.min_stock ?? 0) !== (form.min_stock.trim() ? decimal(form.min_stock) : 0) ||
+        (before?.wholesale_price ?? null) !== wholesale ||
+        (before?.wholesale_min_qty ?? null) !== wholesaleQty;
+      if (changed)
+        try {
+          await executeBusinessCommand(
+            {
+              commandId: randomUUID(),
+              action: 'product.extras',
+              productId,
+              barcode: form.barcode.trim(),
+              minStock: form.min_stock.trim() ? decimal(form.min_stock) : 0,
+              wholesalePrice: wholesale,
+              wholesaleMinQty: wholesaleQty,
+            },
+            user.username,
+          );
+        } catch (failure) {
+          Alert.alert(
+            'Producto guardado sin datos extra',
+            failure instanceof Error
+              ? failure.message
+              : 'Código, mínimo o precio mayorista no se guardaron.',
+          );
+        }
       setForm(empty);
       setEditing(undefined);
       setShowForm(false);
@@ -297,6 +365,64 @@ export default function Products() {
               onChangeText={(price_transfer) => setForm((v) => ({ ...v, price_transfer }))}
             />
           </TextField>
+          <View className="flex-row items-end gap-2">
+            <TextField className="flex-1">
+              <Label>Código de barras</Label>
+              <Input
+                value={form.barcode}
+                maxLength={64}
+                onChangeText={(barcode) => setForm((v) => ({ ...v, barcode }))}
+              />
+            </TextField>
+            <Button
+              isIconOnly
+              variant="secondary"
+              accessibilityLabel="Escanear código de barras"
+              onPress={() => setScanning((value) => !value)}
+            >
+              <ScanLine color={accent} size={20} />
+            </Button>
+          </View>
+          {scanning ? (
+            <QrScanner
+              types={PRODUCT_BARCODES}
+              prompt="Permite la cámara para leer el código del producto."
+              onCancel={() => setScanning(false)}
+              onScan={async (barcode) => {
+                setForm((v) => ({ ...v, barcode: barcode.trim() }));
+                setScanning(false);
+              }}
+            />
+          ) : null}
+          <TextField>
+            <Label>Stock mínimo (aviso de reposición)</Label>
+            <Input
+              keyboardType="decimal-pad"
+              value={form.min_stock}
+              placeholder="5"
+              onChangeText={(min_stock) => setForm((v) => ({ ...v, min_stock }))}
+            />
+          </TextField>
+          <View className="flex-row gap-3">
+            <TextField className="flex-1">
+              <Label>Precio mayorista</Label>
+              <Input
+                keyboardType="decimal-pad"
+                value={form.wholesale_price}
+                placeholder="Opcional"
+                onChangeText={(wholesale_price) => setForm((v) => ({ ...v, wholesale_price }))}
+              />
+            </TextField>
+            <TextField className="flex-1">
+              <Label>Desde cantidad</Label>
+              <Input
+                keyboardType="decimal-pad"
+                value={form.wholesale_min_qty}
+                placeholder="Ej. 10"
+                onChangeText={(wholesale_min_qty) => setForm((v) => ({ ...v, wholesale_min_qty }))}
+              />
+            </TextField>
+          </View>
           {networkConfig.mode !== 'client' ? (
             <Button variant="secondary" onPress={() => void pickImage()}>
               <ImagePlus color={accent} size={18} />
@@ -310,9 +436,12 @@ export default function Products() {
           </Button>
         </Card>
       ) : null}
-      <Input value={search} onChangeText={setSearch} placeholder="Buscar productos" />
-      {products.length ? (
-        products.map((product) => (
+      <Input value={search} onChangeText={setSearch} placeholder="Buscar productos o código" />
+      <Chip variant={onlyLow ? 'primary' : 'soft'} onPress={() => setOnlyLow((value) => !value)}>
+        <Chip.Label>Por reponer ({low.length})</Chip.Label>
+      </Chip>
+      {(byCode.length ? byCode : shown).length ? (
+        (byCode.length ? byCode : shown).map((product) => (
           <Card key={product.id} className="flex-row items-center gap-3 p-3">
             {product.image_path ? (
               <Image
@@ -330,7 +459,7 @@ export default function Products() {
                 <Typography.Paragraph className="font-semibold">
                   {product.name}
                 </Typography.Paragraph>
-                {product.stock <= 5 ? (
+                {product.stock <= minimum(product) ? (
                   <Chip size="sm" color="warning" variant="soft">
                     Bajo
                   </Chip>
@@ -338,6 +467,7 @@ export default function Products() {
               </View>
               <Typography.Paragraph type="body-sm" color="muted">
                 {product.stock} {product.unit} · {money(product.price_cash)} / {product.unit}
+                {product.stock <= minimum(product) ? ` · mínimo ${minimum(product)}` : ''}
               </Typography.Paragraph>
             </View>
             <Button size="sm" variant="ghost" isIconOnly onPress={() => edit(product)}>

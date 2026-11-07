@@ -30,7 +30,9 @@ const items: Array<{
     | '/currencies'
     | '/payroll'
     | '/partners'
-    | '/consolidated';
+    | '/consolidated'
+    | '/purchases'
+    | '/inventory-count';
   icon: (typeof appIcons)[keyof typeof appIcons];
 }> = [
   { module: 'onat', label: '🧾 MipyPOS ONAT', href: '/onat', icon: appIcons.reports },
@@ -63,6 +65,13 @@ const items: Array<{
   { module: 'business', label: 'Consolidado', href: '/consolidated', icon: appIcons.reports },
   { module: 'business', label: 'Sucursales', href: '/branches', icon: appIcons.store },
   { module: 'transfers', label: 'Transferencias', href: '/transfers', icon: appIcons.package },
+  { module: 'transfers', label: 'Conteo físico', href: '/inventory-count', icon: appIcons.package },
+  {
+    module: 'business',
+    label: 'Compras a proveedores',
+    href: '/purchases',
+    icon: appIcons.package,
+  },
   {
     module: 'business',
     label: 'Clientes y proveedores',
