@@ -7,6 +7,8 @@ import { createBusinessArchive, restoreBusinessArchive } from '@/lib/database';
 import { parseBusinessArchive, type BusinessArchive } from '@/lib/business-archive';
 import { z } from 'zod';
 import { markArchiveShared } from '@/lib/backup-reminder';
+import { getDesktopBridge } from '@/lib/desktop';
+import { pickDesktopArchive, saveDesktopBackup } from '@/lib/desktop-backup';
 
 const envelopeSchema = z
   .object({
@@ -16,6 +18,13 @@ const envelopeSchema = z
   })
   .strict();
 export async function shareBusinessArchive(username: string) {
+  const desktop = getDesktopBridge();
+  if (desktop) {
+    const path = await saveDesktopBackup(username);
+    await desktop.backups.openFolder();
+    await markArchiveShared();
+    return path;
+  }
   if (!(await Sharing.isAvailableAsync()))
     throw new Error('Este dispositivo no permite compartir archivos.');
   const archive = await createBusinessArchive(username);
@@ -54,6 +63,7 @@ export async function shareBusinessArchive(username: string) {
   return file.uri;
 }
 export async function pickBusinessArchive(): Promise<BusinessArchive | null> {
+  if (getDesktopBridge()) return pickDesktopArchive();
   const result = await DocumentPicker.getDocumentAsync({
     type: ['application/json', 'text/plain', 'application/octet-stream'],
     copyToCacheDirectory: true,
@@ -85,6 +95,15 @@ export async function receiveBusinessArchive(value: BusinessArchive, username: s
   try {
     for (const product of archive.tables.products) {
       if (product.image_path === null) continue;
+      // Windows keeps validated images inline; the web renderer has no app document folder.
+      if (getDesktopBridge()) {
+        if (
+          typeof product.image_path !== 'string' ||
+          !/^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/]+={0,2}$/.test(product.image_path)
+        )
+          throw new Error('Una imagen del archivo no es válida.');
+        continue;
+      }
       if (
         typeof product.image_path !== 'string' ||
         !/^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/]+={0,2}$/.test(product.image_path)

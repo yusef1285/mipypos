@@ -27,7 +27,10 @@ import type { Area, AreaStock, CartItem, PaymentType, Producto, SaleMethod } fro
 import { canAccess } from '@/lib/permissions';
 import { registerPosSale } from '@/lib/pos-repository';
 import { getPendingSale, sendPendingSale } from '@/lib/network/pending-sale';
-import { getHostSnapshot } from '@/lib/network/client';
+import { HostRejection, getHostSnapshot, getOfflineSnapshot } from '@/lib/network/client';
+import { getOutbox, outboxReservations, type OutboxSale } from '@/lib/network/sale-outbox';
+import { SaleOutboxPanel } from '@/components/SaleOutboxPanel';
+import { outboxTicket } from '@/lib/outbox-ticket';
 import { usePosRepository } from '@/lib/use-pos-repository';
 import { createThermalTicket } from '@/lib/ticket';
 import { printSaleTicket, printerSupported } from '@/lib/bt-printer';
@@ -52,7 +55,9 @@ const methods: Array<{ key: PaymentType; label: string }> = [
   { key: 'transfer', label: 'Transferencia' },
 ];
 export default function Sales() {
-  const { user, session, licenseMode, refresh, networkConfig } = useApp();
+  const { user, session, licenseMode, refresh, networkConfig, networkStatus, offlineSession } =
+    useApp();
+  const [offlineCatalogAt, setOfflineCatalogAt] = useState('');
   const {
     listProducts,
     listAreas,
@@ -112,14 +117,42 @@ export default function Sales() {
     loadingRef.current = true;
     try {
       setPendingSale(networkConfig.mode === 'client' && Boolean(await getPendingSale()));
-      const data =
-        networkConfig.mode === 'client'
-          ? await getHostSnapshot(networkConfig.hostUrl)
-          : {
-              products: await listProducts(),
-              areas: await listAreas(),
-              areaStock: await listAreaStock(),
-            };
+      let data: { products: Producto[]; areas: Area[]; areaStock: AreaStock[] };
+      if (networkConfig.mode === 'client') {
+        try {
+          data = await getHostSnapshot(networkConfig.hostUrl);
+          setOfflineCatalogAt('');
+        } catch (failure) {
+          // Without the administrator, keep selling with the last confirmed catalog.
+          if (failure instanceof HostRejection && failure.code !== 'AUTH_EXPIRED') throw failure;
+          const offline = await getOfflineSnapshot(
+            networkConfig.hostPin || networkConfig.hostUrl,
+            user.username,
+          );
+          if (!offline)
+            throw new Error(
+              'Sin conexión con el administrador y sin catálogo guardado. Conéctate una vez a su Wi-Fi para poder vender sin conexión.',
+              { cause: failure },
+            );
+          data = offline;
+          setOfflineCatalogAt(offline.confirmedAt);
+        }
+        // Subtract sales already made here that the host has not confirmed yet.
+        const reserved = outboxReservations(await getOutbox(), networkConfig.hostUrl);
+        if (reserved.size)
+          data = {
+            ...data,
+            areaStock: data.areaStock.map((stock) => {
+              const used = reserved.get(`${stock.product_id}:${stock.area_id}`) ?? 0;
+              return used ? { ...stock, quantity: roundQuantity(stock.quantity - used) } : stock;
+            }),
+          };
+      } else
+        data = {
+          products: await listProducts(),
+          areas: await listAreas(),
+          areaStock: await listAreaStock(),
+        };
       setProducts(data.products);
       // Optional data: an older host without v11 simply sells without these extras.
       const saleOptions = await getSaleOptions().catch(() => null);
@@ -280,9 +313,10 @@ export default function Sales() {
   const finish = async () => {
     if (!user || saving) return;
     let committed = false;
+    let offlineEntry: OutboxSale | null = null;
     try {
       setSaving(true);
-      let id: number;
+      let id = 0;
       if (pendingSale) {
         id = await sendPendingSale(networkConfig, user.username);
       } else {
@@ -291,6 +325,14 @@ export default function Sales() {
           throw new Error('Elige el cliente de la venta a crédito.');
         if (special === 'fx' && (!fx || fxBase + 0.005 < total))
           throw new Error('El importe en divisa no cubre el total de la venta.');
+        if (
+          networkConfig.mode === 'client' &&
+          special !== 'normal' &&
+          (offlineSession || networkStatus === 'offline' || networkStatus === 'error')
+        )
+          throw new Error(
+            'Sin conexión: las ventas a crédito o en divisa necesitan al administrador. Cobra en efectivo o transferencia, o espera a que vuelva la red.',
+          );
         cart.forEach((item) => {
           validateQuantity(item.quantity, item.product.quantity_decimals);
           if (item.quantity > (available.get(item.product.id) ?? 0))
@@ -317,7 +359,7 @@ export default function Sales() {
           transferReceipt: method !== 'cash' ? receipt : null,
         };
         validateSettlement(payments, settlement);
-        id = await registerPosSale(
+        const result = await registerPosSale(
           networkConfig,
           priced,
           method,
@@ -326,9 +368,50 @@ export default function Sales() {
           session.id,
           settlement,
         );
+        if (result.offline) offlineEntry = result.offline;
+        else id = result.saleId;
       }
       setPendingSale(false);
       committed = true;
+      if (offlineEntry) {
+        const queued = offlineEntry;
+        setSpecial('normal');
+        setCart([]);
+        setDrafts({});
+        setCashReceived('');
+        setReceipt(emptyTransferReceipt());
+        setAmounts({ cash: '', transfer: '' });
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        Alert.alert(
+          'Venta guardada sin conexión',
+          `Venta local T-${queued.localNumber}${cashPart > 0 ? `\nVuelto: ${money(change)}` : ''}\nSe enviará al administrador en cuanto vuelva la conexión.`,
+          licenseMode === 'pro'
+            ? [
+                { text: 'Cerrar' },
+                {
+                  text: 'Ticket provisional',
+                  onPress: () => {
+                    const ticket = outboxTicket(queued, products);
+                    void createThermalTicket(
+                      ticket.sale,
+                      ticket.lines,
+                      licenseMode,
+                      ticket.numbering,
+                    ).catch((failure: unknown) =>
+                      Alert.alert(
+                        'No se pudo generar el ticket',
+                        failure instanceof Error ? failure.message : 'Inténtalo de nuevo.',
+                      ),
+                    );
+                  },
+                },
+              ]
+            : [{ text: 'Aceptar' }],
+        );
+        await refresh().catch(() => undefined);
+        await load();
+        return;
+      }
       let followUp = '';
       if (!pendingSale && special !== 'normal') {
         try {
@@ -698,6 +781,16 @@ export default function Sales() {
         ListHeaderComponent={
           <View className="gap-4 pb-3">
             <Typography.Heading type="h2">Nueva venta</Typography.Heading>
+            {networkConfig.mode === 'client' ? (
+              <SaleOutboxPanel onChange={() => void load()} />
+            ) : null}
+            {offlineCatalogAt ? (
+              <Typography.Paragraph type="body-sm" className="text-warning">
+                Sin conexión: usando el catálogo recibido el{' '}
+                {new Date(offlineCatalogAt.replace(' ', 'T')).toLocaleString()}. Las existencias
+                pueden haber cambiado en otras terminales.
+              </Typography.Paragraph>
+            ) : null}
             <DemoQuota resource="sales" />
             <Chip color={session ? 'success' : 'danger'} variant="soft">
               <Chip.Label>{session ? 'Caja abierta' : 'Caja cerrada'}</Chip.Label>

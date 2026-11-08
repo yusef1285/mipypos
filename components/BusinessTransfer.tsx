@@ -9,6 +9,7 @@ import {
   receiveBusinessArchive,
   shareBusinessArchive,
 } from '@/lib/business-transfer';
+import { isDesktop } from '@/lib/desktop';
 import { money } from '@/lib/format';
 import { getPendingSale } from '@/lib/network/pending-sale';
 import { getPendingOperation } from '@/lib/network/pending-operation';
@@ -21,6 +22,7 @@ export function BusinessTransfer() {
   const [error, setError] = useState('');
   const [incoming, setIncoming] = useState<BusinessArchive | null>(null);
   if (user?.role !== 'admin') return null;
+  const desktop = isDesktop();
   const run = async (action: () => Promise<void>) => {
     try {
       setBusy(true);
@@ -47,7 +49,16 @@ export function BusinessTransfer() {
   };
   return (
     <Card className="gap-4 p-4">
-      <Typography.Heading type="h4">Continuar en otro teléfono</Typography.Heading>
+      <Typography.Heading type="h4">
+        {desktop ? 'Copias y traslado del negocio' : 'Continuar en otro teléfono'}
+      </Typography.Heading>
+      {desktop ? (
+        <Typography.Paragraph type="body-sm" color="muted">
+          En Windows el archivo se guarda en Documentos\MipyPOS\Copias y se crea una copia
+          automática después de cada cierre de caja. Para pasar el negocio de un teléfono a esta
+          computadora, copia aquí el JSON del teléfono y usa “Recibir archivo de cierre”.
+        </Typography.Paragraph>
+      ) : null}
       <Typography.Paragraph>
         El archivo incluye usuarios, ventas, comprobantes, cierres y existencias, pero no
         contraseñas ni hashes de acceso. La licencia permanece en cada teléfono. Compártelo solo con
@@ -61,12 +72,22 @@ export function BusinessTransfer() {
         isDisabled={busy || !!session}
         onPress={() =>
           void run(async () => {
-            await shareBusinessArchive(user.username);
-            setMessage('Archivo de cierre guardado y listo para compartir.');
+            const path = await shareBusinessArchive(user.username);
+            setMessage(
+              desktop
+                ? `Copia guardada en ${path}`
+                : 'Archivo de cierre guardado y listo para compartir.',
+            );
           })
         }
       >
-        <Button.Label>{busy ? 'Procesando…' : 'Guardar y enviar cierre completo'}</Button.Label>
+        <Button.Label>
+          {busy
+            ? 'Procesando…'
+            : desktop
+              ? 'Guardar copia del cierre'
+              : 'Guardar y enviar cierre completo'}
+        </Button.Label>
       </Button>
       <Button
         variant="secondary"

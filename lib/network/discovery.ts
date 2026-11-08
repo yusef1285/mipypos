@@ -2,6 +2,7 @@ import { NativeModules, Platform } from 'react-native';
 import { z } from 'zod';
 import { checkLanHost } from '@/lib/network/client';
 import { validateLanUrl } from '@/lib/network/qr';
+import { getDesktopBridge } from '@/lib/desktop';
 const candidateSchema = z.array(z.object({ name: z.string(), hostUrl: z.string() })).max(12);
 interface DiscoveryBridge {
   advertise(identity: string, port: number): Promise<void>;
@@ -38,13 +39,18 @@ export const getAdvertisementError = () => advertisementError;
 export async function advertiseLanHost(identity: string, port: number) {
   advertisementError = '';
   try {
-    await bridge().advertise(identity, port);
+    const desktop = getDesktopBridge();
+    if (desktop) await desktop.discovery.advertise(identity, port);
+    else await bridge().advertise(identity, port);
   } catch (error) {
     advertisementError =
       error instanceof Error ? error.message : 'No se pudo anunciar el administrador. Usa su QR.';
   }
 }
 export function stopLanAdvertisement() {
+  void getDesktopBridge()
+    ?.discovery.stop()
+    .catch(() => undefined);
   if (Platform.OS === 'android' && NativeModules.MipyDiscovery)
     void bridge()
       .stopAdvertisement()

@@ -25,6 +25,7 @@ import { money, parsePositiveNumber } from '@/lib/format';
 import { CASH_DENOMINATIONS } from '@/lib/models';
 import type { CashClosurePreview } from '@/lib/models';
 import { getSetting } from '@/lib/database';
+import { autoDesktopBackup } from '@/lib/desktop-backup';
 import { getPendingWithdrawal } from '@/lib/network/pending-withdrawal';
 import { canAccess } from '@/lib/permissions';
 
@@ -247,6 +248,7 @@ export default function Cash() {
       setStep(0);
       setAdminPassword('');
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      if (networkConfig.mode !== 'client') void autoDesktopBackup(adminName);
       await refresh();
       Alert.alert(
         'Caja cerrada',

@@ -3,6 +3,7 @@ import * as Device from 'expo-device';
 import { Platform } from 'react-native';
 
 import { getSetting, setSetting } from '@/lib/database';
+import { getDesktopBridge, isDesktop } from '@/lib/desktop';
 import {
   deviceCodeFrom,
   evaluateLicense,
@@ -11,6 +12,9 @@ import {
 } from '@/lib/license-token';
 
 export async function getDeviceId() {
+  // Windows: stable machine identifier provided by the desktop shell.
+  const desktop = getDesktopBridge();
+  if (desktop) return `desktop:${await desktop.deviceId()}`;
   if (Platform.OS === 'android') {
     const androidId = Application.getAndroidId();
     if (androidId) return androidId;
@@ -68,8 +72,8 @@ export async function getDeviceInfo() {
   return {
     id: await getDeviceId(),
     code: await getDeviceCode(),
-    brand: Device.brand ?? 'Desconocida',
-    model: Device.modelName ?? 'Desconocido',
+    brand: Device.brand ?? (isDesktop() ? 'MipyPOS' : 'Desconocida'),
+    model: Device.modelName ?? (isDesktop() ? 'Escritorio' : 'Desconocido'),
     os: `${Device.osName ?? 'Android'} ${Device.osVersion ?? ''}`.trim(),
     version: Application.nativeApplicationVersion ?? '1.0.0',
   };

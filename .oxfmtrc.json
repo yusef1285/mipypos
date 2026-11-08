@@ -3,7 +3,7 @@
   "singleQuote": true,
   "trailingComma": "all",
   "printWidth": 100,
-  "ignorePatterns": ["uniwind-types.d.ts"],
+  "ignorePatterns": ["uniwind-types.d.ts", "desktop/node_modules", "desktop/release"],
   "sortTailwindcss": {
     "functions": ["clsx", "cn", "cva", "tw"]
   }

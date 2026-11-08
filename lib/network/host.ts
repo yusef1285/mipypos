@@ -25,6 +25,7 @@ import { redactCosts } from '@/lib/finance-privacy';
 import { lineUnitPrice } from '@/lib/sale-pricing';
 import { saleFingerprint } from '@/lib/sale-identity';
 import { assertOperationRequest, assertSaleCommand, ProtocolError } from '@/lib/network/validation';
+import { isDesktop } from '@/lib/desktop';
 import { canAccess, type ModuleKey } from '@/lib/permissions';
 
 interface SessionEntry {
@@ -266,8 +267,9 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
 }
 
 export async function startLanHost(): Promise<string> {
-  if (Platform.OS !== 'android')
-    throw new Error('El host local requiere una compilación Android con el servidor LAN.');
+  const desktop = isDesktop();
+  if (Platform.OS !== 'android' && !desktop)
+    throw new Error('El servidor local requiere MipyPOS para Android o MipyPOS para Windows.');
   if (await DB.hasDefaultAdministratorPassword())
     throw new Error(
       'Cambia la contraseña inicial del administrador en Usuarios antes de iniciar la red local.',
@@ -277,11 +279,15 @@ export async function startLanHost(): Promise<string> {
     await new Promise((resolve) => setTimeout(resolve, 500));
     ip = await getLanHostIp();
   }
-  ip ??= await Network.getIpAddressAsync();
+  if (!desktop) ip ??= await Network.getIpAddressAsync();
   if (!ip || ip === '0.0.0.0' || ip === '127.0.0.1')
-    throw new Error('Conecta el Wi-Fi o activa el hotspot antes de iniciar el host.');
+    throw new Error(
+      desktop
+        ? 'Conecta la computadora al Wi-Fi o al router del negocio antes de iniciar el servidor.'
+        : 'Conecta el Wi-Fi o activa el hotspot antes de iniciar el host.',
+    );
   if (server) await stopLanHostAndDrain();
-  if (!NativeModules.MipyTls)
+  if (!desktop && !NativeModules.MipyTls)
     throw new Error(
       'Esta instalación no incluye el servidor LAN. Instala una compilación Android con el módulo de red.',
     );

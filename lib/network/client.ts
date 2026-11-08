@@ -231,6 +231,7 @@ export function loginToHost(hostUrl: string, username: string, password: string)
       await request(hostUrl, '/v1/login', { username, password }),
     );
     await saveNetworkToken(session.token);
+    setOfflineIdentity(hostUrl, session.user.username, (await loadNetworkConfig()).hostPin);
     const pending = await getPendingOperation();
     if (pending && pending.hostUrl === hostUrl && pending.username === session.user.username) {
       await resolvePendingOperation(hostUrl, pending, session.token, (value) =>
@@ -250,6 +251,34 @@ export function logoutFromHost(hostUrl?: string, hostPin?: string) {
     await clearNetworkReplicas();
     if (hostUrl && token) await revokeOrDefer(hostUrl, hostPin ?? config.hostPin ?? '', token);
   });
+}
+
+// Offline catalog: last snapshot confirmed for this user, used to keep selling
+// while the administrator is unreachable. It survives logout (not re-pairing).
+// Keyed by the pinned administrator identity, so a new IP keeps the catalog.
+let offlineIdentity: { hostUrl: string; authority: string; username: string } | null = null;
+let offlineMarker = '';
+export function setOfflineIdentity(hostUrl: string, username: string | null, hostPin?: string) {
+  offlineIdentity = username ? { hostUrl, authority: hostPin || hostUrl, username } : null;
+}
+async function offlineCacheKey(authority: string, username: string) {
+  const digest = await Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    JSON.stringify(['offline-catalog-v1', authority, username.toLocaleLowerCase()]),
+  );
+  return `offline:${digest}`;
+}
+export async function getOfflineSnapshot(
+  authority: string,
+  username: string,
+): Promise<(NetworkSnapshot & { confirmedAt: string }) | null> {
+  const stored = await getNetworkReplica(await offlineCacheKey(authority, username));
+  if (!stored) return null;
+  try {
+    return { ...parseSnapshot(JSON.parse(stored.payload)), confirmedAt: stored.confirmed_at };
+  } catch {
+    return null;
+  }
 }
 
 const snapshotRequests = new Map<string, Promise<NetworkSnapshot>>();
@@ -301,10 +330,23 @@ export async function getHostSnapshot(hostUrl: string): Promise<NetworkSnapshot>
         throw new Error(
           'La revisión recibida no coincide con la copia local. Vuelve a intentarlo.',
         );
+      const marker = `${hostUrl}|${offlineIdentity?.username}|${cached.revision}`;
+      if (offlineIdentity?.hostUrl === hostUrl && stored && offlineMarker !== marker) {
+        await storeNetworkReplica(
+          await offlineCacheKey(offlineIdentity.authority, offlineIdentity.username),
+          stored.payload,
+        );
+        offlineMarker = marker;
+      }
       return cached;
     }
     const snapshot = parseSnapshot(response);
     await storeNetworkReplica(cacheKey, JSON.stringify(snapshot));
+    if (offlineIdentity?.hostUrl === hostUrl)
+      await storeNetworkReplica(
+        await offlineCacheKey(offlineIdentity.authority, offlineIdentity.username),
+        JSON.stringify(snapshot),
+      );
     try {
       await assertCurrentSession();
     } catch (error) {
