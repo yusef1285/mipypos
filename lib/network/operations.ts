@@ -2,6 +2,13 @@ import type * as Database from '@/lib/database';
 import type { ModuleKey } from '@/lib/permissions';
 
 export const operationPermissions = {
+  getBusinessData: 'business',
+  getTransferData: 'transfers',
+  executeBusinessCommand: 'transfers',
+  getSaleTicket: 'sales',
+  executeSaleCommand: 'sales',
+  listProductExtras: 'home',
+  getSaleOptions: 'sales',
   getFiscalData: 'onat',
   executeFiscalCommand: 'onat',
   setFiscalPermission: 'users',
@@ -48,6 +55,8 @@ export type PosResult<K extends PosOperation> =
   | LocalPosResult<K>
   | (void extends LocalPosResult<K> ? null : never);
 export const mutationOperations: ReadonlySet<PosOperation> = new Set([
+  'executeBusinessCommand',
+  'executeSaleCommand',
   'executeFiscalCommand',
   'setFiscalPermission',
   'setProductCost',

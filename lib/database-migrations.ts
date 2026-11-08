@@ -1,9 +1,10 @@
 import * as SQLite from 'expo-sqlite';
 import * as Crypto from 'expo-crypto';
 
-import { assertRecoveryJournalAvailable, migrateRecoveryJournal } from '@/lib/recovery-journal';
+import { migrateBusiness } from '@/lib/business-schema';
+import { assertRecoveryJournalAvailable, installRecoveryJournal } from '@/lib/recovery-journal';
 
-export const DATABASE_VERSION = 9;
+export const DATABASE_VERSION = 11;
 
 // The SQLite backup API includes committed WAL pages. Copies stay in the private
 // database directory; never export this credential-bearing recovery database.
@@ -127,11 +128,15 @@ export async function migrateHardening(db: SQLite.SQLiteDatabase) {
       AFTER ${event} ON settings WHEN ${row}.key='license_mode' ${event === 'UPDATE' ? 'AND OLD.value IS NOT NEW.value' : ''}
       BEGIN UPDATE sync_state SET revision=revision+1 WHERE id=1; END;`);
   }
+  // Verify v9 evidence before adding v10 tables; the install step then extends
+  // the journal to the new tables without re-checking them as pre-existing.
+  await assertRecoveryJournalAvailable(db);
+  await migrateBusiness(db);
   const foreignErrors = await db.getAllAsync('PRAGMA foreign_key_check');
   if (foreignErrors.length)
     throw new Error(
       'Hay referencias incompletas en la base de datos. Restaura una copia antes de continuar.',
     );
-  await migrateRecoveryJournal(db);
+  await installRecoveryJournal(db);
   await db.execAsync(`PRAGMA user_version=${DATABASE_VERSION}`);
 }

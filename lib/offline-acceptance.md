@@ -1,5 +1,25 @@
 # MipyPOS — matriz de aceptación offline
 
+## Continuidad actual: módulos empresariales v10
+
+SQLite operativo es **v10**; el formato de traslado comercial es **esquema 9** (los de esquema 8 se aceptan con tablas v10 vacías). La migración v9→v10 es aditiva y se ejecuta antes de reinstalar el journal privado, de modo que las tablas nuevas también quedan registradas para recuperación. Las copias de recuperación v8 y v9 se concilian tratando las tablas v10 como vacías.
+
+| Área                           | Implementado                                                              | Probado automáticamente          | Probado en Android | Requiere validación externa                             |
+| ------------------------------ | ------------------------------------------------------------------------- | -------------------------------- | ------------------ | ------------------------------------------------------- |
+| Sucursales y áreas             | Sí, con sucursal del dispositivo y numeración de tickets por sucursal     | Sí                               | No                 | Formato de ticket con datos del establecimiento         |
+| Transferencias entre áreas     | Sí: envío, tránsito, recepción parcial, devolución, pérdida y cancelación | Sí, incluido stock y movimientos | No                 | Recorrido físico con almacenero                         |
+| Clientes/proveedores y crédito | Sí, libro de solo inserción, límite y vencidos                            | Sí                               | No                 | Política de crédito del negocio                         |
+| Multidivisa                    | Sí, moneda base y tasas históricas; divisas fuera del arqueo base         | Sí                               | No                 | Fuente oficial de tasas                                 |
+| Nómina                         | Sí, flujo con importes congelados y aporte configurable                   | Sí                               | No                 | **Contador**: tasas, retenciones y obligaciones legales |
+| Socios                         | Sí, participaciones ≤ 100 % y anulación por contrapartida                 | Sí                               | No                 | Reglas societarias                                      |
+| Consolidado                    | Sí, por sucursal y periodo (día local)                                    | Sí                               | No                 | Revisión contable de criterios                          |
+
+Supersede la nota de "Pendientes prioritarios" que impedía crear estas pantallas: ahora existen operaciones persistentes, permisos y regresiones. Siguen pendientes la evidencia Android, la réplica LAN integral, la recuperación ante pérdida de la base original y las licencias (aplazadas por decisión del propietario).
+
+### Resultado actual comprobado
+
+**332/332** pruebas (118 POS + 6 seguridad + 77 LAN + 24 finanzas + 47 ONAT + 45 recuperación + 15 empresariales). Tipos, lint (0 advertencias), formato y parser CSS limpios. Sin APK ni prueba física.
+
 ## Continuidad actual: conciliación con journal privado v9
 
 La migración v8→v9 y la restauración con replay registrado están implementadas. Este apartado sustituye las referencias históricas siguientes al bloqueo de **toda** copia divergente; no cambia el estado de los módulos empresariales ausentes ni aprueba producción.
@@ -242,3 +262,22 @@ Registrar cada caso como pendiente/aprobado/fallido con versión APK, firma/conf
 **No listo para validación final de producción de todo el alcance Pro Max.** Corregidos cinco defectos con regresiones; persisten aceptación Android, restauración real, recuperación asistida/réplica integral y módulos empresariales N/P. La matriz no equivale a una auditoría de seguridad externa.
 
 Continuar desde A30/A32: recuperación asistida sin pérdida y conservación real con copias anonimizadas, mientras se prepara la compilación/pruebas físicas A26–A29. Después definir A33/A34 (aislamiento y recepción) antes de nómina/crédito/multidivisa. Fuera de esta fase permanecen servicios globales, internet entre países, PWA global y Desktop independiente.
+
+## Versión 1.0 (esquema v11) — casos añadidos
+
+Todos pendientes de ejecución en dispositivos reales:
+
+- [ ] Actualizar desde un APK v10 con datos: la migración a v11 conserva ventas, caja y licencia.
+- [ ] Desinstalar un APK de prueba firmado con clave debug e instalar el firmado con la clave de producción.
+- [ ] Activar licencia de prueba de 1 semana, de 1 mes y de 1 año; adelantar el reloj del teléfono y comprobar el bloqueo por reloj atrasado/adelantado.
+- [ ] Venta a crédito desde un cliente LAN: aparece el cargo en el cliente y la salida "Venta a crédito" en la caja; el arqueo cuadra.
+- [ ] Venta cobrada en USD con vuelto en CUP: la divisa aparece aparte en el cierre.
+- [ ] Ajuste de venta bloqueado en ventas a crédito o en divisa.
+- [ ] Escanear EAN-13 en Ventas y Productos; código repetido rechazado.
+- [ ] Precio mayorista al llegar a la cantidad mínima, igual en local y en cliente LAN.
+- [ ] Pedido en espera: guardar, cerrar la app, retomar.
+- [ ] Compra a crédito, efectivo y transferencia; stock y costo promedio correctos.
+- [ ] Conteo físico con diferencias positivas y negativas; movimientos y auditoría.
+- [ ] Bloqueo biométrico tras 2 min en segundo plano; cierre de sesión tras 30 min.
+- [ ] Impresora Bluetooth de 58 mm y de 80 mm: página de prueba y ticket.
+- [ ] Reporte diario PDF compartido por WhatsApp.

@@ -23,7 +23,16 @@ const items: Array<{
     | '/investment'
     | '/profitability'
     | '/seller-performance'
-    | '/onat';
+    | '/onat'
+    | '/branches'
+    | '/transfers'
+    | '/parties'
+    | '/currencies'
+    | '/payroll'
+    | '/partners'
+    | '/consolidated'
+    | '/purchases'
+    | '/inventory-count';
   icon: (typeof appIcons)[keyof typeof appIcons];
 }> = [
   { module: 'onat', label: '🧾 MipyPOS ONAT', href: '/onat', icon: appIcons.reports },
@@ -53,6 +62,25 @@ const items: Array<{
     href: '/seller-performance',
     icon: appIcons.users,
   },
+  { module: 'business', label: 'Consolidado', href: '/consolidated', icon: appIcons.reports },
+  { module: 'business', label: 'Sucursales', href: '/branches', icon: appIcons.store },
+  { module: 'transfers', label: 'Transferencias', href: '/transfers', icon: appIcons.package },
+  { module: 'transfers', label: 'Conteo físico', href: '/inventory-count', icon: appIcons.package },
+  {
+    module: 'business',
+    label: 'Compras a proveedores',
+    href: '/purchases',
+    icon: appIcons.package,
+  },
+  {
+    module: 'business',
+    label: 'Clientes y proveedores',
+    href: '/parties',
+    icon: appIcons.wallet,
+  },
+  { module: 'business', label: 'Monedas y tasas', href: '/currencies', icon: appIcons.payment },
+  { module: 'business', label: 'Nómina', href: '/payroll', icon: appIcons.userSettings },
+  { module: 'business', label: 'Socios', href: '/partners', icon: appIcons.value },
   { module: 'movements', label: 'Movimientos', href: '/movements', icon: appIcons.movements },
   { module: 'users', label: 'Usuarios', href: '/users', icon: appIcons.users },
   { module: 'exports', label: 'Exportaciones', href: '/exports', icon: appIcons.exports },
@@ -71,7 +99,7 @@ export default function More() {
             .map((item) => {
               const Icon = item.icon;
               return (
-                <ListGroup.Item key={item.module} onPress={() => router.push(item.href)}>
+                <ListGroup.Item key={item.href} onPress={() => router.push(item.href)}>
                   <Icon color={accent} size={21} />
                   <ListGroup.ItemContent>
                     <ListGroup.ItemTitle>{item.label}</ListGroup.ItemTitle>

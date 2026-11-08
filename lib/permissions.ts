@@ -16,7 +16,9 @@ export type ModuleKey =
   | 'investment'
   | 'profitability'
   | 'seller-performance'
-  | 'onat';
+  | 'onat'
+  | 'business'
+  | 'transfers';
 
 const ROLE_MODULES: Record<UserRole, readonly ModuleKey[]> = {
   admin: [
@@ -36,11 +38,21 @@ const ROLE_MODULES: Record<UserRole, readonly ModuleKey[]> = {
     'profitability',
     'seller-performance',
     'onat',
+    'business',
+    'transfers',
   ],
-  auditor: ['home', 'reports', 'exports', 'settings', 'audit'],
+  auditor: ['home', 'reports', 'exports', 'settings', 'audit', 'business'],
   supervisor: ['home', 'cash', 'sales', 'reports', 'settings', 'consumption'],
   seller: ['home', 'sales', 'settings', 'consumption'],
-  storekeeper: ['home', 'inventory', 'movements', 'products', 'settings', 'consumption'],
+  storekeeper: [
+    'home',
+    'inventory',
+    'movements',
+    'products',
+    'settings',
+    'consumption',
+    'transfers',
+  ],
 };
 
 export function canAccess(

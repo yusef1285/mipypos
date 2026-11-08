@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHarness, prepareHarness } from './pos-test-harness';
+import { BUSINESS_V10_TABLES, BUSINESS_V11_TABLES } from '../lib/business-schema';
 import type { CartItem } from '../lib/models';
 import type { FinanceFilter } from '../lib/finance-models';
 import { periodRange } from '../lib/finance-periods';
@@ -567,6 +568,8 @@ check('archivo legado v5 migra sin inventar costos ni identidad de vendedor', as
     'consumption_events',
     'sale_adjustments',
     'finance_commands',
+    ...BUSINESS_V10_TABLES,
+    ...BUSINESS_V11_TABLES,
   ])
     delete tables[table];
   const target = createHarness();

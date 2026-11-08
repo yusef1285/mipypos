@@ -21,11 +21,14 @@ import type { Producto } from '@/lib/models';
 import type { getHomeSummary as homeSummary } from '@/lib/database';
 import { Alert } from 'react-native';
 import { canAccess } from '@/lib/permissions';
+import { hoursSinceArchiveShare } from '@/lib/backup-reminder';
 
 export default function Home() {
   const { user, session, licenseMode, refresh } = useApp();
   const accent = useThemeColor('accent');
-  const { getHomeSummary, listProducts } = usePosRepository();
+  const { getHomeSummary, listProducts, listProductExtras } = usePosRepository();
+  const [backupHours, setBackupHours] = useState(0);
+  const [productCount, setProductCount] = useState<number | null>(null);
   const [report, setReport] = useState<Awaited<ReturnType<typeof homeSummary>> | null>(null);
   const [low, setLow] = useState<Producto[]>([]);
   const load = useCallback(async () => {
@@ -33,14 +36,20 @@ export default function Home() {
     try {
       await refresh();
       setReport(await getHomeSummary());
-      setLow((await listProducts()).filter((p) => p.stock <= 5));
+      const products = await listProducts();
+      const minimum = new Map(
+        (await listProductExtras().catch(() => [])).map((e) => [e.product_id, e.min_stock]),
+      );
+      setProductCount(products.length);
+      setLow(products.filter((p) => p.stock <= (minimum.get(p.id) || 5)));
+      setBackupHours(await hoursSinceArchiveShare());
     } catch (failure) {
       Alert.alert(
         'No se pudo actualizar el resumen',
         failure instanceof Error ? failure.message : 'Vuelve a intentarlo.',
       );
     }
-  }, [refresh, getHomeSummary, listProducts, user]);
+  }, [refresh, getHomeSummary, listProducts, listProductExtras, user]);
   useEffect(() => {
     const timer = setTimeout(() => void load(), 0);
     return () => clearTimeout(timer);
@@ -86,6 +95,40 @@ export default function Home() {
           tone="warning"
         />
       </View>
+      {user.role === 'admin' && productCount === 0 ? (
+        <Card className="gap-2 p-4">
+          <Typography.Heading type="h4">Primeros pasos</Typography.Heading>
+          <Typography.Paragraph type="body-sm">
+            1. Cambia la contraseña del administrador y crea los usuarios en Más → Usuarios.
+          </Typography.Paragraph>
+          <Typography.Paragraph type="body-sm">
+            2. Revisa la moneda base y las tasas en Más → Monedas y tasas.
+          </Typography.Paragraph>
+          <Typography.Paragraph type="body-sm">
+            3. Crea tus productos (o impórtalos en CSV) y sus áreas en Inventario.
+          </Typography.Paragraph>
+          <Typography.Paragraph type="body-sm">
+            4. Abre la caja y registra tu primera venta.
+          </Typography.Paragraph>
+          <Button variant="secondary" onPress={() => router.push('/products')}>
+            <Button.Label>Crear el primer producto</Button.Label>
+          </Button>
+        </Card>
+      ) : null}
+      {user.role === 'admin' && productCount && backupHours > 24 ? (
+        <Card className="gap-2 p-4">
+          <Typography.Heading type="h4">Copia fuera del teléfono</Typography.Heading>
+          <Typography.Paragraph type="body-sm" color="muted">
+            {Number.isFinite(backupHours)
+              ? `Hace ${Math.floor(backupHours / 24)} día(s) que no envías una copia completa.`
+              : 'Aún no has enviado una copia completa del negocio a otro lugar.'}{' '}
+            Si el teléfono se pierde o se daña, esa copia es la única forma de recuperar los datos.
+          </Typography.Paragraph>
+          <Button variant="secondary" onPress={() => router.push('/exports')}>
+            <Button.Label>Enviar copia ahora</Button.Label>
+          </Button>
+        </Card>
+      ) : null}
       <SectionTitle>Accesos rápidos</SectionTitle>
       <View className="flex-row flex-wrap gap-3">
         {canAccess(user.role, 'sales') ? (

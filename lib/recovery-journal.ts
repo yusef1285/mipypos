@@ -30,7 +30,9 @@ const PAGE_SIZE = 250;
 
 export async function assertRecoveryJournalAvailable(db: SQLiteDatabase) {
   const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
-  if (version?.user_version !== 9) return;
+  const current = version?.user_version ?? 0;
+  // v9 introduced the journal; v10 and v11 keep it. Newer files are rejected elsewhere.
+  if (current < 9 || current > 11) return;
   const evidence = await db.getAllAsync<{ name: string }>(
     "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('recovery_journal','recovery_lineage')",
   );
@@ -65,6 +67,12 @@ export async function assertRecoveryJournalAvailable(db: SQLiteDatabase) {
 
 export async function migrateRecoveryJournal(db: SQLiteDatabase) {
   await assertRecoveryJournalAvailable(db);
+  await installRecoveryJournal(db);
+}
+
+// Idempotent: creates the private journal and capture triggers for every table.
+// Callers adding tables in a migration verify existing evidence first.
+export async function installRecoveryJournal(db: SQLiteDatabase) {
   await db.execAsync(`
     CREATE TABLE IF NOT EXISTS recovery_lineage (
       id INTEGER PRIMARY KEY CHECK(id=1), epoch TEXT NOT NULL UNIQUE);

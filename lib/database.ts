@@ -2,6 +2,9 @@ import * as Crypto from 'expo-crypto';
 import * as SQLite from 'expo-sqlite';
 import * as Finance from '@/lib/finance';
 import * as Onat from '@/lib/onat';
+import * as Business from '@/lib/business';
+import type { BusinessCommand, BusinessFilter, SaleCommand } from '@/lib/business-models';
+import { saleCommandSchema } from '@/lib/business-models';
 import {
   DEFAULT_ADMIN_PASSWORD,
   assertNewPassword,
@@ -33,7 +36,7 @@ import {
   storedSettlementSchema,
   parseOperationResult,
 } from '@/lib/network/validation';
-import { saleUnitPrice } from '@/lib/sale-pricing';
+import { lineUnitPrice, type WholesaleTier } from '@/lib/sale-pricing';
 import { saleFingerprint } from '@/lib/sale-identity';
 import { canAccess } from '@/lib/permissions';
 import { prepareMigrationBackup, migrateHardening } from '@/lib/database-migrations';
@@ -65,9 +68,11 @@ import {
 import { DATABASE_VERSION } from '@/lib/database-migrations';
 import {
   assertRecoveryJournalAvailable,
+  installRecoveryJournal,
   migrateRecoveryJournal,
   reconcileRecoveryCandidate,
 } from '@/lib/recovery-journal';
+import { migrateBusiness } from '@/lib/business-schema';
 import { assertDatabaseIdentity, confirmDatabaseIdentity } from '@/lib/recovery-anchor';
 import { getPendingOperation } from '@/lib/network/pending-operation';
 import { getPendingSale } from '@/lib/network/pending-sale';
@@ -262,9 +267,16 @@ export function getNetworkReplica(cacheKey: string) {
     ),
   );
 }
-export function clearNetworkReplicas() {
+/** Session replicas are discarded on logout; offline catalogs survive until re-pairing. */
+export function clearNetworkReplicas(includeOffline = false) {
   return consistentRead(async () => {
-    await (await getDatabase()).runAsync('DELETE FROM network_replica');
+    await (
+      await getDatabase()
+    ).runAsync(
+      includeOffline
+        ? 'DELETE FROM network_replica'
+        : "DELETE FROM network_replica WHERE cache_key NOT LIKE 'offline:%'",
+    );
   });
 }
 export function storeNetworkReplica(cacheKey: string, payload: string) {
@@ -277,7 +289,10 @@ export function storeNetworkReplica(cacheKey: string, payload: string) {
       now(),
     );
     await db.runAsync(
-      'DELETE FROM network_replica WHERE cache_key NOT IN (SELECT cache_key FROM network_replica ORDER BY confirmed_at DESC LIMIT 16)',
+      "DELETE FROM network_replica WHERE cache_key NOT LIKE 'offline:%' AND cache_key NOT IN (SELECT cache_key FROM network_replica WHERE cache_key NOT LIKE 'offline:%' ORDER BY confirmed_at DESC LIMIT 16)",
+    );
+    await db.runAsync(
+      "DELETE FROM network_replica WHERE cache_key LIKE 'offline:%' AND cache_key NOT IN (SELECT cache_key FROM network_replica WHERE cache_key LIKE 'offline:%' ORDER BY confirmed_at DESC LIMIT 8)",
     );
   });
 }
@@ -341,7 +356,7 @@ export async function createBusinessArchive(username: string): Promise<BusinessA
         await Promise.all(
           BUSINESS_TABLES.map(async (table) => [
             table,
-            await db.getAllAsync<ArchiveRow>(`SELECT * FROM ${table}`),
+            await db.getAllAsync<ArchiveRow>(`SELECT * FROM ${table} ORDER BY rowid`),
           ]),
         ),
       ),
@@ -358,7 +373,7 @@ export async function createBusinessArchive(username: string): Promise<BusinessA
       app: 'MipyPOS',
       format: 'business-close',
       version: 2,
-      schemaVersion: 8,
+      schemaVersion: 10,
       archiveId: Crypto.randomUUID(),
       createdAt: now(),
       sourceUser: username,
@@ -392,7 +407,12 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
       UNION ALL SELECT 1 FROM network_commands
       UNION ALL SELECT 1 FROM fiscal_profiles
       UNION ALL SELECT 1 FROM fiscal_rules
-      UNION ALL SELECT 1 FROM fiscal_records LIMIT 1`,
+      UNION ALL SELECT 1 FROM fiscal_records
+      UNION ALL SELECT 1 FROM branches
+      UNION ALL SELECT 1 FROM currencies
+      UNION ALL SELECT 1 FROM parties
+      UNION ALL SELECT 1 FROM employees
+      UNION ALL SELECT 1 FROM partners LIMIT 1`,
       username,
     );
     if (auxiliaryData)
@@ -454,6 +474,7 @@ export async function restoreBusinessArchive(value: unknown, username: string) {
       }
     }
     await Onat.validateFiscalStorage(db);
+    await Business.validateBusinessStorage(db);
     const foreignErrors = await db.getAllAsync('PRAGMA foreign_key_check');
     if (foreignErrors.length) throw new Error('El archivo contiene referencias incompletas.');
     const stockError = await db.getFirstAsync(
@@ -811,8 +832,18 @@ export async function setSetting(key: string, value: string) {
     );
   });
 }
+// Pro needs the cached mode plus an unexpired date; lib/license.ts refreshes both
+// after verifying the signed license, so expiry applies even before a refresh.
+function proActive(mode: string | null | undefined, expires: string | null | undefined) {
+  if (mode !== 'pro') return false;
+  if (!expires) return true;
+  const end = Date.parse(expires);
+  return Number.isFinite(end) && Date.now() < end;
+}
 export async function getLicenseMode(): Promise<LicenseMode> {
-  return (await getSetting('license_mode')) === 'pro' ? 'pro' : 'demo';
+  return proActive(await getSetting('license_mode'), await getSetting('license_expires_at'))
+    ? 'pro'
+    : 'demo';
 }
 
 export async function getDemoUsage() {
@@ -830,10 +861,11 @@ async function consumeDemoQuota(db: SQLite.SQLiteDatabase, resource: 'sales' | '
     (await db.getFirstAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', key))
       ?.value ?? 0,
   );
-  const mode = (
-    await db.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='license_mode'")
-  )?.value;
-  if (mode !== 'pro' && used >= 5)
+  const setting = async (name: string) =>
+    (await db.getFirstAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', name))
+      ?.value;
+  const pro = proActive(await setting('license_mode'), await setting('license_expires_at'));
+  if (!pro && used >= 5)
     throw new Error(
       resource === 'sales'
         ? 'Has alcanzado las 5 ventas de la demo. Activa una licencia Pro para seguir vendiendo.'
@@ -1195,6 +1227,16 @@ export async function restorePrivateRecoveryBackup(
       // recoverable, but cannot acquire missing historical evidence retroactively.
       await candidate.withTransactionAsync(async () => {
         await migrateRecoveryJournal(candidate!);
+        await migrateBusiness(candidate!);
+        await installRecoveryJournal(candidate!);
+        await candidate!.execAsync(`PRAGMA user_version=${DATABASE_VERSION}`);
+      });
+    } else if (backup.schemaVersion === 9 || backup.schemaVersion === 10) {
+      // v10 and v11 only add empty business tables: the verified journal prefix is kept.
+      await candidate.withTransactionAsync(async () => {
+        await assertRecoveryJournalAvailable(candidate!);
+        await migrateBusiness(candidate!);
+        await installRecoveryJournal(candidate!);
         await candidate!.execAsync(`PRAGMA user_version=${DATABASE_VERSION}`);
       });
     }
@@ -1698,13 +1740,16 @@ export async function getCashSummary(sessionId: number): Promise<CashSummary> {
         sessionId,
       )
     )?.total ?? 0;
+  const other = await Business.sessionCashEntries(db, sessionId);
   return {
     salesTotal: rows.reduce((sum, row) => sum + row.amount, 0),
     cashSales,
     transferSales: amount('transfer'),
     cardSales: amount('card'),
     withdrawalTotal,
-    expectedCash: roundMoney((session?.fund ?? 0) + cashSales - withdrawalTotal),
+    otherCashNet: other.net,
+    foreignCash: other.foreign,
+    expectedCash: roundMoney((session?.fund ?? 0) + cashSales - withdrawalTotal + other.net),
   };
 }
 export async function getCashClosurePreview(sessionId: number): Promise<CashClosurePreview> {
@@ -1753,6 +1798,8 @@ export async function getCashClosurePreview(sessionId: number): Promise<CashClos
     cardSales: summary.cardSales,
     salesTotal: summary.salesTotal,
     withdrawalTotal: summary.withdrawalTotal,
+    otherCashNet: summary.otherCashNet,
+    foreignCash: summary.foreignCash,
     withdrawals: await db.getAllAsync<CashWithdrawal>(
       'SELECT * FROM cash_withdrawals WHERE session_id=? ORDER BY id',
       sessionId,
@@ -1837,7 +1884,9 @@ function reconcileCashClosure(
   if (physicalByProduct.size !== preview.products.length)
     throw new Error('El conteo físico contiene productos que no pertenecen al cierre.');
 
-  const expectedCash = roundMoney(preview.fund + preview.cashSales - preview.withdrawalTotal);
+  const expectedCash = roundMoney(
+    preview.fund + preview.cashSales - preview.withdrawalTotal + preview.otherCashNet,
+  );
   if (
     !Number.isFinite(input.withdrawalCount) ||
     input.withdrawalCount < 0 ||
@@ -1857,7 +1906,8 @@ function reconcileCashClosure(
         preview.withdrawalTotal +
         input.transferCount +
         preview.cardSales -
-        preview.salesTotal,
+        preview.salesTotal -
+        preview.otherCashNet,
     ),
     products: reconciledProducts,
   };
@@ -1880,7 +1930,9 @@ function differenceDetail(
         throw new Error('Introduce conteos monetarios con hasta dos decimales.');
       return json({
         kind: input.kind,
-        expectedCash: roundMoney(preview.fund + preview.cashSales - preview.withdrawalTotal),
+        expectedCash: roundMoney(
+          preview.fund + preview.cashSales - preview.withdrawalTotal + preview.otherCashNet,
+        ),
         cashCount: input.counted,
         expectedTransfer: preview.transferSales,
         transferCount: input.transferCount,
@@ -2236,7 +2288,11 @@ export async function registerSale(
       )
         throw new Error(`La unidad de ${current.name} cambió. Actualiza el carrito.`);
       currentProducts.set(current.id, current);
-      const price = saleUnitPrice(current, method);
+      const tier = await db.getFirstAsync<WholesaleTier>(
+        'SELECT wholesale_price,wholesale_min_qty FROM product_extras WHERE product_id=?',
+        current.id,
+      );
+      const price = lineUnitPrice(current, method, item.quantity, tier);
       if (!Number.isFinite(item.price) || Math.abs(item.price - price) > 0.000001)
         throw new Error(`El precio de ${current.name} cambió. Actualiza el carrito.`);
       if (!Number.isInteger(item.areaId)) throw new Error('Selecciona el área de venta.');
@@ -2299,6 +2355,11 @@ export async function registerSale(
       if (!areaUpdate.changes)
         throw new Error(`Stock insuficiente de ${item.product.name} en el área seleccionada.`);
     }
+    await Business.assignSaleTicket(
+      db,
+      saleId,
+      items.map((item) => item.areaId),
+    );
     await db.runAsync(
       'INSERT INTO network_events(type,entity_id,created_at) VALUES(?,?,?)',
       'sale.created',
@@ -2896,6 +2957,81 @@ export function getConsumptionData(username: string) {
 }
 export function getFiscalData(filter: FiscalFilter, username: string) {
   return consistentRead(async () => Onat.readFiscalData(await getDatabase(), filter, username));
+}
+export async function getBusinessData(filter: BusinessFilter, username: string) {
+  return consistentRead(async () =>
+    Business.getBusinessData(await getDatabase(), username, filter),
+  );
+}
+export async function getTransferData(username?: string) {
+  return consistentRead(async () => {
+    const data = await Business.getBusinessData(await getDatabase(), username ?? '');
+    return {
+      branches: data.branches,
+      areas: data.areas,
+      transfers: data.transfers,
+      transferLines: data.transferLines,
+    };
+  });
+}
+export async function executeBusinessCommand(
+  input: BusinessCommand,
+  username: string,
+  command?: MutationCommand,
+): Promise<string> {
+  const db = await getDatabase();
+  return transaction(
+    db,
+    () => Business.executeBusinessCommand(db, input, username),
+    command,
+    (value) => parseOperationResult('executeBusinessCommand', value),
+  );
+}
+export async function executeSaleCommand(
+  input: SaleCommand,
+  username: string,
+  command?: MutationCommand,
+): Promise<string> {
+  const parsed = saleCommandSchema.safeParse(input);
+  if (!parsed.success)
+    throw new Error(parsed.error.issues[0]?.message ?? 'Revisa los datos de la venta.');
+  const db = await getDatabase();
+  return transaction(
+    db,
+    () => Business.executeBusinessCommand(db, parsed.data, username),
+    command,
+    (value) => parseOperationResult('executeSaleCommand', value),
+  );
+}
+/** What the point of sale needs beyond the catalog: tiers, barcodes, clients, rates. */
+export async function getSaleOptions() {
+  return consistentRead(async () => {
+    const db = await getDatabase();
+    const base = await Business.baseCurrency(db);
+    const currencies: { code: string; name: string; rate: number }[] = [];
+    for (const row of await db.getAllAsync<{ code: string; name: string }>(
+      'SELECT code,name FROM currencies WHERE code<>? ORDER BY code',
+      base,
+    )) {
+      const rate = await Business.rateFor(db, row.code).catch(() => null);
+      if (rate) currencies.push({ ...row, rate });
+    }
+    return {
+      baseCurrency: base,
+      extras: await Business.listProductExtras(db),
+      clients: await db.getAllAsync<{ id: number; name: string }>(
+        "SELECT id,name FROM parties WHERE active=1 AND kind IN ('client','both') ORDER BY name",
+      ),
+      currencies,
+    };
+  });
+}
+export async function listProductExtras() {
+  return Business.listProductExtras(await getDatabase());
+}
+export async function getSaleTicket(saleId: number) {
+  if (!Number.isInteger(saleId) || saleId <= 0) throw new Error('Venta no válida.');
+  return consistentRead(async () => Business.getSaleTicket(await getDatabase(), saleId));
 }
 export async function executeFiscalCommand(
   input: OnatCommand,
