@@ -124,7 +124,7 @@ export default function Users() {
             ))}
           </View>
           <Button
-            isDisabled={!username || (!editing && password.length < 6) || saving}
+            isDisabled={!username || (!editing && password.length < 8) || saving}
             onPress={() => void save()}
           >
             <Button.Label>Guardar usuario</Button.Label>

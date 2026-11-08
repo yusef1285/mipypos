@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHarness, prepareHarness } from './pos-test-harness';
+import { BUSINESS_V10_TABLES, BUSINESS_V11_TABLES } from '../lib/business-schema';
 import type { CartItem } from '../lib/models';
 import type { FinanceFilter } from '../lib/finance-models';
 import { periodRange } from '../lib/finance-periods';
@@ -61,7 +62,7 @@ async function fixture(cost: number | null = 40, modules: Record<string, unknown
   assert.ok(p);
   const area = (await db.listAreas())[0];
   await db.openCashSession(500, 'admin');
-  const authorization = { username: 'admin', passwordHash: await db.hashPassword('admin123') };
+  const authorization = { username: 'admin', password: 'admin123' };
   if (cost !== null)
     await db.setProductCost(
       { commandId: randomUUID(), productId: id, cost, reason: 'Costo inicial' },
@@ -376,7 +377,7 @@ check('filtros incluyen exactamente inicio y final excluyendo el exterior', asyn
 });
 check('vendedor estable tras cambio de nombre y filtros producto categoría', async () => {
   const f = await fixture();
-  const uid = await f.db.saveUser({ username: 'ana', password: 'ana123', role: 'seller' });
+  const uid = await f.db.saveUser({ username: 'ana', password: 'ana12345', role: 'seller' });
   await f.sale(2, 'ana');
   await f.db.saveUser({ id: uid, username: 'ana.nueva', role: 'seller' });
   await f.sale(1, 'ana.nueva');
@@ -412,7 +413,7 @@ check(
     );
     const input = {
       ...f.consume(),
-      authorization: { username: 'super', passwordHash: await f.db.hashPassword('super123') },
+      authorization: { username: 'super', password: 'super123' },
     };
     await assert.rejects(f.db.registerConsumption(input, 'vendedor'));
     await f.db.setConsumptionPermission(sup, true, 'admin');
@@ -429,7 +430,7 @@ check('autorización incorrecta y fallo de escritura no dejan stock parcial', as
   const f = await fixture();
   await assert.rejects(
     f.db.registerConsumption(
-      { ...f.consume(), authorization: { username: 'admin', passwordHash: 'incorrecto' } },
+      { ...f.consume(), authorization: { username: 'admin', password: 'incorrecto' } },
       'admin',
     ),
   );
@@ -567,6 +568,8 @@ check('archivo legado v5 migra sin inventar costos ni identidad de vendedor', as
     'consumption_events',
     'sale_adjustments',
     'finance_commands',
+    ...BUSINESS_V10_TABLES,
+    ...BUSINESS_V11_TABLES,
   ])
     delete tables[table];
   const target = createHarness();

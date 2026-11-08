@@ -30,7 +30,7 @@ export function Screen({
   safeTop = false,
   scroll = true,
 }: ScreenProps) {
-  const { licenseMode, user } = useApp();
+  const { license, licenseMode, user } = useApp();
   const content = scroll ? (
     <ScrollView
       className="flex-1"
@@ -84,6 +84,16 @@ export function Screen({
         >
           <Typography.Paragraph type="body-sm" className="text-warning font-semibold">
             DEMO
+          </Typography.Paragraph>
+        </View>
+      ) : null}
+      {user?.role === 'admin' && license.state === 'active' && license.expiringSoon ? (
+        <View
+          pointerEvents="none"
+          className="bg-warning-soft absolute bottom-3 left-3 rounded-lg px-3 py-1 opacity-90"
+        >
+          <Typography.Paragraph type="body-sm" className="text-warning font-semibold">
+            Licencia: {license.daysLeft} {license.daysLeft === 1 ? 'día' : 'días'}
           </Typography.Paragraph>
         </View>
       ) : null}

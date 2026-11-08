@@ -25,6 +25,7 @@ import { money, parsePositiveNumber } from '@/lib/format';
 import { CASH_DENOMINATIONS } from '@/lib/models';
 import type { CashClosurePreview } from '@/lib/models';
 import { getSetting } from '@/lib/database';
+import { autoDesktopBackup } from '@/lib/desktop-backup';
 import { getPendingWithdrawal } from '@/lib/network/pending-withdrawal';
 import { canAccess } from '@/lib/permissions';
 
@@ -108,7 +109,10 @@ export default function Cash() {
     [billCounts, coins],
   );
   const expectedCash =
-    (preview?.fund ?? 0) + (preview?.cashSales ?? 0) - (preview?.withdrawalTotal ?? 0);
+    (preview?.fund ?? 0) +
+    (preview?.cashSales ?? 0) -
+    (preview?.withdrawalTotal ?? 0) +
+    (preview?.otherCashNet ?? 0);
   const transferCount = Number(transfer.replace(',', '.')) || 0;
   const cashDifference = cashCount - expectedCash;
   const transferDifference = transferCount - (preview?.transferSales ?? 0);
@@ -244,6 +248,7 @@ export default function Cash() {
       setStep(0);
       setAdminPassword('');
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      if (networkConfig.mode !== 'client') void autoDesktopBackup(adminName);
       await refresh();
       Alert.alert(
         'Caja cerrada',
@@ -497,6 +502,17 @@ export default function Cash() {
             <Typography.Paragraph type="body-sm">
               Efectivo esperado: {money(expectedCash)}
             </Typography.Paragraph>
+            {preview.otherCashNet ? (
+              <Typography.Paragraph type="body-sm" color="muted">
+                Incluye cobros, pagos, nómina y socios en efectivo: {money(preview.otherCashNet)}
+              </Typography.Paragraph>
+            ) : null}
+            {preview.foreignCash.map((row) => (
+              <Typography.Paragraph key={row.currency} type="body-sm" className="text-warning">
+                {row.currency} en caja (no entra en el arqueo):{' '}
+                {row.net.toLocaleString('es-CU', { minimumFractionDigits: 2 })}
+              </Typography.Paragraph>
+            ))}
             <Typography.Paragraph type="body-sm">
               Diferencia de efectivo: {money(cashDifference)}
             </Typography.Paragraph>

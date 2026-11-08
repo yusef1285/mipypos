@@ -37,6 +37,8 @@ import {
 import { getHostPin } from '@/lib/network/tls';
 import { getPendingOperation, rebindPendingOperation } from '@/lib/network/pending-operation';
 import { getPendingSale, upgradePendingSaleTransport } from '@/lib/network/pending-sale';
+import { hasOutboxSales, outboxAuthorities } from '@/lib/network/sale-outbox';
+import { isDesktop } from '@/lib/desktop';
 
 export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
   const {
@@ -53,6 +55,7 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
   const [error, setError] = useState('');
   const [direct, setDirect] = useState<DirectInfo | null>(null);
   const [hotspot, setHotspot] = useState<HotspotCredentials | null>(null);
+  const desktop = isDesktop();
   useEffect(() => {
     void getLocalHotspot()
       .then(setHotspot)
@@ -77,6 +80,8 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       active = false;
       clearInterval(timer);
     };
+    // Restart polling when the host address or mode changes the Wi-Fi Direct session.
+    // eslint-disable-next-line react/exhaustive-effect-dependencies
   }, [hostAddress, networkConfig.mode]);
   const startDirect = async () => {
     try {
@@ -85,6 +90,7 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       if (
         (await getPendingOperation()) ||
         (await getPendingSale()) ||
+        (await hasOutboxSales()) ||
         (await getPendingWithdrawal())
       )
         throw new Error('Confirma las operaciones pendientes antes de crear otra red.');
@@ -119,8 +125,8 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       if (createNetwork) {
         if (await getPendingOperation())
           throw new Error('Confirma la operación pendiente antes de crear otra red.');
-        if (await getPendingSale())
-          throw new Error('Confirma la venta pendiente antes de crear otra red.');
+        if ((await getPendingSale()) || (await hasOutboxSales()))
+          throw new Error('Sincroniza las ventas pendientes antes de crear otra red.');
         if (await getPendingWithdrawal())
           throw new Error('Confirma la extracción pendiente antes de crear otra red.');
         await disconnectDirect();
@@ -159,10 +165,19 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       const pending = await getPendingSale();
       const withdrawal = await getPendingWithdrawal();
       const records = [operation, pending, withdrawal].filter((record) => record !== null);
-      const authorities = records.map((record) =>
-        'authority' in record ? record.authority : record.hostUrl,
-      );
-      const pins = records.map((record) => record.hostPin);
+      const outbox = await outboxAuthorities();
+      if (outbox.some((entry) => entry.hostPin !== hostPin))
+        throw new Error(
+          'Este teléfono tiene ventas sin enviar a otro administrador. Sincronízalas antes de emparejar uno distinto.',
+        );
+      const authorities = [
+        ...records.map((record) => ('authority' in record ? record.authority : record.hostUrl)),
+        ...outbox.map((entry) => entry.hostUrl),
+      ];
+      const pins = [
+        ...records.map((record) => record.hostPin),
+        ...outbox.map((entry) => entry.hostPin),
+      ];
       assertPendingAuthority(
         networkConfig,
         { ...networkConfig, mode: 'client', hostUrl, hostPin },
@@ -322,9 +337,9 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
           <Button.Label>Reintentar conexión</Button.Label>
         </Button>
       ) : null}
-      {Platform.OS !== 'android' ? (
+      {Platform.OS !== 'android' && !desktop ? (
         <Typography.Paragraph type="body-sm" color="muted">
-          La red segura entre teléfonos requiere Android.
+          La red segura requiere MipyPOS para Android o MipyPOS para Windows.
         </Typography.Paragraph>
       ) : null}
       {qr ? (
@@ -341,11 +356,13 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
             {hostAddress}
           </Typography.Paragraph>
           <Typography.Paragraph>
-            {direct?.isOwner
-              ? 'Wi-Fi Direct: escanea este QR desde MipyPOS en el otro Android, activa ubicación y acepta la conexión del sistema. No requiere internet ni router.'
-              : hotspot
-                ? `Escanea desde MipyPOS en el otro teléfono y acepta la conexión Wi-Fi de Android. Red: ${hotspot.ssid}.`
-                : 'Conecta ambos teléfonos al mismo Wi-Fi o hotspot y escanea este QR desde el otro teléfono.'}
+            {desktop
+              ? 'Conecta los teléfonos al mismo Wi-Fi o router que esta computadora y escanea este QR desde MipyPOS en cada teléfono (Más → Configuración → Red local → Escanear QR). Si se corta la red, los teléfonos siguen vendiendo y envían las ventas al volver.'
+              : direct?.isOwner
+                ? 'Wi-Fi Direct: escanea este QR desde MipyPOS en el otro Android, activa ubicación y acepta la conexión del sistema. No requiere internet ni router.'
+                : hotspot
+                  ? `Escanea desde MipyPOS en el otro teléfono y acepta la conexión Wi-Fi de Android. Red: ${hotspot.ssid}.`
+                  : 'Conecta ambos teléfonos al mismo Wi-Fi o hotspot y escanea este QR desde el otro teléfono.'}
           </Typography.Paragraph>
           {hotspot ? (
             <Typography.Paragraph type="body-sm" color="muted">
@@ -362,7 +379,7 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
         </Typography.Paragraph>
       ) : null}
       {error ? <Typography.Paragraph className="text-danger">{error}</Typography.Paragraph> : null}
-      {scanning ? (
+      {desktop ? null : scanning ? (
         <QrScanner onScan={connect} onCancel={() => setScanning(false)} />
       ) : (
         <Button
@@ -388,6 +405,17 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
       Platform.OS === 'android' ? (
         <Button variant="secondary" isDisabled={busy} onPress={() => void findAdministrator()}>
           <Button.Label>{busy ? 'Buscando…' : 'Buscar mi administrador en Wi-Fi'}</Button.Label>
+        </Button>
+      ) : null}
+      {allowHost && user?.role === 'admin' && desktop ? (
+        <Button isDisabled={busy} onPress={() => void changeMode('host')}>
+          <Button.Label>
+            {busy
+              ? 'Iniciando…'
+              : networkConfig.mode === 'host'
+                ? 'Actualizar QR del servidor'
+                : 'Iniciar servidor para los teléfonos'}
+          </Button.Label>
         </Button>
       ) : null}
       {allowHost && user?.role === 'admin' && Platform.OS === 'android' ? (

@@ -33,6 +33,8 @@ type HarnessModules = {
   '@/lib/recovery-reconciliation': typeof import('../lib/recovery-reconciliation');
   '@/lib/database-maintenance': typeof import('../lib/database-maintenance');
   '@/lib/database': typeof import('../lib/database');
+  '@/lib/business': typeof import('../lib/business');
+  '@/lib/password': typeof import('../lib/password');
   '@/lib/network/qr': typeof import('../lib/network/qr');
   '@/lib/network/operations': typeof import('../lib/network/operations');
   '@/lib/permissions': typeof import('../lib/permissions');
@@ -40,6 +42,8 @@ type HarnessModules = {
   '@/lib/network/pending-operation': typeof import('../lib/network/pending-operation');
   '@/lib/network/client': typeof import('../lib/network/client');
   '@/lib/network/config': typeof import('../lib/network/config');
+  '@/lib/network/sale-outbox': typeof import('../lib/network/sale-outbox');
+  '@/lib/network/offline-session': typeof import('../lib/network/offline-session');
   '@/lib/use-pos-repository': typeof import('../lib/use-pos-repository');
   '@/lib/csv': typeof import('../lib/csv');
   '@/lib/network/host': typeof import('../lib/network/host');
@@ -238,6 +242,7 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
       digestStringAsync: async (_algorithm: string, input: string) =>
         createHash('sha256').update(input).digest('hex'),
       randomUUID,
+      getRandomBytes: (length: number) => new Uint8Array(randomBytes(length)),
       AESEncryptionKey: TestAesKey,
       AESSealedData: TestSealedData,
       aesEncryptAsync: async (

@@ -1,14 +1,33 @@
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { CameraView, useCameraPermissions, type BarcodeType } from 'expo-camera';
 import { Button, Typography } from 'heroui-native';
 import { useRef, useState } from 'react';
 import { Linking, Platform, View } from 'react-native';
 
+// Retail barcodes for products; the default stays QR for LAN pairing.
+export const PRODUCT_BARCODES: BarcodeType[] = [
+  'ean13',
+  'ean8',
+  'upc_a',
+  'upc_e',
+  'code128',
+  'code39',
+];
+
 export function QrScanner({
   onScan,
   onCancel,
+  types = ['qr'],
+  prompt = 'Permite el acceso a la cámara para leer el QR del administrador.',
+  busyText = 'Comprobando conexión…',
+  repeat = false,
 }: {
   onScan: (data: string) => Promise<void>;
   onCancel: () => void;
+  types?: BarcodeType[];
+  prompt?: string;
+  busyText?: string;
+  /** Keep scanning after a successful read (cashier mode). */
+  repeat?: boolean;
 }) {
   const [permission, requestPermission] = useCameraPermissions();
   const [error, setError] = useState('');
@@ -18,7 +37,7 @@ export function QrScanner({
     return (
       <View className="gap-3">
         <Typography.Paragraph>
-          Este navegador no permite leer QR. Usa la app Android para conectar este teléfono.
+          Este navegador no permite usar la cámara para leer códigos. Usa la app Android.
         </Typography.Paragraph>
         <Button variant="secondary" onPress={onCancel}>
           <Button.Label>Volver</Button.Label>
@@ -31,6 +50,7 @@ export function QrScanner({
     setBusy(true);
     try {
       await onScan(data);
+      if (repeat) setTimeout(() => (locked.current = false), 1200);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'No se pudo conectar.');
     } finally {
@@ -41,9 +61,7 @@ export function QrScanner({
     <View className="gap-3">
       {!permission?.granted ? (
         <>
-          <Typography.Paragraph>
-            Permite el acceso a la cámara para leer el QR del administrador.
-          </Typography.Paragraph>
+          <Typography.Paragraph>{prompt}</Typography.Paragraph>
           <Button
             onPress={() =>
               void (permission?.canAskAgain === false && Platform.OS !== 'web'
@@ -60,7 +78,7 @@ export function QrScanner({
         <CameraView
           style={{ width: '100%', height: 260 }}
           facing="back"
-          barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+          barcodeScannerSettings={{ barcodeTypes: types }}
           onBarcodeScanned={({ data }) => void scan(data)}
           onMountError={() => setError('No se pudo abrir la cámara. Revisa sus permisos.')}
         />
@@ -78,9 +96,9 @@ export function QrScanner({
           </Button>
         </>
       ) : null}
-      {busy ? <Typography.Paragraph>Comprobando conexión…</Typography.Paragraph> : null}
+      {busy ? <Typography.Paragraph>{busyText}</Typography.Paragraph> : null}
       <Button variant="secondary" isDisabled={busy} onPress={onCancel}>
-        <Button.Label>Cancelar</Button.Label>
+        <Button.Label>{repeat ? 'Cerrar cámara' : 'Cancelar'}</Button.Label>
       </Button>
     </View>
   );

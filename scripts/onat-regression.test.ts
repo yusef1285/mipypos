@@ -251,7 +251,7 @@ check('migraciones fiscales y v9 aditivas e idempotentes', async () => {
   const d = await f.db.getDatabase();
   assert.equal(
     (await d.getFirstAsync<{ user_version: number }>('PRAGMA user_version'))?.user_version,
-    9,
+    11,
   );
   assert.equal((await f.db.getFiscalData(filter, 'admin')).profiles.length, 1);
 });
@@ -279,7 +279,7 @@ check('no duplica ventas en varios contribuyentes', async () => {
 });
 check('sin permiso fiscal no puede consultar ni mutar', async () => {
   const f = await fixture();
-  await f.db.saveUser({ username: 'vendedor', password: 'abc123', role: 'seller' });
+  await f.db.saveUser({ username: 'vendedor', password: 'abc12345', role: 'seller' });
   await assert.rejects(f.db.getFiscalData(filter, 'vendedor'), /autorización fiscal/);
   await assert.rejects(
     f.db.executeFiscalCommand(estimate(f.ruleId), 'vendedor'),
@@ -290,7 +290,7 @@ check('sin permiso fiscal no puede consultar ni mutar', async () => {
 });
 check('permiso expreso es revocable y auditable', async () => {
   const f = await fixture();
-  const id = await f.db.saveUser({ username: 'contador', password: 'abc123', role: 'auditor' });
+  const id = await f.db.saveUser({ username: 'contador', password: 'abc12345', role: 'auditor' });
   await f.db.setFiscalPermission(id, true, 'admin');
   assert.ok(await f.db.getFiscalData(filter, 'contador'));
   await f.db.setFiscalPermission(id, false, 'admin');
@@ -461,7 +461,7 @@ check('traslado v8 preserva datos fiscales y adjuntos sin credenciales', async (
     adminPassword: 'admin123',
   });
   const archive = await f.db.createBusinessArchive('admin');
-  assert.equal(archive.schemaVersion, 8);
+  assert.equal(archive.schemaVersion, 10);
   assert.equal('password_hash' in archive.tables.users[0], false);
   const snapshot = archive.tables.fiscal_records.find((r) => r.kind === 'obligation');
   assert.ok(snapshot && typeof snapshot.payload === 'string');

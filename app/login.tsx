@@ -6,7 +6,7 @@ import { Alert, View } from 'react-native';
 import { LanConnection } from '@/components/LanConnection';
 import { BrandMark } from '@/components/BrandMark';
 import { Screen } from '@/components/Screen';
-import { useApp } from '@/lib/app-context';
+import { PasswordChangeRequired, useApp } from '@/lib/app-context';
 
 export default function LoginScreen() {
   const { login, rememberedUsername } = useApp();
@@ -14,6 +14,9 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('');
   const [remember, setRemember] = useState(Boolean(rememberedUsername));
   const [loading, setLoading] = useState(false);
+  const [mustChange, setMustChange] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmation, setConfirmation] = useState('');
   useEffect(() => {
     const timer = setTimeout(() => setUsername(rememberedUsername), 0);
     return () => clearTimeout(timer);
@@ -21,8 +24,14 @@ export default function LoginScreen() {
   const submit = async () => {
     try {
       setLoading(true);
-      await login(username, password, remember);
+      if (mustChange && newPassword !== confirmation)
+        throw new Error('La confirmación no coincide con la nueva contraseña.');
+      await login(username, password, remember, mustChange ? newPassword : undefined);
     } catch (error) {
+      if (error instanceof PasswordChangeRequired) {
+        setMustChange(true);
+        return;
+      }
       Alert.alert(
         'No se pudo iniciar sesión',
         error instanceof Error ? error.message : 'Intenta de nuevo.',
@@ -59,6 +68,33 @@ export default function LoginScreen() {
               onSubmitEditing={() => void submit()}
             />
           </TextField>
+          {mustChange ? (
+            <View className="gap-4">
+              <Typography.Paragraph type="body-sm" className="text-warning">
+                Es tu primer acceso: crea una contraseña propia de al menos 8 caracteres. La
+                contraseña inicial deja de funcionar.
+              </Typography.Paragraph>
+              <TextField>
+                <Label>Nueva contraseña</Label>
+                <Input
+                  secureTextEntry
+                  value={newPassword}
+                  onChangeText={setNewPassword}
+                  placeholder="Mínimo 8 caracteres"
+                />
+              </TextField>
+              <TextField>
+                <Label>Confirmar contraseña</Label>
+                <Input
+                  secureTextEntry
+                  value={confirmation}
+                  onChangeText={setConfirmation}
+                  placeholder="Repite la nueva contraseña"
+                  onSubmitEditing={() => void submit()}
+                />
+              </TextField>
+            </View>
+          ) : null}
           <View className="flex-row items-center gap-3">
             <Checkbox
               accessibilityLabel="Recordar usuario"
@@ -71,11 +107,13 @@ export default function LoginScreen() {
           </View>
           <Button
             size="lg"
-            isDisabled={!username || !password || loading}
+            isDisabled={!username || !password || loading || (mustChange && !newPassword)}
             onPress={() => void submit()}
           >
             <LockKeyhole color="white" size={18} />
-            <Button.Label>{loading ? 'Ingresando…' : 'Iniciar sesión'}</Button.Label>
+            <Button.Label>
+              {loading ? 'Ingresando…' : mustChange ? 'Guardar y entrar' : 'Iniciar sesión'}
+            </Button.Label>
           </Button>
           <Typography.Paragraph type="body-sm" color="muted" align="center">
             Primer acceso: admin / admin123

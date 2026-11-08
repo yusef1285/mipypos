@@ -16,6 +16,7 @@ import type {
 import { CONSUMPTION_REASONS } from '@/lib/finance-models';
 import { aggregateFinance, groupFinance } from '@/lib/finance-calculations';
 import { roundMoney, validateQuantity } from '@/lib/units';
+import { isLegacyPasswordHash, verifyPassword } from '@/lib/password';
 
 export async function migrateFinance(db: SQLiteDatabase) {
   const add = async (table: string, column: string, definition: string) => {
@@ -101,10 +102,14 @@ async function authorize(db: SQLiteDatabase, proof: AuthorizationProof, consumpt
     'SELECT * FROM users WHERE username=? COLLATE NOCASE',
     proof.username,
   );
+  const verified =
+    !!user &&
+    ('password' in proof
+      ? await verifyPassword(proof.password, user.password_hash)
+      : isLegacyPasswordHash(user.password_hash) && user.password_hash === proof.passwordHash);
   if (
     !user ||
-    !proof.passwordHash ||
-    user.password_hash !== proof.passwordHash ||
+    !verified ||
     !(
       user.role === 'admin' ||
       (consumption && user.role === 'supervisor' && user.can_authorize_consumption === 1)

@@ -1,0 +1,85 @@
+name: APK Android
+
+# Builds an installable release APK signed with the project release keystore
+# (secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS).
+# Without those secrets it falls back to the Expo debug keystore (testing only).
+# versionCode = run number + 100, so every build installs over the previous one.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, modulos-empresariales, version-1-0, escritorio-windows]
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: npm ci --no-audit --no-fund
+      - name: Generar proyecto Android
+        env:
+          APP_VERSION_CODE: ${{ github.run_number }}
+        run: npx expo prebuild --platform android --no-install --clean
+      - name: Compilar APK release
+        working-directory: android
+        env:
+          NODE_ENV: production
+          APP_VERSION_CODE: ${{ github.run_number }}
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+      - name: Firmar y renombrar APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          OUT="dist/MipyPOS-${VERSION}-${GITHUB_SHA::7}.apk"
+          mkdir -p dist
+          SRC=android/app/build/outputs/apk/release/app-release.apk
+          TOOLS="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.p12"
+            "$TOOLS/zipalign" -f -p 4 "$SRC" "$RUNNER_TEMP/aligned.apk"
+            "$TOOLS/apksigner" sign --ks "$RUNNER_TEMP/release.p12" --ks-type PKCS12 \
+              --ks-key-alias "$KEY_ALIAS" --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEYSTORE_PASSWORD \
+              --out "$OUT" "$RUNNER_TEMP/aligned.apk"
+            rm -f "$RUNNER_TEMP/release.p12"
+          else
+            echo "::warning::Sin secretos de firma: APK firmada con clave de depuración"
+            cp "$SRC" "$OUT"
+          fi
+          "$TOOLS/apksigner" verify "$OUT"
+          "$TOOLS/apksigner" verify --print-certs "$OUT" | head -5 || true
+          "$TOOLS/aapt2" dump badging "$OUT" | head -1 || true
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mipypos-apk
+          path: dist/*.apk
+          retention-days: 30
+      - name: Publicar pre-release descargable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="apk-${GITHUB_SHA::7}"
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" dist/*.apk --prerelease --target "$GITHUB_SHA" \
+            --title "MipyPOS APK ${GITHUB_REF_NAME} ${GITHUB_SHA::7}" \
+            --notes "APK de prueba compilada desde ${GITHUB_REF_NAME} (build ${GITHUB_RUN_NUMBER}). Descárgala en Assets."

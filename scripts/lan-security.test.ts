@@ -311,7 +311,9 @@ void test('revision cambia con catálogo/inventario y no crece por replay', asyn
 });
 void test('limita intentos de login sin alterar los hashes existentes', async () => {
   const f = await fixture();
-  const hash = await f.db.hashPassword('admin123');
+  const hash = String(
+    f.database.exec("SELECT password_hash FROM users WHERE username='admin'")[0]?.values[0]?.[0],
+  );
   for (let i = 0; i < 5; i++)
     assert.equal(await f.db.authenticateForLogin('admin', 'incorrecta'), null);
   await assert.rejects(f.db.authenticateForLogin('admin', 'admin123'), /Espera un minuto/);
@@ -478,8 +480,8 @@ void test('ONAT LAN reintenta un perfil confirmado sin duplicarlo', async () => 
 });
 void test('ONAT LAN rechaza consulta sin autorización expresa', async () => {
   const f = await lanFixture();
-  await f.db.saveUser({ username: 'vendedor-fiscal', password: 'abc123', role: 'seller' });
-  await f.client.loginToHost(url, 'vendedor-fiscal', 'abc123');
+  await f.db.saveUser({ username: 'vendedor-fiscal', password: 'abc12345', role: 'seller' });
+  await f.client.loginToHost(url, 'vendedor-fiscal', 'abc12345');
   await assert.rejects(
     f.client.requestHostOperation(
       url,
@@ -496,11 +498,11 @@ void test('ONAT LAN contador autorizado accede; revocación impide nueva lectura
   const f = await lanFixture();
   const id = await f.db.saveUser({
     username: 'contador-fiscal',
-    password: 'abc123',
+    password: 'abc12345',
     role: 'auditor',
   });
   await f.db.setFiscalPermission(id, true, 'admin');
-  await f.client.loginToHost(url, 'contador-fiscal', 'abc123');
+  await f.client.loginToHost(url, 'contador-fiscal', 'abc12345');
   const args: PosArgs<'getFiscalData'> = [
     { taxpayerId: 'default', start: '2026-01-01', end: '2026-01-31' },
     'admin',
@@ -1256,12 +1258,19 @@ void test('copia SQLite confirmada y respuesta sin cambios no duplican datos ni 
   const first = await f.client.getHostSnapshot(url);
   const second = await f.client.getHostSnapshot(url);
   assert.deepEqual(second, first);
-  assert.equal(f.database.exec('SELECT COUNT(*) FROM network_replica')[0].values[0][0], 1);
+  assert.equal(
+    f.database.exec("SELECT COUNT(*) FROM network_replica WHERE cache_key NOT LIKE 'offline:%'")[0]
+      .values[0][0],
+    1,
+  );
   const lastCall = f.calls.filter((call) => call.path === '/v1/snapshot').at(-1);
   assert.equal(lastCall?.body.knownRevision, first.revision);
   const token = await f.config.getNetworkToken();
   assert.ok(token);
-  const stored = String(f.database.exec('SELECT payload FROM network_replica')[0].values[0][0]);
+  const stored = String(
+    f.database.exec("SELECT payload FROM network_replica WHERE cache_key NOT LIKE 'offline:%'")[0]
+      .values[0][0],
+  );
   assert.ok(!stored.includes(token));
   f.setOffline(true);
   await assert.rejects(f.client.getHostSnapshot(url), /offline/);
@@ -1284,7 +1293,11 @@ void test('cambio de usuario no reutiliza copia administrativa ni costos', async
   await f.client.loginToHost(url, 'seller-cache', 'seller123');
   const seller = await f.client.getHostSnapshot(url);
   assert.equal(seller.products[0].unit_cost, undefined);
-  assert.equal(f.database.exec('SELECT COUNT(*) FROM network_replica')[0].values[0][0], 2);
+  assert.equal(
+    f.database.exec("SELECT COUNT(*) FROM network_replica WHERE cache_key NOT LIKE 'offline:%'")[0]
+      .values[0][0],
+    2,
+  );
 });
 void test('UUID de venta liga contenido original y replay no incrementa revisión', async () => {
   const f = await lanFixture();
@@ -1448,7 +1461,11 @@ void test('rechazo de lookup nunca elimina una mutación de resultado incierto',
 void test('logout elimina replicas de todas las sesiones sin eliminar pendientes', async () => {
   const f = await lanFixture();
   await f.client.getHostSnapshot(url);
-  assert.equal(f.database.exec('SELECT COUNT(*) FROM network_replica')[0].values[0][0], 1);
+  assert.equal(
+    f.database.exec("SELECT COUNT(*) FROM network_replica WHERE cache_key NOT LIKE 'offline:%'")[0]
+      .values[0][0],
+    1,
+  );
   await f.load('@/lib/network/pending-operation').prepareOperation({
     hostUrl: url,
     username: 'admin',
@@ -1457,7 +1474,11 @@ void test('logout elimina replicas de todas las sesiones sin eliminar pendientes
     args: ['Por confirmar'],
   });
   await f.client.logoutFromHost(url, pin);
-  assert.equal(f.database.exec('SELECT COUNT(*) FROM network_replica')[0].values[0][0], 0);
+  assert.equal(
+    f.database.exec("SELECT COUNT(*) FROM network_replica WHERE cache_key NOT LIKE 'offline:%'")[0]
+      .values[0][0],
+    0,
+  );
   assert.ok(await f.load('@/lib/network/pending-operation').getPendingOperation());
 });
 void test('snapshot rechaza referencias huérfanas, pares duplicados y stock diferente', async () => {
@@ -1616,7 +1637,11 @@ void test('respuesta snapshot atrasada tras logout no repuebla la replica ni se 
   await f.client.logoutFromHost(url, pin);
   release();
   await rejected;
-  assert.equal(f.database.exec('SELECT COUNT(*) FROM network_replica')[0].values[0][0], 0);
+  assert.equal(
+    f.database.exec("SELECT COUNT(*) FROM network_replica WHERE cache_key NOT LIKE 'offline:%'")[0]
+      .values[0][0],
+    0,
+  );
 });
 void test('AUTH_EXPIRED atrasado no cierra una nueva sesión válida', async () => {
   const f = await lanFixture();
@@ -2148,7 +2173,7 @@ void test('login malformado conserva token, replica y journal previos', async ()
   await f.client.getHostSnapshot(url);
   const previousReplica = await (
     await f.db.getDatabase()
-  ).getAllAsync('SELECT * FROM network_replica');
+  ).getAllAsync("SELECT * FROM network_replica WHERE cache_key NOT LIKE 'offline:%'");
   const pending = f.load('@/lib/network/pending-operation');
   const saved = await pending.prepareOperation({
     hostUrl: url,
@@ -2167,7 +2192,9 @@ void test('login malformado conserva token, replica y journal previos', async ()
     assert.equal(await f.config.getNetworkToken(), token);
     assert.equal((await pending.getPendingOperation())?.commandId, saved.commandId);
     assert.deepEqual(
-      await (await f.db.getDatabase()).getAllAsync('SELECT * FROM network_replica'),
+      await (
+        await f.db.getDatabase()
+      ).getAllAsync("SELECT * FROM network_replica WHERE cache_key NOT LIKE 'offline:%'"),
       previousReplica,
     );
   }
@@ -2263,4 +2290,143 @@ void test('missing saleId en recibo o respuesta conserva el mismo journal al rei
     await assert.rejects(pending.sendPendingSale(network, 'admin'), /confirmar/);
     assert.equal((await pending.getPendingSale())?.command.commandId, saved.command.commandId);
   }
+});
+
+const outboxSale = (productId: number, sessionId: number) => ({
+  sessionId,
+  method: 'cash' as const,
+  payments: [{ type: 'cash' as const, amount: 100 }],
+  items: [{ productId, areaId: 1, quantity: 1 }],
+  settlement: { cashReceived: 100, transferReceipt: null },
+});
+const outboxMeta = { total: 100, lines: [{ name: base.name, price: 100 }] };
+
+void test('ventas sin conexión quedan en cola ordenada y se sincronizan al volver la red', async () => {
+  const f = await lanFixture();
+  const id = await f.db.saveProduct(base, 'admin');
+  const sid = await f.db.openCashSession(0, 'admin');
+  const outbox = f.load('@/lib/network/sale-outbox');
+  const cfg = await f.config.loadNetworkConfig();
+  f.setOffline(true);
+  const first = await outbox.enqueueOutboxSale(cfg, 'admin', outboxSale(id, sid), outboxMeta);
+  const second = await outbox.enqueueOutboxSale(cfg, 'admin', outboxSale(id, sid), outboxMeta);
+  assert.equal(second.localNumber, first.localNumber + 1);
+  assert.notEqual(first.command.commandId, second.command.commandId);
+  const reserved = outbox.outboxReservations(await outbox.getOutbox(), url);
+  assert.equal(reserved.get(`${id}:1`) ?? [...reserved.values()][0], 2);
+  const offline = await outbox.syncOutbox(cfg, 'admin');
+  assert.equal(offline.offline, true);
+  assert.equal(offline.remaining, 2);
+  assert.equal((await f.db.getProduct(id))?.stock, 10);
+  f.setOffline(false);
+  const synced = await outbox.syncOutbox(cfg, 'admin');
+  assert.deepEqual(
+    synced.sent.map((sale) => sale.localNumber),
+    [first.localNumber, second.localNumber],
+  );
+  assert.equal(synced.remaining, 0);
+  assert.equal(await outbox.hasOutboxSales(), false);
+  assert.equal((await f.db.getProduct(id))?.stock, 8);
+});
+
+void test('cola sin conexión no duplica una venta cuando se pierde la confirmación', async () => {
+  const f = await lanFixture();
+  const id = await f.db.saveProduct(base, 'admin');
+  const sid = await f.db.openCashSession(0, 'admin');
+  const outbox = f.load('@/lib/network/sale-outbox');
+  const cfg = await f.config.loadNetworkConfig();
+  const route = f.routes.get('/v1/sale')!;
+  let lose = true;
+  f.routes.set('/v1/sale', async (request) => {
+    const result = await route(request);
+    if (lose) {
+      lose = false;
+      throw new Error('respuesta perdida');
+    }
+    return result;
+  });
+  await outbox.enqueueOutboxSale(cfg, 'admin', outboxSale(id, sid), outboxMeta);
+  const lost = await outbox.syncOutbox(cfg, 'admin');
+  assert.equal(lost.offline, true);
+  assert.equal(lost.remaining, 1);
+  const recovered = await outbox.syncOutbox(cfg, 'admin');
+  assert.equal(recovered.sent.length, 1);
+  assert.equal((await f.db.getProduct(id))?.stock, 9);
+  assert.equal(f.calls.filter((call) => call.path === '/v1/sale').length, 1);
+});
+
+void test('venta rechazada sin registrar se reintenta en la caja actual o se descarta', async () => {
+  const f = await lanFixture();
+  const id = await f.db.saveProduct(base, 'admin');
+  const outbox = f.load('@/lib/network/sale-outbox');
+  const cfg = await f.config.loadNetworkConfig();
+  const entry = await outbox.enqueueOutboxSale(cfg, 'admin', outboxSale(id, 9999), outboxMeta);
+  const result = await outbox.syncOutbox(cfg, 'admin');
+  assert.equal(result.rejected.length, 1);
+  assert.equal(result.rejected[0].notCommitted, true);
+  assert.equal((await outbox.getOutbox()).entries[0].status, 'rejected');
+  // A rejected sale never blocks later ones.
+  const sid = await f.db.openCashSession(0, 'admin');
+  await outbox.enqueueOutboxSale(cfg, 'admin', outboxSale(id, sid), outboxMeta);
+  assert.equal((await outbox.syncOutbox(cfg, 'admin')).sent.length, 1);
+  await outbox.retryOutboxSale(entry.command.commandId, sid);
+  const retried = (await outbox.getOutbox()).entries[0];
+  assert.equal(retried.status, 'pending');
+  assert.notEqual(retried.command.commandId, entry.command.commandId);
+  assert.equal(retried.command.sessionId, sid);
+  assert.equal((await outbox.syncOutbox(cfg, 'admin')).sent.length, 1);
+  assert.equal((await f.db.getProduct(id))?.stock, 8);
+  const bad = await outbox.enqueueOutboxSale(cfg, 'admin', outboxSale(id, 9999), outboxMeta);
+  await assert.rejects(outbox.discardOutboxSale(bad.command.commandId));
+  await outbox.syncOutbox(cfg, 'admin');
+  await outbox.discardOutboxSale(bad.command.commandId);
+  assert.equal(await outbox.hasOutboxSales(), false);
+});
+
+void test('login sin conexión usa un verificador local que caduca a los 7 días', async () => {
+  const f = await lanFixture();
+  const offline = f.load('@/lib/network/offline-session');
+  const user = {
+    id: 1,
+    username: 'admin',
+    role: 'admin' as const,
+    can_authorize_consumption: 0 as const,
+  };
+  const saved = new Date('2026-01-01T12:00:00Z');
+  await offline.rememberOfflineLogin(pin, user, 'admin-securo-123', saved);
+  assert.deepEqual(
+    await offline.verifyOfflineLogin(pin, 'ADMIN', 'admin-securo-123', saved.getTime() + 60_000),
+    user,
+  );
+  assert.equal(
+    await offline.verifyOfflineLogin(pin, 'admin', 'otra-clave', saved.getTime() + 60_000),
+    null,
+  );
+  const otherPin = 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=';
+  assert.equal(await offline.verifyOfflineLogin(otherPin, 'admin', 'admin-securo-123'), null);
+  await assert.rejects(
+    offline.verifyOfflineLogin(pin, 'admin', 'admin-securo-123', saved.getTime() + 8 * 86_400_000),
+    /7 días/,
+  );
+  await offline.forgetOfflineLogin(pin, 'admin');
+  assert.equal(
+    await offline.verifyOfflineLogin(pin, 'admin', 'admin-securo-123', saved.getTime()),
+    null,
+  );
+});
+
+void test('catálogo sin conexión pertenece al usuario y administrador que lo descargó', async () => {
+  const f = await lanFixture();
+  await f.db.saveProduct(base, 'admin');
+  await f.client.getHostSnapshot(url);
+  const stored = await f.client.getOfflineSnapshot(pin, 'admin');
+  assert.ok(stored);
+  assert.equal(stored.products.length, 1);
+  assert.ok(stored.confirmedAt);
+  assert.equal(await f.client.getOfflineSnapshot(pin, 'cajero'), null);
+  assert.equal(await f.client.getOfflineSnapshot(url, 'admin'), null);
+  await f.db.clearNetworkReplicas();
+  assert.ok(await f.client.getOfflineSnapshot(pin, 'admin'));
+  await f.db.clearNetworkReplicas(true);
+  assert.equal(await f.client.getOfflineSnapshot(pin, 'admin'), null);
 });

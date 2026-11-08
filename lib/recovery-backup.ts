@@ -44,7 +44,12 @@ export async function inspectRecoverySnapshot(
   const copy = parsed.data;
   if (copy.authorityId !== expectedAuthorityId)
     throw new Error('La copia pertenece a otra autoridad. No se utilizará.');
-  if (copy.schemaVersion !== 8 && copy.schemaVersion !== DATABASE_VERSION)
+  if (
+    copy.schemaVersion !== 8 &&
+    copy.schemaVersion !== 9 &&
+    copy.schemaVersion !== 10 &&
+    copy.schemaVersion !== DATABASE_VERSION
+  )
     throw new Error('Esta copia necesita revisión de compatibilidad antes de recuperarla.');
   const directory: unknown = SQLite.defaultDatabaseDirectory;
   if (Platform.OS === 'web' || typeof directory !== 'string' || !directory)

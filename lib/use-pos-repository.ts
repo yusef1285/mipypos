@@ -69,6 +69,21 @@ export function usePosRepository(): Repository {
         );
       };
     return {
+      getBusinessData: bind('getBusinessData', (filter) =>
+        Database.getBusinessData(filter, user?.username ?? ''),
+      ),
+      getTransferData: bind('getTransferData', () =>
+        Database.getTransferData(user?.username ?? ''),
+      ),
+      executeBusinessCommand: bind('executeBusinessCommand', (input, _username, command) =>
+        Database.executeBusinessCommand(input, user?.username ?? '', command),
+      ),
+      getSaleTicket: bind('getSaleTicket', (saleId) => Database.getSaleTicket(saleId)),
+      executeSaleCommand: bind('executeSaleCommand', (input, _username, command) =>
+        Database.executeSaleCommand(input, user?.username ?? '', command),
+      ),
+      listProductExtras: bind('listProductExtras', Database.listProductExtras),
+      getSaleOptions: bind('getSaleOptions', Database.getSaleOptions),
       getFiscalData: bind('getFiscalData', (filter) =>
         Database.getFiscalData(filter, user?.username ?? ''),
       ),
