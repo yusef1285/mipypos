@@ -5,7 +5,7 @@ name: MipyPOS Windows
 on:
   workflow_dispatch:
   push:
-    branches: [escritorio-windows, version-1-0]
+    branches: [main, escritorio-windows, version-1-0]
 
 concurrency:
   group: desktop-${{ github.ref }}
