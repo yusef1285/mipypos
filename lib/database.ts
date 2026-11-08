@@ -3,7 +3,8 @@ import * as SQLite from 'expo-sqlite';
 import * as Finance from '@/lib/finance';
 import * as Onat from '@/lib/onat';
 import * as Business from '@/lib/business';
-import type { BusinessCommand, BusinessFilter } from '@/lib/business-models';
+import type { BusinessCommand, BusinessFilter, SaleCommand } from '@/lib/business-models';
+import { saleCommandSchema } from '@/lib/business-models';
 import {
   DEFAULT_ADMIN_PASSWORD,
   assertNewPassword,
@@ -35,7 +36,7 @@ import {
   storedSettlementSchema,
   parseOperationResult,
 } from '@/lib/network/validation';
-import { saleUnitPrice } from '@/lib/sale-pricing';
+import { lineUnitPrice, type WholesaleTier } from '@/lib/sale-pricing';
 import { saleFingerprint } from '@/lib/sale-identity';
 import { canAccess } from '@/lib/permissions';
 import { prepareMigrationBackup, migrateHardening } from '@/lib/database-migrations';
@@ -266,9 +267,16 @@ export function getNetworkReplica(cacheKey: string) {
     ),
   );
 }
-export function clearNetworkReplicas() {
+/** Session replicas are discarded on logout; offline catalogs survive until re-pairing. */
+export function clearNetworkReplicas(includeOffline = false) {
   return consistentRead(async () => {
-    await (await getDatabase()).runAsync('DELETE FROM network_replica');
+    await (
+      await getDatabase()
+    ).runAsync(
+      includeOffline
+        ? 'DELETE FROM network_replica'
+        : "DELETE FROM network_replica WHERE cache_key NOT LIKE 'offline:%'",
+    );
   });
 }
 export function storeNetworkReplica(cacheKey: string, payload: string) {
@@ -281,7 +289,10 @@ export function storeNetworkReplica(cacheKey: string, payload: string) {
       now(),
     );
     await db.runAsync(
-      'DELETE FROM network_replica WHERE cache_key NOT IN (SELECT cache_key FROM network_replica ORDER BY confirmed_at DESC LIMIT 16)',
+      "DELETE FROM network_replica WHERE cache_key NOT LIKE 'offline:%' AND cache_key NOT IN (SELECT cache_key FROM network_replica WHERE cache_key NOT LIKE 'offline:%' ORDER BY confirmed_at DESC LIMIT 16)",
+    );
+    await db.runAsync(
+      "DELETE FROM network_replica WHERE cache_key LIKE 'offline:%' AND cache_key NOT IN (SELECT cache_key FROM network_replica WHERE cache_key LIKE 'offline:%' ORDER BY confirmed_at DESC LIMIT 8)",
     );
   });
 }
@@ -362,7 +373,7 @@ export async function createBusinessArchive(username: string): Promise<BusinessA
       app: 'MipyPOS',
       format: 'business-close',
       version: 2,
-      schemaVersion: 9,
+      schemaVersion: 10,
       archiveId: Crypto.randomUUID(),
       createdAt: now(),
       sourceUser: username,
@@ -821,8 +832,18 @@ export async function setSetting(key: string, value: string) {
     );
   });
 }
+// Pro needs the cached mode plus an unexpired date; lib/license.ts refreshes both
+// after verifying the signed license, so expiry applies even before a refresh.
+function proActive(mode: string | null | undefined, expires: string | null | undefined) {
+  if (mode !== 'pro') return false;
+  if (!expires) return true;
+  const end = Date.parse(expires);
+  return Number.isFinite(end) && Date.now() < end;
+}
 export async function getLicenseMode(): Promise<LicenseMode> {
-  return (await getSetting('license_mode')) === 'pro' ? 'pro' : 'demo';
+  return proActive(await getSetting('license_mode'), await getSetting('license_expires_at'))
+    ? 'pro'
+    : 'demo';
 }
 
 export async function getDemoUsage() {
@@ -840,10 +861,11 @@ async function consumeDemoQuota(db: SQLite.SQLiteDatabase, resource: 'sales' | '
     (await db.getFirstAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', key))
       ?.value ?? 0,
   );
-  const mode = (
-    await db.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='license_mode'")
-  )?.value;
-  if (mode !== 'pro' && used >= 5)
+  const setting = async (name: string) =>
+    (await db.getFirstAsync<{ value: string }>('SELECT value FROM settings WHERE key=?', name))
+      ?.value;
+  const pro = proActive(await setting('license_mode'), await setting('license_expires_at'));
+  if (!pro && used >= 5)
     throw new Error(
       resource === 'sales'
         ? 'Has alcanzado las 5 ventas de la demo. Activa una licencia Pro para seguir vendiendo.'
@@ -1209,8 +1231,8 @@ export async function restorePrivateRecoveryBackup(
         await installRecoveryJournal(candidate!);
         await candidate!.execAsync(`PRAGMA user_version=${DATABASE_VERSION}`);
       });
-    } else if (backup.schemaVersion === 9) {
-      // v10 only adds empty business tables: the verified journal prefix is kept.
+    } else if (backup.schemaVersion === 9 || backup.schemaVersion === 10) {
+      // v10 and v11 only add empty business tables: the verified journal prefix is kept.
       await candidate.withTransactionAsync(async () => {
         await assertRecoveryJournalAvailable(candidate!);
         await migrateBusiness(candidate!);
@@ -2266,7 +2288,11 @@ export async function registerSale(
       )
         throw new Error(`La unidad de ${current.name} cambió. Actualiza el carrito.`);
       currentProducts.set(current.id, current);
-      const price = saleUnitPrice(current, method);
+      const tier = await db.getFirstAsync<WholesaleTier>(
+        'SELECT wholesale_price,wholesale_min_qty FROM product_extras WHERE product_id=?',
+        current.id,
+      );
+      const price = lineUnitPrice(current, method, item.quantity, tier);
       if (!Number.isFinite(item.price) || Math.abs(item.price - price) > 0.000001)
         throw new Error(`El precio de ${current.name} cambió. Actualiza el carrito.`);
       if (!Number.isInteger(item.areaId)) throw new Error('Selecciona el área de venta.');
@@ -2960,6 +2986,48 @@ export async function executeBusinessCommand(
     command,
     (value) => parseOperationResult('executeBusinessCommand', value),
   );
+}
+export async function executeSaleCommand(
+  input: SaleCommand,
+  username: string,
+  command?: MutationCommand,
+): Promise<string> {
+  const parsed = saleCommandSchema.safeParse(input);
+  if (!parsed.success)
+    throw new Error(parsed.error.issues[0]?.message ?? 'Revisa los datos de la venta.');
+  const db = await getDatabase();
+  return transaction(
+    db,
+    () => Business.executeBusinessCommand(db, parsed.data, username),
+    command,
+    (value) => parseOperationResult('executeSaleCommand', value),
+  );
+}
+/** What the point of sale needs beyond the catalog: tiers, barcodes, clients, rates. */
+export async function getSaleOptions() {
+  return consistentRead(async () => {
+    const db = await getDatabase();
+    const base = await Business.baseCurrency(db);
+    const currencies: { code: string; name: string; rate: number }[] = [];
+    for (const row of await db.getAllAsync<{ code: string; name: string }>(
+      'SELECT code,name FROM currencies WHERE code<>? ORDER BY code',
+      base,
+    )) {
+      const rate = await Business.rateFor(db, row.code).catch(() => null);
+      if (rate) currencies.push({ ...row, rate });
+    }
+    return {
+      baseCurrency: base,
+      extras: await Business.listProductExtras(db),
+      clients: await db.getAllAsync<{ id: number; name: string }>(
+        "SELECT id,name FROM parties WHERE active=1 AND kind IN ('client','both') ORDER BY name",
+      ),
+      currencies,
+    };
+  });
+}
+export async function listProductExtras() {
+  return Business.listProductExtras(await getDatabase());
 }
 export async function getSaleTicket(saleId: number) {
   if (!Number.isInteger(saleId) || saleId <= 0) throw new Error('Venta no válida.');

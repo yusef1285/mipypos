@@ -10,7 +10,7 @@ import {
   useFonts,
 } from '@expo-google-fonts/inter';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
-import { Platform } from 'react-native';
+import { Platform, Pressable, Text, View } from 'react-native';
 import { useEffect } from 'react';
 import * as DevClient from 'expo-dev-client';
 import { HeroUINativeProvider, useThemeColor } from 'heroui-native';
@@ -22,6 +22,8 @@ import {
 } from 'expo-router';
 
 import { initPostHog } from '@/lib/posthog';
+import { installGlobalErrorHandler, recordError } from '@/lib/error-log';
+import { AppLock } from '@/components/AppLock';
 import { registerServiceWorker } from '@/lib/registerServiceWorker';
 import { reportErrorToParent } from '@/lib/reportPreviewError';
 import { InstallPrompt } from '@/components/InstallPrompt';
@@ -29,6 +31,7 @@ import { AppProvider } from '@/lib/app-context';
 import { registerColorTokens } from '@/lib/registerColorTokens';
 
 registerColorTokens();
+installGlobalErrorHandler();
 
 /**
  * Custom ErrorBoundary that reports React render errors to the parent window (Bilt preview iframe)
@@ -40,8 +43,26 @@ function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
       const message = [error.message, error.stack].filter(Boolean).join('\n');
       reportErrorToParent(message);
     }
+    if (error) void recordError('render', error);
   }, [error]);
-  return <ExpoErrorBoundary error={error} retry={retry} />;
+  if (Platform.OS === 'web') return <ExpoErrorBoundary error={error} retry={retry} />;
+  // Native: friendly Spanish screen. Data lives in SQLite, so retrying is safe.
+  return (
+    <View style={{ flex: 1, justifyContent: 'center', padding: 32, gap: 16 }}>
+      <Text style={{ fontSize: 22, fontWeight: '700' }}>Algo salió mal</Text>
+      <Text style={{ fontSize: 16 }}>
+        Tus datos están guardados. Pulsa Reintentar; si se repite, envía el registro de errores
+        desde Configuración al soporte.
+      </Text>
+      <Pressable
+        accessibilityRole="button"
+        onPress={() => void retry()}
+        style={{ backgroundColor: '#0f766e', borderRadius: 12, padding: 14 }}
+      >
+        <Text style={{ color: '#ffffff', fontSize: 16, textAlign: 'center' }}>Reintentar</Text>
+      </Pressable>
+    </View>
+  );
 }
 
 export { ErrorBoundary };
@@ -85,6 +106,11 @@ function AppStack() {
       <Stack.Screen name="settings" options={{ headerShown: true, title: 'Configuración' }} />
       <Stack.Screen name="branches" options={{ headerShown: true, title: 'Sucursales' }} />
       <Stack.Screen name="transfers" options={{ headerShown: true, title: 'Transferencias' }} />
+      <Stack.Screen name="purchases" options={{ headerShown: true, title: 'Compras' }} />
+      <Stack.Screen
+        name="inventory-count"
+        options={{ headerShown: true, title: 'Conteo físico' }}
+      />
       <Stack.Screen
         name="parties"
         options={{ headerShown: true, title: 'Clientes y proveedores' }}
@@ -118,6 +144,7 @@ export default function RootLayout() {
 
     const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
       const err = event.reason;
+      void recordError('promise', err);
       const message =
         err instanceof Error ? [err.message, err.stack].filter(Boolean).join('\n') : String(err);
       reportErrorToParent(message);
@@ -194,6 +221,7 @@ export default function RootLayout() {
       <HeroUINativeProvider>
         <AppProvider>
           <AppStack />
+          <AppLock />
           <InstallPrompt />
         </AppProvider>
       </HeroUINativeProvider>

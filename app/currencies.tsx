@@ -14,6 +14,7 @@ import {
 import { FinanceField, FinanceStatus } from '@/components/FinanceControls';
 import { EmptyState, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
+import { IsoDateField } from '@/components/IsoDateField';
 import { useApp } from '@/lib/app-context';
 import { canAccess } from '@/lib/permissions';
 
@@ -86,7 +87,7 @@ export default function Currencies() {
             value={rate}
             onChange={setRate}
           />
-          <FinanceField label="Vigente desde (AAAA-MM-DD)" value={date} onChange={setDate} />
+          <IsoDateField label="Vigente desde" value={date} onChange={setDate} />
           <FinanceField label="Fuente (opcional)" value={source} onChange={setSource} />
           <View className="flex-row gap-2">
             <Button

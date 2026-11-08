@@ -22,9 +22,10 @@ import {
 } from '@/lib/network/operations';
 import { operationFingerprint } from '@/lib/network/pending-operation';
 import { redactCosts } from '@/lib/finance-privacy';
-import { saleUnitPrice } from '@/lib/sale-pricing';
+import { lineUnitPrice } from '@/lib/sale-pricing';
 import { saleFingerprint } from '@/lib/sale-identity';
 import { assertOperationRequest, assertSaleCommand, ProtocolError } from '@/lib/network/validation';
+import { isDesktop } from '@/lib/desktop';
 import { canAccess, type ModuleKey } from '@/lib/permissions';
 
 interface SessionEntry {
@@ -124,6 +125,12 @@ async function handleOperation(request: OperationRequest, user: Usuario): Promis
       return DB.executeBusinessCommand(request.args[0], user.username, command);
     case 'getSaleTicket':
       return DB.getSaleTicket(request.args[0]);
+    case 'executeSaleCommand':
+      return DB.executeSaleCommand(request.args[0], user.username, command);
+    case 'listProductExtras':
+      return DB.listProductExtras();
+    case 'getSaleOptions':
+      return DB.getSaleOptions();
     case 'getFiscalData':
       return DB.getFiscalData(request.args[0], user.username);
     case 'executeFiscalCommand':
@@ -234,6 +241,7 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
     );
   if (!Number.isInteger(command.sessionId)) throw new Error('Actualiza la caja antes de vender.');
   const byId = new Map((await DB.listProducts()).map((product) => [product.id, product]));
+  const tiers = new Map((await DB.listProductExtras()).map((tier) => [tier.product_id, tier]));
   const items: CartItem[] = command.items.map((input) => {
     const product = byId.get(input.productId);
     if (!product) throw new Error('Uno de los productos ya no existe.');
@@ -241,7 +249,7 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
       product,
       areaId: input.areaId,
       quantity: input.quantity,
-      price: saleUnitPrice(product, command.method),
+      price: lineUnitPrice(product, command.method, input.quantity, tiers.get(product.id)),
     };
   });
   return DB.registerSale(
@@ -259,8 +267,9 @@ async function handleNetworkSale(command: NetworkSaleCommand, user: Usuario) {
 }
 
 export async function startLanHost(): Promise<string> {
-  if (Platform.OS !== 'android')
-    throw new Error('El host local requiere una compilación Android con el servidor LAN.');
+  const desktop = isDesktop();
+  if (Platform.OS !== 'android' && !desktop)
+    throw new Error('El servidor local requiere MipyPOS para Android o MipyPOS para Windows.');
   if (await DB.hasDefaultAdministratorPassword())
     throw new Error(
       'Cambia la contraseña inicial del administrador en Usuarios antes de iniciar la red local.',
@@ -270,11 +279,15 @@ export async function startLanHost(): Promise<string> {
     await new Promise((resolve) => setTimeout(resolve, 500));
     ip = await getLanHostIp();
   }
-  ip ??= await Network.getIpAddressAsync();
+  if (!desktop) ip ??= await Network.getIpAddressAsync();
   if (!ip || ip === '0.0.0.0' || ip === '127.0.0.1')
-    throw new Error('Conecta el Wi-Fi o activa el hotspot antes de iniciar el host.');
+    throw new Error(
+      desktop
+        ? 'Conecta la computadora al Wi-Fi o al router del negocio antes de iniciar el servidor.'
+        : 'Conecta el Wi-Fi o activa el hotspot antes de iniciar el host.',
+    );
   if (server) await stopLanHostAndDrain();
-  if (!NativeModules.MipyTls)
+  if (!desktop && !NativeModules.MipyTls)
     throw new Error(
       'Esta instalación no incluye el servidor LAN. Instala una compilación Android con el módulo de red.',
     );

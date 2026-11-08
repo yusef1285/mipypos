@@ -1,9 +1,9 @@
 import * as Haptics from 'expo-haptics';
 import { Link } from 'expo-router';
-import { Button, Card, Skeleton, Typography } from 'heroui-native';
-import { Banknote, CreditCard, Send, ShoppingBag } from 'lucide-react-native';
+import { Button, Card, Skeleton, Typography, useThemeColor } from 'heroui-native';
+import { Banknote, CreditCard, FileText, Send, ShoppingBag } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { FlatList, View } from 'react-native';
+import { Alert, FlatList, Platform, View } from 'react-native';
 import { AccessDenied } from '@/components/AccessDenied';
 import { EmptyState, MetricCard, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
@@ -12,6 +12,7 @@ import { usePosRepository } from '@/lib/use-pos-repository';
 import { money } from '@/lib/format';
 import type { DailyReport, Movimiento, Producto } from '@/lib/models';
 import { canAccess } from '@/lib/permissions';
+import { shareDailyReportPdf } from '@/lib/daily-report-pdf';
 
 type Row = { key: string } & (
   | { kind: 'heading'; title: string; count: number }
@@ -96,6 +97,8 @@ export default function Reports() {
   const [report, setReport] = useState<DailyReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [sharing, setSharing] = useState(false);
+  const accent = useThemeColor('accent');
   const load = useCallback(() => {
     if (!user || !canAccess(user.role, 'reports')) return Promise.resolve();
     return getDailyReport()
@@ -172,6 +175,28 @@ export default function Reports() {
         ListHeaderComponent={
           <View className="gap-4">
             <Typography.Heading type="h2">Reporte diario</Typography.Heading>
+            {report && !loading && !error && Platform.OS !== 'web' ? (
+              <Button
+                variant="secondary"
+                isDisabled={sharing}
+                onPress={() => {
+                  setSharing(true);
+                  void shareDailyReportPdf(report, 'MipyPOS')
+                    .catch((failure: unknown) =>
+                      Alert.alert(
+                        'No se pudo crear el PDF',
+                        failure instanceof Error ? failure.message : '',
+                      ),
+                    )
+                    .finally(() => setSharing(false));
+                }}
+              >
+                <FileText size={18} color={accent} />
+                <Button.Label>
+                  {sharing ? 'Generando…' : 'Enviar PDF (WhatsApp, correo…)'}
+                </Button.Label>
+              </Button>
+            ) : null}
             {!loading && !error ? (
               <View className="flex-row flex-wrap gap-3">
                 <MetricCard

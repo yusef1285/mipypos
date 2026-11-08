@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createHarness, prepareHarness } from './pos-test-harness';
 import type { BusinessCommand } from '../lib/business-models';
-import { BUSINESS_V10_TABLES } from '../lib/business-schema';
+import { BUSINESS_V10_TABLES, BUSINESS_V11_TABLES } from '../lib/business-schema';
 import type { CartItem } from '../lib/models';
 import { canAccess } from '../lib/permissions';
 
@@ -95,8 +95,8 @@ async function sell(f: Fixture, areaId: number, quantity = 1) {
 
 check('migración v10 crea las tablas empresariales con protección de historial', async () => {
   const f = await fixture();
-  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 10);
-  for (const table of BUSINESS_V10_TABLES) {
+  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 11);
+  for (const table of [...BUSINESS_V10_TABLES, ...BUSINESS_V11_TABLES]) {
     const triggers = f.database.exec(
       `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='${table}' AND name LIKE 'recovery_capture_%'`,
     )[0].values[0][0];
@@ -104,17 +104,18 @@ check('migración v10 crea las tablas empresariales con protección de historial
   }
   // Re-running the migration is idempotent.
   await f.db.initializeDatabase();
-  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 10);
+  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 11);
 });
 
 check('base v9 existente migra a v10 sin perder datos', async () => {
   const f = await fixture();
   await f.db.openCashSession(100, 'admin');
   await sell(f, f.warehouse.id);
-  for (const table of [...BUSINESS_V10_TABLES].toReversed()) f.database.run(`DROP TABLE ${table}`);
+  for (const table of [...BUSINESS_V10_TABLES, ...BUSINESS_V11_TABLES].toReversed())
+    f.database.run(`DROP TABLE ${table}`);
   f.database.run('PRAGMA user_version=9');
   await f.db.initializeDatabase();
-  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 10);
+  assert.equal(f.database.exec('PRAGMA user_version')[0].values[0][0], 11);
   assert.equal(f.database.exec('SELECT COUNT(*) FROM sales')[0].values[0][0], 1);
   assert.equal(f.database.exec('SELECT COUNT(*) FROM sale_tickets')[0].values[0][0], 0);
   assert.equal(
@@ -778,6 +779,206 @@ check(
   },
 );
 
+const partyBody = (kind: 'client' | 'supplier' | 'both', name: string, creditLimit = 0) => ({
+  action: 'party.save' as const,
+  kind,
+  name,
+  document: '',
+  phone: '',
+  email: '',
+  address: '',
+  creditLimit,
+  notes: '',
+  active: true,
+});
+
+check(
+  'v11 venta a crédito: cuenta por cobrar, sin efectivo en caja y sin anulación directa',
+  async () => {
+    const f = await fixture();
+    const client = Number(await f.run(partyBody('client', 'Ana', 300)));
+    const supplier = Number(await f.run(partyBody('supplier', 'Mayorista')));
+    const session = await f.db.openCashSession(100, 'admin');
+    const saleId = await sell(f, f.warehouse.id, 1);
+    const credit = (partyId: number, user = 'admin') =>
+      f.db.executeSaleCommand(
+        { commandId: randomUUID(), action: 'sale.credit', saleId, partyId },
+        user,
+      );
+    await assert.rejects(credit(supplier), /clientes/);
+    const ledgerId = await credit(client);
+    await assert.rejects(credit(client), /ya tiene un cobro/);
+    const preview = await f.db.getCashClosurePreview(session);
+    assert.equal(preview.cashSales, 200);
+    assert.equal(preview.otherCashNet, -200);
+    const balances = (await f.data()).balances.find((b) => b.partyId === client);
+    assert.equal(balances?.receivable, 200);
+    await assert.rejects(
+      f.run({ action: 'ledger.void', entryId: ledgerId, reason: 'Error de cliente' }),
+      /venta a crédito/,
+    );
+    // Credit limit is enforced on the second sale (200 + 200 > 300).
+    const second = await sell(f, f.warehouse.id, 1);
+    await assert.rejects(
+      f.db.executeSaleCommand(
+        { commandId: randomUUID(), action: 'sale.credit', saleId: second, partyId: client },
+        'admin',
+      ),
+      /límite de crédito/,
+    );
+    // A seller only settles their own sales.
+    await f.db.saveUser({ username: 'vendedor', password: 'Vende-1234', role: 'seller' });
+    await assert.rejects(
+      f.db.executeSaleCommand(
+        { commandId: randomUUID(), action: 'sale.credit', saleId: second, partyId: client },
+        'vendedor',
+      ),
+      /tus propias ventas/,
+    );
+  },
+);
+
+check('v11 cobro en divisa: vuelto en moneda base y arqueo separado', async () => {
+  const f = await fixture();
+  await f.run({ action: 'currency.save', code: 'USD', name: 'Dólar', symbol: 'US$', decimals: 2 });
+  await f.run({
+    action: 'currency.rate',
+    code: 'USD',
+    rate: 300,
+    effectiveDate: today(),
+    source: 'Mercado',
+  });
+  const session = await f.db.openCashSession(1000, 'admin');
+  const saleId = await sell(f, f.warehouse.id, 2); // 400 CUP
+  const fx = (amount: number, currency = 'USD') =>
+    f.db.executeSaleCommand(
+      { commandId: randomUUID(), action: 'sale.fx', saleId, currency, amount },
+      'admin',
+    );
+  await assert.rejects(fx(1), /no cubre/);
+  await assert.rejects(fx(5, 'CUP'), /distinta/);
+  await fx(2); // 600 CUP equivalent, 200 CUP change
+  const preview = await f.db.getCashClosurePreview(session);
+  // Drawer: 1000 fund + 400 sale - 600 equivalent = 800 CUP (1000 - 200 change) and 2 USD.
+  assert.equal(preview.fund + preview.cashSales + preview.otherCashNet, 800);
+  assert.deepEqual(preview.foreignCash, [{ currency: 'USD', net: 2 }]);
+});
+
+check('v11 compra a proveedor: entrada valorada, cuenta por pagar o pago en caja', async () => {
+  const f = await fixture();
+  const supplier = Number(await f.run(partyBody('supplier', 'Distribuidora')));
+  const client = Number(await f.run(partyBody('client', 'Solo cliente')));
+  const initial = await f.stockAt(f.warehouse.id);
+  const purchase = (payment: 'credit' | 'cash', partyId = supplier) =>
+    f.run({
+      action: 'purchase.receive',
+      partyId,
+      areaId: f.warehouse.id,
+      lines: [{ productId: f.productId, quantity: 10, cost: 100 }],
+      payment,
+      reference: 'FAC-1',
+    });
+  await assert.rejects(purchase('credit', client), /proveedores/);
+  await purchase('credit');
+  assert.equal(await f.stockAt(f.warehouse.id), initial + 10);
+  // Weighted average: 50 at 80 + 10 at 100 = 83.33.
+  assert.equal(Math.round(((await f.product()).unit_cost ?? 0) * 100) / 100, 83.33);
+  let balance = (await f.data()).balances.find((b) => b.partyId === supplier);
+  assert.equal(balance?.payable, 1000);
+  await assert.rejects(purchase('cash'), /Abre la caja/);
+  const session = await f.db.openCashSession(2000, 'admin');
+  await purchase('cash');
+  balance = (await f.data()).balances.find((b) => b.partyId === supplier);
+  assert.equal(balance?.payable, 1000);
+  assert.equal((await f.db.getCashClosurePreview(session)).otherCashNet, -1000);
+});
+
+check('v11 conteo físico ajusta existencias con motivo y respeta permisos', async () => {
+  const f = await fixture();
+  const start = await f.stockAt(f.warehouse.id);
+  const count = (counted: number, user = 'admin') =>
+    f.run(
+      {
+        action: 'inventory.count',
+        areaId: f.warehouse.id,
+        lines: [{ productId: f.productId, counted }],
+        reason: 'Conteo mensual',
+      },
+      user,
+    );
+  await count(start - 3);
+  assert.equal(await f.stockAt(f.warehouse.id), start - 3);
+  assert.equal((await f.product()).stock, start - 3);
+  await count(start + 1);
+  assert.equal(await f.stockAt(f.warehouse.id), start + 1);
+  await assert.rejects(count(1.5), /decimal|entera|cantidad/i);
+  await f.db.saveUser({ username: 'almacen', password: 'Almacen-123', role: 'storekeeper' });
+  await count(start, 'almacen');
+  await f.db.saveUser({ username: 'vende', password: 'Vende-1234', role: 'seller' });
+  await assert.rejects(count(start, 'vende'), /permiso/);
+  const audit = f.database.exec(
+    "SELECT COUNT(*) FROM audit_log WHERE action='business.inventory.count'",
+  );
+  assert.equal(audit[0].values[0][0], 3);
+});
+
+check(
+  'v11 código de barras único, stock mínimo y precio mayorista validado en la venta',
+  async () => {
+    const f = await fixture();
+    const other = await f.db.saveProduct(
+      {
+        name: 'Azúcar',
+        category: 'Alimentos',
+        subcategory: '',
+        stock: 0,
+        price_cash: 50,
+        price_transfer: 50,
+        unit: 'u',
+        quantity_decimals: 0,
+        image_path: null,
+      },
+      'admin',
+    );
+    const extras = (productId: number, barcode: string, more: Record<string, unknown> = {}) =>
+      f.run({ action: 'product.extras', productId, barcode, minStock: 5, ...more });
+    await extras(f.productId, '7501031311309', { wholesalePrice: 150, wholesaleMinQty: 6 });
+    await assert.rejects(extras(other, '7501031311309'), /ya pertenece/);
+    await assert.rejects(extras(other, '12'), /4 a 64/);
+    await assert.rejects(extras(other, '1234', { wholesalePrice: 10 }), /ambos/);
+    const list = await f.db.listProductExtras();
+    assert.equal(list.length, 1);
+    assert.equal(list[0].barcode, '7501031311309');
+    await f.db.openCashSession(0, 'admin');
+    const product = await f.product();
+    // Below the minimum the regular tariff applies; at 6 units the wholesale tier is required.
+    await assert.rejects(
+      f.db.registerSale(
+        [{ product, quantity: 6, price: 200, areaId: f.warehouse.id }],
+        'cash',
+        [{ type: 'cash', amount: 1200 }],
+        'admin',
+      ),
+      /precio/,
+    );
+    await f.db.registerSale(
+      [{ product, quantity: 6, price: 150, areaId: f.warehouse.id }],
+      'cash',
+      [{ type: 'cash', amount: 900 }],
+      'admin',
+    );
+    await f.db.registerSale(
+      [{ product, quantity: 1, price: 200, areaId: f.warehouse.id }],
+      'cash',
+      [{ type: 'cash', amount: 200 }],
+      'admin',
+    );
+    // Clearing every extra removes the row.
+    await f.run({ action: 'product.extras', productId: f.productId, barcode: '', minStock: 0 });
+    assert.equal((await f.db.listProductExtras()).length, 0);
+  },
+);
+
 check('comandos idempotentes: reintento no duplica y otro contenido se rechaza', async () => {
   const f = await fixture();
   const commandId = randomUUID();
@@ -845,7 +1046,7 @@ check('archivo de traslado v9 lleva los módulos y se importa en un destino vac�
     adminPassword: 'admin123',
   });
   const archive = await f.db.createBusinessArchive('admin');
-  assert.equal(archive.schemaVersion, 9);
+  assert.equal(archive.schemaVersion, 10);
   assert.equal(archive.tables.party_ledger.length, 2);
   assert.equal(archive.tables.sale_tickets.length, 1);
   const target = createHarness();

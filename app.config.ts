@@ -1,5 +1,7 @@
 import type { ConfigContext, ExpoConfig } from '@expo/config';
 
+import pkg from './package.json';
+
 type ExpoPlugins = NonNullable<ExpoConfig['plugins']>;
 
 export default ({ config }: ConfigContext): ExpoConfig => {
@@ -12,7 +14,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     ...config,
     name: 'MipyPOS',
     slug: 'mipypos',
-    version: process.env.BILT_APP_VERSION ?? '1.0.0',
+    version: process.env.BILT_APP_VERSION ?? pkg.version,
     orientation: 'portrait',
     userInterfaceStyle: 'automatic',
     scheme: 'mipypos',
@@ -30,6 +32,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       bundleIdentifier: process.env.BILT_IOS_BUNDLE_ID ?? 'me.bilt.mipypos',
     },
     android: {
+      // CI sets APP_VERSION_CODE to the run number; +100 keeps it above test builds.
+      versionCode: 100 + (Number(process.env.APP_VERSION_CODE) || 0),
       allowBackup: false,
       permissions: [
         'android.permission.INTERNET',

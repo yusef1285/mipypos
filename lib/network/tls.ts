@@ -2,6 +2,7 @@ import { NativeEventEmitter, NativeModules, Platform } from 'react-native';
 import { z } from 'zod';
 import { loadNetworkConfig } from '@/lib/network/config';
 import { validateLanUrl } from '@/lib/network/qr';
+import { getDesktopBridge, supportsSecureLan } from '@/lib/desktop';
 
 interface TlsRequest {
   id: string;
@@ -14,8 +15,7 @@ interface TlsModule {
   stopServer(): Promise<void>;
   respond(id: string, body: string): void;
   request(url: string, method: string, body: string, pin: string): Promise<string>;
-  addListener(event: string): void;
-  removeListeners(count: number): void;
+  onRequest(listener: (request: TlsRequest) => void): () => void;
 }
 const nativeTlsSchema = z.object({
   // Validate call arguments synchronously; async results are checked by the adapter below.
@@ -30,10 +30,20 @@ const nativeTlsSchema = z.object({
   addListener: z.function({ input: [z.string()], output: z.unknown() }),
   removeListeners: z.function({ input: [z.number()], output: z.unknown() }),
 });
-export const supportsLanTransport = () => Platform.OS === 'android';
+export const supportsLanTransport = supportsSecureLan;
 function nativeTls(): TlsModule {
+  const desktop = getDesktopBridge();
+  if (desktop)
+    return {
+      start: async (ip, port) => z.string().parse(await desktop.tls.start(ip, port)),
+      stopServer: () => desktop.tls.stop(),
+      respond: (id, body) => desktop.tls.respond(id, body),
+      request: async (url, method, body, pin) =>
+        z.string().parse(await desktop.tls.request(url, method, body, pin)),
+      onRequest: (listener) => desktop.tls.onRequest(listener),
+    };
   const parsed = nativeTlsSchema.safeParse(NativeModules.MipyTls);
-  if (!supportsLanTransport())
+  if (Platform.OS !== 'android')
     throw new Error('La conexión segura entre teléfonos solo está disponible en Android.');
   if (!parsed.success)
     throw new Error(
@@ -50,11 +60,12 @@ function nativeTls(): TlsModule {
     },
     request: async (url, method, body, pin) =>
       z.string().parse(await native.request(url, method, body, pin)),
-    addListener: (event) => {
-      native.addListener(event);
-    },
-    removeListeners: (count) => {
-      native.removeListeners(count);
+    onRequest: (listener) => {
+      const subscription = new NativeEventEmitter<{ MipyTlsRequest: [TlsRequest] }>({
+        addListener: (event: string) => native.addListener(event),
+        removeListeners: (count: number) => native.removeListeners(count),
+      }).addListener('MipyTlsRequest', listener);
+      return () => subscription.remove();
     },
   };
 }
@@ -82,7 +93,7 @@ export async function pinnedRequest(
 type Handler = (request: { data: unknown }) => Promise<unknown>;
 export class SecureLanServer {
   private routes = new Map<string, Handler>();
-  private subscription: ReturnType<NativeEventEmitter['addListener']> | null = null;
+  private unsubscribe: (() => void) | null = null;
   get(path: string, handler: Handler) {
     this.routes.set(`GET ${path}`, handler);
   }
@@ -94,9 +105,7 @@ export class SecureLanServer {
   async listen(ip: string, port: number) {
     const native = nativeTls();
     this.native = native;
-    this.subscription = new NativeEventEmitter<{ MipyTlsRequest: [TlsRequest] }>(
-      native,
-    ).addListener('MipyTlsRequest', (request: TlsRequest) => {
+    this.unsubscribe = native.onRequest((request: TlsRequest) => {
       const handling = (async () => {
         try {
           const handler = this.routes.get(`${request.method} ${request.path}`);
@@ -119,14 +128,14 @@ export class SecureLanServer {
       hostPin = await native.start(ip, port);
       hostUrl = `https://${ip}:${port}`;
     } catch (error) {
-      this.subscription.remove();
-      this.subscription = null;
+      this.unsubscribe?.();
+      this.unsubscribe = null;
       throw error;
     }
   }
   async stopAndDrain() {
-    this.subscription?.remove();
-    this.subscription = null;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
     hostPin = '';
     hostUrl = '';
     const native = this.native;
@@ -138,8 +147,8 @@ export class SecureLanServer {
     }
   }
   stop() {
-    this.subscription?.remove();
-    this.subscription = null;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
     hostPin = '';
     hostUrl = '';
     const native = this.native;

@@ -39,7 +39,68 @@ export const paymentMethod = z.enum(['cash', 'transfer', 'other']);
 export type PaymentMethod = z.infer<typeof paymentMethod>;
 
 const base = { commandId: uuid };
+const barcode = z
+  .string()
+  .trim()
+  .max(64)
+  .refine((value) => value === '' || /^[0-9A-Za-z.-]{4,64}$/.test(value), {
+    message: 'El código de barras tiene de 4 a 64 letras, números, punto o guion.',
+  });
+const lineQuantity = z.number().finite().min(0).max(1e9);
+
+// Point-of-sale follow-ups a seller may run on their own sale (v11).
+export const saleCommandSchema = z.discriminatedUnion('action', [
+  z.object({
+    ...base,
+    action: z.literal('sale.credit'),
+    saleId: id,
+    partyId: id,
+    dueDate: isoDate.optional(),
+  }),
+  z.object({
+    ...base,
+    action: z.literal('sale.fx'),
+    saleId: id,
+    currency: currencyCode,
+    amount: money,
+  }),
+]);
+export type SaleCommand = z.input<typeof saleCommandSchema>;
+
 export const businessCommandSchema = z.discriminatedUnion('action', [
+  ...saleCommandSchema.options,
+  z.object({
+    ...base,
+    action: z.literal('product.extras'),
+    productId: id,
+    barcode: barcode.default(''),
+    minStock: lineQuantity.default(0),
+    wholesalePrice: moneyOrZero.nullable().default(null),
+    wholesaleMinQty: quantity.nullable().default(null),
+  }),
+  z.object({
+    ...base,
+    action: z.literal('purchase.receive'),
+    partyId: id,
+    areaId: id,
+    lines: z
+      .array(z.object({ productId: id, quantity, cost: moneyOrZero }))
+      .min(1, 'Agrega al menos un producto.')
+      .max(200),
+    payment: z.enum(['credit', 'cash', 'transfer']),
+    reference: z.string().trim().min(1, 'Indica la factura o comprobante.').max(120),
+    dueDate: isoDate.optional(),
+  }),
+  z.object({
+    ...base,
+    action: z.literal('inventory.count'),
+    areaId: id,
+    lines: z
+      .array(z.object({ productId: id, counted: lineQuantity }))
+      .min(1, 'Cuenta al menos un producto.')
+      .max(2000),
+    reason,
+  }),
   z.object({
     ...base,
     action: z.literal('branch.save'),
@@ -398,6 +459,33 @@ export interface PartnerMovement {
   note: string;
   reverses_id: string | null;
   cash_entry_id: string | null;
+  username: string;
+  date: string;
+}
+export interface ProductExtras {
+  product_id: number;
+  barcode: string | null;
+  min_stock: number;
+  wholesale_price: number | null;
+  wholesale_min_qty: number | null;
+}
+export interface SaleCredit {
+  sale_id: number;
+  party_id: number;
+  ledger_id: string;
+  session_id: number;
+  amount: number;
+  username: string;
+  date: string;
+}
+export interface SaleFx {
+  sale_id: number;
+  session_id: number;
+  currency: string;
+  amount: number;
+  rate: number;
+  base_amount: number;
+  change_base: number;
   username: string;
   date: string;
 }

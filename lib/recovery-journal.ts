@@ -31,8 +31,8 @@ const PAGE_SIZE = 250;
 export async function assertRecoveryJournalAvailable(db: SQLiteDatabase) {
   const version = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
   const current = version?.user_version ?? 0;
-  // v9 introduced the journal; v10 keeps it. Newer files are rejected elsewhere.
-  if (current < 9 || current > 10) return;
+  // v9 introduced the journal; v10 and v11 keep it. Newer files are rejected elsewhere.
+  if (current < 9 || current > 11) return;
   const evidence = await db.getAllAsync<{ name: string }>(
     "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('recovery_journal','recovery_lineage')",
   );

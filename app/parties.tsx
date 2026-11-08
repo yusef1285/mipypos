@@ -18,6 +18,7 @@ import { Choice, FinanceField, FinanceStatus } from '@/components/FinanceControl
 import { FinanceSelect } from '@/components/FinanceSelect';
 import { EmptyState, SectionTitle } from '@/components/pos-ui';
 import { Screen } from '@/components/Screen';
+import { IsoDateField } from '@/components/IsoDateField';
 import { useApp } from '@/lib/app-context';
 import type { Party, PaymentMethod } from '@/lib/business-models';
 import { shortDate } from '@/lib/format';
@@ -255,8 +256,9 @@ export default function Parties() {
                               }
                             />
                           ) : (
-                            <FinanceField
-                              label="Vence (AAAA-MM-DD, opcional)"
+                            <IsoDateField
+                              optional
+                              label="Vence"
                               value={dueDate}
                               onChange={setDueDate}
                             />
