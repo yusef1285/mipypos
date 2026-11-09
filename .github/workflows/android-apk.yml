@@ -41,7 +41,7 @@ jobs:
         env:
           NODE_ENV: production
           APP_VERSION_CODE: ${{ github.run_number }}
-        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a,x86_64,x86
       - name: Firmar y renombrar APK
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
