@@ -98,7 +98,21 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         },
       ],
       './lib/network/withLocalHotspot.ts',
-      ['expo-build-properties', { android: { usesCleartextTraffic: false } }],
+      [
+        'expo-build-properties',
+        {
+          android: {
+            usesCleartextTraffic: false,
+            // The SDK 58 template enables R8 in release builds by default
+            // (android.enableMinifyInReleaseBuilds=true in gradle.properties).
+            // R8 breaks WorkManager/Room reflection at startup: the app installs
+            // but crashes before showing any screen ("Unable to get provider
+            // androidx.startup.InitializationProvider ... WorkDatabase").
+            enableMinifyInReleaseBuilds: false,
+            enableShrinkResourcesInReleaseBuilds: false,
+          },
+        },
+      ],
       ...nativePlugins,
     ],
     experiments: {
