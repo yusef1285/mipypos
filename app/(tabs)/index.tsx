@@ -1,5 +1,6 @@
 import { router } from 'expo-router';
 import { Button, Card, Chip, Typography, useThemeColor } from 'heroui-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import {
   Banknote,
   Boxes,
@@ -11,8 +12,10 @@ import {
 } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import { View } from 'react-native';
+import { FadeInDown, FadeInUp } from 'react-native-reanimated';
 
 import { MetricCard, SectionTitle } from '@/components/pos-ui';
+import { AnimatedView } from '@/components/ui/primitives/AnimatedView';
 import { Screen } from '@/components/Screen';
 import { useApp } from '@/lib/app-context';
 import { usePosRepository } from '@/lib/use-pos-repository';
@@ -57,43 +60,55 @@ export default function Home() {
   if (!user) return null;
   return (
     <Screen onRefresh={load} safeTop>
-      <View className="bg-accent overflow-hidden rounded-3xl p-5">
-        <View className="mb-5 flex-row items-start justify-between">
-          <View className="flex-1">
-            <Typography.Paragraph className="text-accent-foreground/80">
-              Hola, {user.username}
+      <AnimatedView entering={FadeInDown.springify().damping(15)}>
+        <LinearGradient
+          colors={['#0F766E', '#064E3B']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          className="relative overflow-hidden rounded-3xl p-5"
+        >
+          <View className="absolute -right-16 -top-20 h-56 w-56 rounded-full bg-white opacity-[0.07]" />
+          <View className="absolute -bottom-24 -left-10 h-48 w-48 rounded-full bg-white opacity-[0.05]" />
+          <View className="relative mb-5 flex-row items-start justify-between">
+            <View className="flex-1">
+              <Typography.Paragraph className="text-white/80">
+                Hola, {user.username}
+              </Typography.Paragraph>
+              <Typography.Heading type="h2" className="text-white">
+                Resumen de hoy
+              </Typography.Heading>
+            </View>
+            <View className="rounded-2xl bg-white/15 p-3">
+              <Store color="white" size={24} />
+            </View>
+          </View>
+          <View className="relative flex-row items-center justify-between">
+            <View className="rounded-full bg-white/20 px-3 py-1">
+              <Typography.Paragraph type="body-sm" className="text-white">
+                {session ? 'Caja abierta' : 'Caja cerrada'}
+              </Typography.Paragraph>
+            </View>
+            <Typography.Paragraph type="body-sm" className="text-white">
+              {licenseMode === 'pro' ? 'Licencia Pro' : 'Modo demo'}
             </Typography.Paragraph>
-            <Typography.Heading type="h2" className="text-accent-foreground">
-              Resumen de hoy
-            </Typography.Heading>
           </View>
-          <View className="rounded-2xl bg-white/15 p-3">
-            <Store color="white" size={24} />
-          </View>
-        </View>
-        <View className="flex-row items-center justify-between">
-          <Chip size="sm" variant="soft">
-            {session ? 'Caja abierta' : 'Caja cerrada'}
-          </Chip>
-          <Typography.Paragraph type="body-sm" className="text-accent-foreground">
-            {licenseMode === 'pro' ? 'Licencia Pro' : 'Modo demo'}
-          </Typography.Paragraph>
-        </View>
-      </View>
+        </LinearGradient>
+      </AnimatedView>
       <View className="flex-row flex-wrap gap-3">
-        <MetricCard label="Ventas" value={money(report?.totalSales ?? 0)} icon={ShoppingCart} />
-        <MetricCard
-          label="Operaciones"
-          value={String(report?.salesCount ?? 0)}
-          icon={ChartNoAxesCombined}
-          tone="success"
-        />
-        <MetricCard
-          label="Stock bajo"
-          value={String(low.length)}
-          icon={CircleAlert}
-          tone="warning"
-        />
+        <AnimatedView entering={FadeInUp.springify().delay(120)} className="min-w-36 flex-1">
+          <MetricCard label="Ventas" value={money(report?.totalSales ?? 0)} icon={ShoppingCart} />
+        </AnimatedView>
+        <AnimatedView entering={FadeInUp.springify().delay(200)} className="min-w-36 flex-1">
+          <MetricCard
+            label="Operaciones"
+            value={String(report?.salesCount ?? 0)}
+            icon={ChartNoAxesCombined}
+            tone="success"
+          />
+        </AnimatedView>
+        <AnimatedView entering={FadeInUp.springify().delay(280)} className="min-w-36 flex-1">
+          <MetricCard label="Stock bajo" value={String(low.length)} icon={CircleAlert} tone="warning" />
+        </AnimatedView>
       </View>
       {user.role === 'admin' && productCount === 0 ? (
         <Card className="gap-2 p-4">
@@ -129,8 +144,13 @@ export default function Home() {
           </Button>
         </Card>
       ) : null}
-      <SectionTitle>Accesos rápidos</SectionTitle>
-      <View className="flex-row flex-wrap gap-3">
+      <AnimatedView entering={FadeInUp.springify().delay(200)}>
+        <SectionTitle>Accesos rápidos</SectionTitle>
+      </AnimatedView>
+      <AnimatedView
+        entering={FadeInUp.springify().delay(280)}
+        className="flex-row flex-wrap gap-3"
+      >
         {canAccess(user.role, 'sales') ? (
           <Button
             className="min-w-36 flex-1"
@@ -171,7 +191,7 @@ export default function Home() {
             <Button.Label>Productos</Button.Label>
           </Button>
         ) : null}
-      </View>
+      </AnimatedView>
       {low.length ? (
         <>
           <SectionTitle badge={low.length}>Productos con stock bajo</SectionTitle>

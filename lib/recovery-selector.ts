@@ -53,17 +53,20 @@ export async function resolveDatabaseFile(): Promise<{ fileName: string; authori
       'La identidad del selector no coincide con este negocio. Los archivos se conservan.',
     );
   if (!selector) {
+    // expo-file-system (new API) requires file:// URIs; SQLite.defaultDatabaseDirectory
+    // is a plain absolute path (/data/user/0/<pkg>/files/SQLite), which throws
+    // "URI is not absolute". Build the URI from the same documents directory instead.
+    // Paths is undefined in Node (regression harness), where the mock supplies the
+    // document directory; the file checks below are skipped only when it is missing.
     if (Platform.OS !== 'web') {
-      // expo-file-system (new API) requires file:// URIs; SQLite.defaultDatabaseDirectory
-      // is a plain absolute path (/data/user/0/<pkg>/files/SQLite), which throws
-      // "URI is not absolute". Build the URI from the same documents directory instead.
-      const folder = new Directory(Paths.document, 'SQLite');
-      const entries = folder.exists ? folder.list() : [];
+      const document = Paths?.document;
+      const folder = document ? new Directory(document, 'SQLite') : null;
+      const entries = folder?.exists ? folder.list() : [];
       if (entries.some((entry) => entry.name.startsWith('mipypos.restored.')))
         throw new Error(
           'Falta el registro de recuperación y existen bases conservadas. No se abrirá una versión antigua; tus archivos necesitan revisión.',
         );
-      if (!new File(folder, 'mipypos.db').exists) {
+      if (folder && !new File(folder, 'mipypos.db').exists) {
         if (anchor || entries.some((entry) => entry.name.startsWith('mipypos.')))
           throw new Error(
             'No se encontró la base instalada. No se creará una base vacía ni se utilizará una copia antigua automáticamente.',

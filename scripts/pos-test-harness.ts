@@ -221,6 +221,7 @@ export function createHarness(overrides: Record<string, unknown> = {}) {
       },
     },
     'expo-file-system': {
+      Paths: { document: 'file:///private/SQLite' },
       Directory: class {
         readonly exists = true;
         list() {

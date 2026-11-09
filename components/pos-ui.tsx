@@ -17,13 +17,11 @@ export function MetricCard({
 }) {
   const color = useThemeColor(tone);
   return (
-    <Card className="min-w-36 flex-1 p-4">
-      <View className="mb-4 flex-row items-center justify-between">
-        <View
-          className={`rounded-xl p-2 ${tone === 'accent' ? 'bg-accent-soft' : tone === 'success' ? 'bg-success-soft' : 'bg-warning-soft'}`}
-        >
-          <Icon color={color} size={20} />
-        </View>
+    <Card className="min-w-36 flex-1 gap-2 p-4">
+      <View
+        className={`self-start rounded-2xl p-2.5 ${tone === 'accent' ? 'bg-accent-soft' : tone === 'success' ? 'bg-success-soft' : 'bg-warning-soft'}`}
+      >
+        <Icon color={color} size={18} />
       </View>
       <Typography.Heading type="h3">{value}</Typography.Heading>
       <Typography.Paragraph type="body-sm" color="muted">
