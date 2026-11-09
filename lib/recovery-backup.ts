@@ -1,6 +1,6 @@
 import * as SQLite from 'expo-sqlite';
 import * as Crypto from 'expo-crypto';
-import { File } from 'expo-file-system';
+import { Directory, File, Paths } from 'expo-file-system';
 import { Platform } from 'react-native';
 import { z } from 'zod';
 import { DATABASE_VERSION } from '@/lib/database-migrations';
@@ -51,8 +51,8 @@ export async function inspectRecoverySnapshot(
     copy.schemaVersion !== DATABASE_VERSION
   )
     throw new Error('Esta copia necesita revisión de compatibilidad antes de recuperarla.');
-  const directory: unknown = SQLite.defaultDatabaseDirectory;
-  if (Platform.OS === 'web' || typeof directory !== 'string' || !directory)
+  const directory = Platform.OS === 'web' ? null : new Directory(Paths.document, 'SQLite');
+  if (!directory)
     throw new Error('Comprueba la copia en el teléfono donde fue creada.');
   if (!new File(directory, copy.fileName).exists)
     throw new Error('No se encontró el archivo de la copia. Su registro se conserva.');

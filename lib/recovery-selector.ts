@@ -1,6 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Directory, File } from 'expo-file-system';
-import * as SQLite from 'expo-sqlite';
+import { Directory, File, Paths } from 'expo-file-system';
 import { Platform } from 'react-native';
 import { z } from 'zod';
 import { loadDatabaseAnchor, reserveDatabaseCreation } from '@/lib/recovery-anchor';
@@ -55,16 +54,16 @@ export async function resolveDatabaseFile(): Promise<{ fileName: string; authori
     );
   if (!selector) {
     if (Platform.OS !== 'web') {
-      const directory: unknown = SQLite.defaultDatabaseDirectory;
-      if (typeof directory !== 'string')
-        throw new Error('No se pudo verificar la carpeta de datos. No se abrirá otra base.');
-      const folder = new Directory(directory);
+      // expo-file-system (new API) requires file:// URIs; SQLite.defaultDatabaseDirectory
+      // is a plain absolute path (/data/user/0/<pkg>/files/SQLite), which throws
+      // "URI is not absolute". Build the URI from the same documents directory instead.
+      const folder = new Directory(Paths.document, 'SQLite');
       const entries = folder.exists ? folder.list() : [];
       if (entries.some((entry) => entry.name.startsWith('mipypos.restored.')))
         throw new Error(
           'Falta el registro de recuperación y existen bases conservadas. No se abrirá una versión antigua; tus archivos necesitan revisión.',
         );
-      if (!new File(directory, 'mipypos.db').exists) {
+      if (!new File(folder, 'mipypos.db').exists) {
         if (anchor || entries.some((entry) => entry.name.startsWith('mipypos.')))
           throw new Error(
             'No se encontró la base instalada. No se creará una base vacía ni se utilizará una copia antigua automáticamente.',
@@ -77,8 +76,7 @@ export async function resolveDatabaseFile(): Promise<{ fileName: string; authori
   if (Platform.OS === 'web')
     throw new Error('La recuperación privada debe completarse en el teléfono.');
   const selected = selector.phase === 'committed' ? selector.candidate : selector.previous;
-  const directory: unknown = SQLite.defaultDatabaseDirectory;
-  if (typeof directory !== 'string' || !new File(directory, selected).exists)
+  if (!new File(new Directory(Paths.document, 'SQLite'), selected).exists)
     throw new Error('No se encontró la base de recuperación activa. No se creará una base vacía.');
   return { fileName: selected, authorityId: selector.authorityId };
 }
