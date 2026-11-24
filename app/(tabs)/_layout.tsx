@@ -8,6 +8,7 @@ import {
   ShoppingCart,
 } from 'lucide-react-native';
 import { useThemeColor } from 'heroui-native';
+import { useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useApp } from '@/lib/app-context';
@@ -17,6 +18,7 @@ import { poster } from '@/lib/branding';
 export default function TabLayout() {
   const { user } = useApp();
   const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
   const background = useThemeColor('background');
   const options = {
     headerStyle: { backgroundColor: poster.navy },
@@ -45,7 +47,11 @@ export default function TabLayout() {
       paddingHorizontal: 1,
       overflow: 'hidden' as const,
     },
-    tabBarLabelStyle: { fontSize: 10, fontWeight: '700' as const },
+    tabBarLabelStyle: {
+      fontSize: 10,
+      fontWeight: '700' as const,
+      ...(width < 480 ? { marginHorizontal: -4 } : {}),
+    },
   };
   return (
     <Tabs screenOptions={options}>
