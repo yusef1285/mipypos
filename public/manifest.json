@@ -1,19 +1,12 @@
 {
-  "name": "MipyPOS",
+  "name": "MipyPOS Minorista",
   "short_name": "MipyPOS",
   "description": "Punto de venta profesional offline y en red local",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "theme_color": "#0F766E",
-  "background_color": "#071A2A",
-  "icons": [
-    {
-      "src": "/icons/mipypos-mark.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
-    }
-  ]
+  "theme_color": "#081B43",
+  "background_color": "#061332",
+  "icons": []
 }

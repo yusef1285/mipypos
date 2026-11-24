@@ -1,25 +1,28 @@
-import { Button, Card, Checkbox, Input, Label, TextField, Typography } from 'heroui-native';
+import {
+  Button,
+  Card,
+  Checkbox,
+  Input,
+  Label,
+  TextField,
+  Typography,
+  useThemeColor,
+} from 'heroui-native';
 import { LockKeyhole } from 'lucide-react-native';
 import { useEffect, useState } from 'react';
 import { Alert, ScrollView, View } from 'react-native';
 import { FadeInDown, FadeInUp } from 'react-native-reanimated';
-import { useUniwind } from 'uniwind';
 
 import { LanConnection } from '@/components/LanConnection';
-import { BrandMark } from '@/components/BrandMark';
+import { PosterBackdrop, PosterBrand } from '@/components/PosterChrome';
 import { Screen } from '@/components/Screen';
 import { AnimatedView } from '@/components/ui/primitives/AnimatedView';
-import { LinearGradient } from '@/components/ui/primitives/LinearGradient';
 import { PasswordChangeRequired, useApp } from '@/lib/app-context';
-
-const LOGIN_GRADIENT = {
-  light: ['#CCEFEB', '#E3F7F3', '#FAFEFD'],
-  dark: ['#0C332E', '#0D2422', '#0F1A19'],
-} as const;
+import { APP_NAME, EDITION, poster } from '@/lib/branding';
 
 export default function LoginScreen() {
   const { login, rememberedUsername } = useApp();
-  const { theme } = useUniwind();
+  const buttonForeground = useThemeColor('accent-foreground');
   const [username, setUsername] = useState(rememberedUsername);
   const [password, setPassword] = useState('');
   const [remember, setRemember] = useState(Boolean(rememberedUsername));
@@ -51,32 +54,35 @@ export default function LoginScreen() {
     }
   };
   return (
-    <Screen keyboard safeTop scroll={false}>
-      <View className="flex-1">
-        <LinearGradient
-          colors={LOGIN_GRADIENT[theme === 'dark' ? 'dark' : 'light']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 0.35, y: 1 }}
-          className="absolute inset-0"
-        />
-        <View className="absolute -right-24 -top-24 h-80 w-80 rounded-full bg-accent opacity-[0.1]" />
-        <View className="absolute -left-28 top-1/3 h-64 w-64 rounded-full bg-accent opacity-[0.08]" />
-        <View className="absolute -bottom-24 right-4 h-56 w-56 rounded-full bg-success opacity-[0.07]" />
+    <Screen keyboard safeTop scroll={false} branded>
+      <View className="flex-1 overflow-hidden">
+        <PosterBackdrop variant="full" />
         <ScrollView
           className="flex-1"
-          contentContainerClassName="web:mx-auto web:w-full web:max-w-md grow justify-center gap-5 px-4 py-8"
+          contentContainerClassName="web:mx-auto web:w-full web:max-w-md grow justify-center gap-4 px-4 py-7"
           keyboardShouldPersistTaps="handled"
         >
           <AnimatedView
             entering={FadeInDown.springify().damping(15)}
-            className="items-center gap-3"
+            className="items-center gap-2 pb-2"
           >
-            <BrandMark size={66} />
-            <Typography.Heading type="h1">MipyPOS</Typography.Heading>
-            <Typography.Paragraph color="muted">Punto de venta en red local</Typography.Paragraph>
+            <PosterBrand large />
+            <Typography.Paragraph
+              type="body-sm"
+              style={{ color: poster.cyan, fontWeight: '700', letterSpacing: 1 }}
+            >
+              {EDITION.toUpperCase()}
+            </Typography.Paragraph>
+            <Typography.Paragraph style={{ color: poster.white, fontWeight: '700' }}>
+              Tu negocio en tus manos
+            </Typography.Paragraph>
+            <Typography.Paragraph type="body-sm" style={{ color: poster.muted }}>
+              Punto de venta en red local
+            </Typography.Paragraph>
           </AnimatedView>
           <AnimatedView entering={FadeInUp.springify().delay(150)}>
             <Card className="gap-5 p-5">
+              <Typography.Heading type="h3">Acceso a {APP_NAME}</Typography.Heading>
               <TextField>
                 <Label>Usuario</Label>
                 <Input
@@ -138,7 +144,7 @@ export default function LoginScreen() {
                 isDisabled={!username || !password || loading || (mustChange && !newPassword)}
                 onPress={() => void submit()}
               >
-                <LockKeyhole color="white" size={18} />
+                <LockKeyhole color={buttonForeground} size={18} />
                 <Button.Label>
                   {loading ? 'Ingresando…' : mustChange ? 'Guardar y entrar' : 'Iniciar sesión'}
                 </Button.Label>

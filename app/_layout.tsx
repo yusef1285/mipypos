@@ -10,7 +10,7 @@ import {
   useFonts,
 } from '@expo-google-fonts/inter';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
-import { Platform, Pressable, Text, View } from 'react-native';
+import { Platform, Pressable, StatusBar, Text, View } from 'react-native';
 import { useEffect } from 'react';
 import * as DevClient from 'expo-dev-client';
 import { HeroUINativeProvider, useThemeColor } from 'heroui-native';
@@ -29,6 +29,7 @@ import { reportErrorToParent } from '@/lib/reportPreviewError';
 import { InstallPrompt } from '@/components/InstallPrompt';
 import { AppProvider } from '@/lib/app-context';
 import { registerColorTokens } from '@/lib/registerColorTokens';
+import { poster } from '@/lib/branding';
 
 registerColorTokens();
 installGlobalErrorHandler();
@@ -57,7 +58,7 @@ function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
       <Pressable
         accessibilityRole="button"
         onPress={() => void retry()}
-        style={{ backgroundColor: '#0f766e', borderRadius: 12, padding: 14 }}
+        style={{ backgroundColor: '#1754BB', borderRadius: 12, padding: 14 }}
       >
         <Text style={{ color: '#ffffff', fontSize: 16, textAlign: 'center' }}>Reintentar</Text>
       </Pressable>
@@ -68,14 +69,15 @@ function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
 export { ErrorBoundary };
 
 function AppStack() {
-  const [background, foreground] = useThemeColor(['background', 'foreground']);
+  const background = useThemeColor('background');
   return (
     <Stack
       screenOptions={{
         headerShown: false,
         contentStyle: { backgroundColor: background },
-        headerStyle: { backgroundColor: background },
-        headerTintColor: foreground,
+        headerStyle: { backgroundColor: poster.navy },
+        headerTintColor: poster.white,
+        headerTitleStyle: { fontWeight: '700' },
         headerShadowVisible: false,
       }}
     >
@@ -220,6 +222,7 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <HeroUINativeProvider>
         <AppProvider>
+          <StatusBar barStyle="light-content" />
           <AppStack />
           <AppLock />
           <InstallPrompt />

@@ -300,7 +300,7 @@ function createWindow() {
     height: 820,
     minWidth: 900,
     minHeight: 600,
-    title: 'MipyPOS',
+    title: 'MipyPOS Minorista',
     backgroundColor: '#ffffff',
     icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {

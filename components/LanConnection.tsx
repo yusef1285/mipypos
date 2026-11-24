@@ -1,5 +1,5 @@
 import * as Haptics from 'expo-haptics';
-import { Button, Card, Typography } from 'heroui-native';
+import { Button, Card, Typography, useThemeColor } from 'heroui-native';
 import { QrCode, Wifi } from 'lucide-react-native';
 import { useEffect, useState } from 'react';
 import { Platform, View } from 'react-native';
@@ -41,6 +41,7 @@ import { hasOutboxSales, outboxAuthorities } from '@/lib/network/sale-outbox';
 import { isDesktop } from '@/lib/desktop';
 
 export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
+  const accent = useThemeColor('accent');
   const {
     networkConfig,
     configureNetwork,
@@ -292,7 +293,7 @@ export function LanConnection({ allowHost = false }: { allowHost?: boolean }) {
   return (
     <Card className="gap-4 p-4">
       <View className="flex-row items-center gap-2">
-        <Wifi size={20} />
+        <Wifi color={accent} size={20} />
         <Typography.Heading type="h4">Red local</Typography.Heading>
       </View>
       <Typography.Paragraph>
