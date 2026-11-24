@@ -50,7 +50,7 @@ export default function TabLayout() {
     tabBarLabelStyle: {
       fontSize: 10,
       fontWeight: '700' as const,
-      ...(width < 480 ? { marginHorizontal: -4 } : {}),
+      ...(width < 480 ? { maxWidth: Math.floor((width - 4) / 6) - 4 } : {}),
     },
   };
   return (
