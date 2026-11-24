@@ -9,21 +9,23 @@ export function MetricCard({
   value,
   icon: Icon,
   tone = 'accent',
+  compact = false,
 }: {
   label: string;
   value: string;
   icon: LucideIcon;
   tone?: 'accent' | 'success' | 'warning';
+  compact?: boolean;
 }) {
   const color = useThemeColor(tone);
   return (
-    <Card className="min-w-36 flex-1 gap-2 p-4">
+    <Card className={compact ? 'min-w-24 flex-1 gap-1 p-2.5' : 'min-w-36 flex-1 gap-2 p-4'}>
       <View
-        className={`self-start rounded-2xl p-2.5 ${tone === 'accent' ? 'bg-accent-soft' : tone === 'success' ? 'bg-success-soft' : 'bg-warning-soft'}`}
+        className={`self-start rounded-xl ${compact ? 'p-1.5' : 'p-2.5'} ${tone === 'accent' ? 'bg-accent-soft' : tone === 'success' ? 'bg-success-soft' : 'bg-warning-soft'}`}
       >
-        <Icon color={color} size={18} />
+        <Icon color={color} size={compact ? 15 : 18} />
       </View>
-      <Typography.Heading type="h3">{value}</Typography.Heading>
+      <Typography.Heading type={compact ? 'h4' : 'h3'}>{value}</Typography.Heading>
       <Typography.Paragraph type="body-sm" color="muted">
         {label}
       </Typography.Paragraph>

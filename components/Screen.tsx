@@ -11,6 +11,7 @@ import {
 
 import { useApp } from '@/lib/app-context';
 import { SafeAreaView } from '@/components/ui/primitives/SafeAreaView';
+import { poster } from '@/lib/branding';
 
 interface ScreenProps extends PropsWithChildren {
   title?: string;
@@ -19,6 +20,7 @@ interface ScreenProps extends PropsWithChildren {
   keyboard?: boolean;
   safeTop?: boolean;
   scroll?: boolean;
+  branded?: boolean;
 }
 
 export function Screen({
@@ -29,11 +31,12 @@ export function Screen({
   keyboard = false,
   safeTop = false,
   scroll = true,
+  branded = false,
 }: ScreenProps) {
   const { license, licenseMode, user } = useApp();
   const content = scroll ? (
     <ScrollView
-      className="flex-1"
+      className="bg-background flex-1"
       contentContainerClassName="gap-5 px-4 pb-8 pt-4 web:mx-auto web:w-full web:max-w-5xl"
       keyboardShouldPersistTaps="handled"
       refreshControl={
@@ -66,7 +69,11 @@ export function Screen({
     children
   );
   return (
-    <SafeAreaView edges={safeTop ? ['top', 'bottom'] : ['bottom']} className="bg-background flex-1">
+    <SafeAreaView
+      edges={safeTop ? ['top', 'bottom'] : ['bottom']}
+      className="bg-background flex-1"
+      style={branded ? { backgroundColor: poster.navy } : undefined}
+    >
       {keyboard ? (
         <KeyboardAvoidingView
           className="flex-1"

@@ -1,19 +1,24 @@
-import { router } from 'expo-router';
+import { router, type Href } from 'expo-router';
 import { Button, Card, Chip, Typography, useThemeColor } from 'heroui-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import {
   Banknote,
   Boxes,
+  type LucideIcon,
   ChartNoAxesCombined,
   CircleAlert,
   Package,
   ShoppingCart,
-  Store,
 } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
-import { View } from 'react-native';
+import { Alert, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { FadeInDown, FadeInUp } from 'react-native-reanimated';
 
+import {
+  PosterBackdrop,
+  PosterBrand,
+  PosterModule,
+  type PosterTone,
+} from '@/components/PosterChrome';
 import { MetricCard, SectionTitle } from '@/components/pos-ui';
 import { AnimatedView } from '@/components/ui/primitives/AnimatedView';
 import { Screen } from '@/components/Screen';
@@ -22,13 +27,56 @@ import { usePosRepository } from '@/lib/use-pos-repository';
 import { money } from '@/lib/format';
 import type { Producto } from '@/lib/models';
 import type { getHomeSummary as homeSummary } from '@/lib/database';
-import { Alert } from 'react-native';
-import { canAccess } from '@/lib/permissions';
+import { canAccess, type ModuleKey } from '@/lib/permissions';
 import { hoursSinceArchiveShare } from '@/lib/backup-reminder';
+import { poster } from '@/lib/branding';
+
+const quickActions: Array<{
+  module: ModuleKey;
+  label: string;
+  description: string;
+  icon: LucideIcon;
+  tone: PosterTone;
+  href: Href;
+}> = [
+  {
+    module: 'sales',
+    label: 'Venta nueva',
+    description: 'Empieza un cobro',
+    icon: ShoppingCart,
+    tone: 'blue',
+    href: '/(tabs)/sales',
+  },
+  {
+    module: 'inventory',
+    label: 'Inventario',
+    description: 'Consulta existencias',
+    icon: Boxes,
+    tone: 'green',
+    href: '/(tabs)/inventory',
+  },
+  {
+    module: 'cash',
+    label: 'Caja',
+    description: 'Gestiona tu turno',
+    icon: Banknote,
+    tone: 'orange',
+    href: '/(tabs)/cash',
+  },
+  {
+    module: 'reports',
+    label: 'Reportes',
+    description: 'Revisa tus resultados',
+    icon: ChartNoAxesCombined,
+    tone: 'purple',
+    href: '/(tabs)/reports',
+  },
+];
 
 export default function Home() {
   const { user, session, licenseMode, refresh } = useApp();
   const accent = useThemeColor('accent');
+  const { width, fontScale } = useWindowDimensions();
   const { getHomeSummary, listProducts, listProductExtras } = usePosRepository();
   const [backupHours, setBackupHours] = useState(0);
   const [productCount, setProductCount] = useState<number | null>(null);
@@ -58,57 +106,80 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, [load]);
   if (!user) return null;
+  const actions = quickActions.filter(({ module }) => canAccess(user.role, module));
+  const columns =
+    width / Math.max(1, fontScale) >= 760 ? 4 : width / Math.max(1, fontScale) >= 310 ? 2 : 1;
+  const actionRows = Array.from({ length: Math.ceil(actions.length / columns) }, (_, i) =>
+    actions.slice(i * columns, (i + 1) * columns),
+  );
   return (
-    <Screen onRefresh={load} safeTop>
+    <Screen onRefresh={load} branded safeTop>
       <AnimatedView entering={FadeInDown.springify().damping(15)}>
-        <LinearGradient
-          colors={['#0F766E', '#064E3B']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          className="relative overflow-hidden rounded-3xl p-5"
-        >
-          <View className="absolute -right-16 -top-20 h-56 w-56 rounded-full bg-white opacity-[0.07]" />
-          <View className="absolute -bottom-24 -left-10 h-48 w-48 rounded-full bg-white opacity-[0.05]" />
-          <View className="relative mb-5 flex-row items-start justify-between">
-            <View className="flex-1">
-              <Typography.Paragraph className="text-white/80">
-                Hola, {user.username}
-              </Typography.Paragraph>
-              <Typography.Heading type="h2" className="text-white">
-                Resumen de hoy
-              </Typography.Heading>
-            </View>
-            <View className="rounded-2xl bg-white/15 p-3">
-              <Store color="white" size={24} />
+        <View style={styles.hero}>
+          <PosterBackdrop />
+          <View style={styles.heroTop}>
+            <PosterBrand />
+            <View style={styles.edition}>
+              <Text style={styles.editionLabel}>MINORISTA</Text>
             </View>
           </View>
-          <View className="relative flex-row items-center justify-between">
-            <View className="rounded-full bg-white/20 px-3 py-1">
-              <Typography.Paragraph type="body-sm" className="text-white">
-                {session ? 'Caja abierta' : 'Caja cerrada'}
-              </Typography.Paragraph>
-            </View>
-            <Typography.Paragraph type="body-sm" className="text-white">
-              {licenseMode === 'pro' ? 'Licencia Pro' : 'Modo demo'}
-            </Typography.Paragraph>
+          <View style={styles.heroMain}>
+            <Text style={styles.heroHello}>Hola, {user.username}</Text>
+            <Text accessibilityRole="header" style={styles.heroTitle}>
+              Resumen de hoy
+            </Text>
           </View>
-        </LinearGradient>
+          <View style={styles.heroStatus}>
+            <View style={styles.statusChip}>
+              <View
+                style={[styles.statusDot, { backgroundColor: session ? '#89F2AA' : poster.yellow }]}
+              />
+              <Text style={styles.statusText}>{session ? 'Caja abierta' : 'Caja cerrada'}</Text>
+            </View>
+            <View style={styles.statusChip}>
+              <Text style={styles.statusText}>
+                {licenseMode === 'pro' ? 'Licencia Pro' : 'Modo demo'}
+              </Text>
+            </View>
+          </View>
+        </View>
       </AnimatedView>
-      <View className="flex-row flex-wrap gap-3">
-        <AnimatedView entering={FadeInUp.springify().delay(120)} className="min-w-36 flex-1">
-          <MetricCard label="Ventas" value={money(report?.totalSales ?? 0)} icon={ShoppingCart} />
+      {actions.length ? (
+        <AnimatedView entering={FadeInUp.springify().delay(100)} className="gap-2.5">
+          <SectionTitle>Accesos rápidos</SectionTitle>
+          {actionRows.map((row) => (
+            <View key={row[0].module} style={styles.actionRow}>
+              {row.map(({ module, href, ...action }) => (
+                <PosterModule key={module} {...action} onPress={() => router.push(href)} />
+              ))}
+            </View>
+          ))}
         </AnimatedView>
-        <AnimatedView entering={FadeInUp.springify().delay(200)} className="min-w-36 flex-1">
+      ) : null}
+      <View className="gap-2.5">
+        <SectionTitle>Indicadores del día</SectionTitle>
+        <View className="flex-row flex-wrap gap-2.5">
           <MetricCard
+            compact
+            label="Ventas"
+            value={money(report?.totalSales ?? 0)}
+            icon={ShoppingCart}
+          />
+          <MetricCard
+            compact
             label="Operaciones"
             value={String(report?.salesCount ?? 0)}
             icon={ChartNoAxesCombined}
             tone="success"
           />
-        </AnimatedView>
-        <AnimatedView entering={FadeInUp.springify().delay(280)} className="min-w-36 flex-1">
-          <MetricCard label="Stock bajo" value={String(low.length)} icon={CircleAlert} tone="warning" />
-        </AnimatedView>
+          <MetricCard
+            compact
+            label="Stock bajo"
+            value={String(low.length)}
+            icon={CircleAlert}
+            tone="warning"
+          />
+        </View>
       </View>
       {user.role === 'admin' && productCount === 0 ? (
         <Card className="gap-2 p-4">
@@ -144,54 +215,12 @@ export default function Home() {
           </Button>
         </Card>
       ) : null}
-      <AnimatedView entering={FadeInUp.springify().delay(200)}>
-        <SectionTitle>Accesos rápidos</SectionTitle>
-      </AnimatedView>
-      <AnimatedView
-        entering={FadeInUp.springify().delay(280)}
-        className="flex-row flex-wrap gap-3"
-      >
-        {canAccess(user.role, 'sales') ? (
-          <Button
-            className="min-w-36 flex-1"
-            variant="secondary"
-            onPress={() => router.push('/(tabs)/sales')}
-          >
-            <ShoppingCart color={accent} size={18} />
-            <Button.Label>Venta nueva</Button.Label>
-          </Button>
-        ) : null}
-        {canAccess(user.role, 'cash') ? (
-          <Button
-            className="min-w-36 flex-1"
-            variant="secondary"
-            onPress={() => router.push('/(tabs)/cash')}
-          >
-            <Banknote color={accent} size={18} />
-            <Button.Label>Caja</Button.Label>
-          </Button>
-        ) : null}
-        {canAccess(user.role, 'inventory') ? (
-          <Button
-            className="min-w-36 flex-1"
-            variant="secondary"
-            onPress={() => router.push('/(tabs)/inventory')}
-          >
-            <Boxes color={accent} size={18} />
-            <Button.Label>Inventario</Button.Label>
-          </Button>
-        ) : null}
-        {canAccess(user.role, 'products') ? (
-          <Button
-            className="min-w-36 flex-1"
-            variant="secondary"
-            onPress={() => router.push('/products')}
-          >
-            <Package color={accent} size={18} />
-            <Button.Label>Productos</Button.Label>
-          </Button>
-        ) : null}
-      </AnimatedView>
+      {canAccess(user.role, 'products') ? (
+        <Button className="self-start" variant="secondary" onPress={() => router.push('/products')}>
+          <Package color={accent} size={18} />
+          <Button.Label>Productos</Button.Label>
+        </Button>
+      ) : null}
       {low.length ? (
         <>
           <SectionTitle badge={low.length}>Productos con stock bajo</SectionTitle>
@@ -210,3 +239,48 @@ export default function Home() {
     </Screen>
   );
 }
+
+const styles = StyleSheet.create({
+  hero: {
+    position: 'relative',
+    overflow: 'hidden',
+    borderRadius: 23,
+    borderWidth: 1,
+    borderColor: poster.chromeBorder,
+    backgroundColor: poster.navy,
+    padding: 17,
+    gap: 14,
+  },
+  heroTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 7,
+  },
+  edition: {
+    borderRadius: 7,
+    backgroundColor: poster.yellow,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  editionLabel: { color: poster.navyDeep, fontSize: 10, fontWeight: '900', letterSpacing: 0.85 },
+  heroMain: { gap: 1 },
+  heroHello: { color: poster.muted, fontSize: 14, fontWeight: '600' },
+  heroTitle: { color: poster.white, fontSize: 28, fontWeight: '800', letterSpacing: -0.65 },
+  heroStatus: { flexDirection: 'row', gap: 7, flexWrap: 'wrap' },
+  statusChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: '#6387BB',
+    borderRadius: 10,
+    backgroundColor: '#102854',
+  },
+  statusText: { color: poster.white, fontSize: 12, fontWeight: '600' },
+  statusDot: { width: 7, height: 7, borderRadius: 10 },
+  actionRow: { flexDirection: 'row', gap: 10 },
+});

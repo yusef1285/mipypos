@@ -52,8 +52,7 @@ export async function inspectRecoverySnapshot(
   )
     throw new Error('Esta copia necesita revisión de compatibilidad antes de recuperarla.');
   const directory = Platform.OS === 'web' ? null : new Directory(Paths.document, 'SQLite');
-  if (!directory)
-    throw new Error('Comprueba la copia en el teléfono donde fue creada.');
+  if (!directory) throw new Error('Comprueba la copia en el teléfono donde fue creada.');
   if (!new File(directory, copy.fileName).exists)
     throw new Error('No se encontró el archivo de la copia. Su registro se conserva.');
   const source = await SQLite.openDatabaseAsync(copy.fileName, { useNewConnection: true });
