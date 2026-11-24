@@ -5,7 +5,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { BrandMark } from '@/components/BrandMark';
 import { LinearGradient } from '@/components/ui/primitives/LinearGradient';
 import { Path, Svg } from '@/components/ui/primitives/Svg';
-import { poster } from '@/lib/branding';
+import { APP_NAME, poster } from '@/lib/branding';
 
 const moduleColors = {
   blue: { colors: ['#1058C5', '#082E80'], detail: '#AEE8FF', border: '#4385E7' },
@@ -80,7 +80,7 @@ export function PosterBackdrop({ variant = 'panel' }: { variant?: 'panel' | 'ful
 
 export function PosterBrand({ large = false }: { large?: boolean }) {
   return (
-    <View style={styles.brand} accessible accessibilityLabel="MipyPOS">
+    <View style={styles.brand} accessible accessibilityLabel={APP_NAME}>
       <BrandMark size={large ? 54 : 42} />
       <View>
         <Text style={[styles.wordmark, large && styles.wordmarkLarge]}>

@@ -29,7 +29,7 @@ import type { Producto } from '@/lib/models';
 import type { getHomeSummary as homeSummary } from '@/lib/database';
 import { canAccess, type ModuleKey } from '@/lib/permissions';
 import { hoursSinceArchiveShare } from '@/lib/backup-reminder';
-import { poster } from '@/lib/branding';
+import { EDITION, poster } from '@/lib/branding';
 
 const quickActions: Array<{
   module: ModuleKey;
@@ -120,7 +120,7 @@ export default function Home() {
           <View style={styles.heroTop}>
             <PosterBrand />
             <View style={styles.edition}>
-              <Text style={styles.editionLabel}>MINORISTA</Text>
+              <Text style={styles.editionLabel}>{EDITION.toUpperCase()}</Text>
             </View>
           </View>
           <View style={styles.heroMain}>

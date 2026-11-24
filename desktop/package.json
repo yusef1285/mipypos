@@ -47,7 +47,7 @@
       "target": [
         "nsis"
       ],
-      "icon": "build/icon.png",
+      "icon": "build/icon.ico",
       "artifactName": "MipyPOS-Setup-${version}.${ext}"
     },
     "nsis": {

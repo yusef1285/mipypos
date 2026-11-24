@@ -1,3 +1,6 @@
+export const EDITION = 'Minorista';
+export const APP_NAME = `MipyPOS ${EDITION}`;
+
 export const CREATOR_NAME = 'Alex Yusef';
 export const CREATOR_WHATSAPP = '+52 444 140 0537';
 export const CREATOR_WHATSAPP_URL = 'https://wa.me/524441400537';

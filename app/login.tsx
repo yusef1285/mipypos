@@ -18,7 +18,7 @@ import { PosterBackdrop, PosterBrand } from '@/components/PosterChrome';
 import { Screen } from '@/components/Screen';
 import { AnimatedView } from '@/components/ui/primitives/AnimatedView';
 import { PasswordChangeRequired, useApp } from '@/lib/app-context';
-import { poster } from '@/lib/branding';
+import { APP_NAME, EDITION, poster } from '@/lib/branding';
 
 export default function LoginScreen() {
   const { login, rememberedUsername } = useApp();
@@ -67,6 +67,12 @@ export default function LoginScreen() {
             className="items-center gap-2 pb-2"
           >
             <PosterBrand large />
+            <Typography.Paragraph
+              type="body-sm"
+              style={{ color: poster.cyan, fontWeight: '700', letterSpacing: 1 }}
+            >
+              {EDITION.toUpperCase()}
+            </Typography.Paragraph>
             <Typography.Paragraph style={{ color: poster.white, fontWeight: '700' }}>
               Tu negocio en tus manos
             </Typography.Paragraph>
@@ -76,7 +82,7 @@ export default function LoginScreen() {
           </AnimatedView>
           <AnimatedView entering={FadeInUp.springify().delay(150)}>
             <Card className="gap-5 p-5">
-              <Typography.Heading type="h3">Acceso a MipyPOS</Typography.Heading>
+              <Typography.Heading type="h3">Acceso a {APP_NAME}</Typography.Heading>
               <TextField>
                 <Label>Usuario</Label>
                 <Input

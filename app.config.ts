@@ -12,7 +12,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
 
   return {
     ...config,
-    name: 'MipyPOS',
+    name: 'MipyPOS Minorista',
     slug: 'mipypos',
     version: process.env.BILT_APP_VERSION ?? pkg.version,
     orientation: 'portrait',
@@ -43,8 +43,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       package: process.env.BILT_ANDROID_PACKAGE ?? 'me.bilt.mipypos',
       icon: './assets/logo_mipypos_512.png',
       adaptiveIcon: {
-        foregroundImage: './assets/logo_mipypos_512.png',
-        backgroundColor: '#071A2A',
+        foregroundImage: './assets/logo_mipypos_adaptive.png',
+        backgroundColor: '#061332',
       },
     },
     web: {
